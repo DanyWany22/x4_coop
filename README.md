@@ -7,7 +7,8 @@ movement foundation everything else would build on.
 
 Status (2026-10-08): **ghost mode works in-game.** In the first session (Terran start, v9.00) the
 ghost spawned and flew in formation. The self-test found that `SetObjectSectorPos` takes
-**degrees**, and the mod adapts automatically. Networking between two real players is not tested
+**degrees**, and the mod adapts automatically. The probe measured the engine's rotation
+convention as **YXZ+--** (pitch and roll opposite to right-handed maths), now the default. Networking between two real players is not tested
 yet. Offline tests: see [Developer tests](#developer-tests).
 
 ## How it works
@@ -121,16 +122,21 @@ tell the conventions apart.
 
 The offline tests can't answer these; one in-game session can:
 
-Confirmed in the first session: the proxy spawns, the self-test passes (angles in degrees), and
-the ghost follows you. Still open:
+Confirmed in the first sessions: the proxy spawns, the self-test passes (angles in degrees), the
+ghost follows you, the engine keeps it exactly where it's put (no physics fight), chat works, and
+the MD fallback mover is much worse than the Lua one. Still open:
 
 1. **Probe line**: `engine rotation convention is …`. If it says ambiguous, fly with more
    pitch and roll. If it says `no convention fits`, send the raw numbers.
-2. **`health:` lines** (every 15 s while a proxy exists): distance to you, snapshots/s, and how
-   far the engine moved the proxy away from where the mod put it. A large number there means
-   the physics is fighting the mover.
-3. **Smoothness and FPS** of the ghost at speed, in both backends (`/x4coop backend md` to compare).
-4. Anything odd: engine trails missing, collisions, warnings about a ship without a pilot.
+2. **`health:` lines** (every 15 s while a proxy exists): distance to you, snapshots/s, Lua
+   updates/s and the longest gap between them, the average and maximum prediction correction,
+   and how far the engine moves the proxy between updates. With `engine_fx` on, expect about
+   speed × frame time there. If the ghost stutters, these numbers show whether it's frame gaps
+   (long gaps) or prediction (large corrections).
+3. **Engine trails** (experiment, `engine_fx` 1 by default): the proxy also gets matching physics
+   velocity. Compare with `/x4coop set engine_fx 0`.
+4. **Smoothness and FPS** of the ghost at speed, in both backends (`/x4coop backend md` to compare).
+5. Anything odd: collisions, warnings about a ship without a pilot.
 
 Paste the `[x4coop]` and `x4coop:` log lines back into the conversation that's developing this.
 
@@ -139,7 +145,10 @@ Paste the `[x4coop]` and `x4coop:` log lines back into the conversation that's d
 * Only movement is shared. Universes are separate (NPCs and stations differ per player).
 * The proxy is player-owned so it shows as friendly, which also means it appears in your
   property list. A dedicated faction would be cleaner.
-* No damage, weapons, docking, highway or travel-drive visuals yet. SETA (time acceleration)
+* Weapons and damage are not synced yet. The game offers `event_weapon_fired` (detects your
+  shots) and the AI action `shoot_at` (makes a ship fire, but needs a pilot and a target in your
+  universe). Whether a partner's shots should be cosmetic or do damage is the next design question.
+* No docking, highway or travel-drive visuals yet. SETA (time acceleration)
   is not synchronised.
 * One partner at a time. With `--password`, packets are authenticated but not encrypted, so
   positions are visible to anyone on the path. A VPN is still the better option.

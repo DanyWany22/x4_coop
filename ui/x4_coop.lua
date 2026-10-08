@@ -54,7 +54,7 @@ ffi.cdef[[
 local config = {
 	mode = "ghost",           -- "ghost" (offline test), "net" (needs the bridge), "off"; chat choice overrides per save
 	backend = "auto",         -- "lua", "md" or "auto"
-	send_rate = 20,           -- snapshots per second
+	send_rate = 30,           -- snapshots per second (limited by frame rate)
 	predict = 1,              -- 1: dead-reckon the partner to the estimated present; 0: show them interp_delay in the past
 	interp_delay = 0.10,      -- s, jitter buffer used when predict is 0
 	max_extrapolation = 0.5,  -- s, never dead-reckon further than this
@@ -65,6 +65,8 @@ local config = {
 	md_snap_distance = 50,    -- m, md backend warps when further off than this
 	md_snap_angle = 0.15,     -- rad, md backend warps when rotated further off than this
 	md_gain = 2.0,            -- 1/s, md backend: velocity correction per metre of error
+	engine_fx = 1,            -- 1: also give the proxy matching physics velocity (experiment: engine effects,
+	engine_fx_rate = 4,       --    covers frames without a Lua update); commands per second
 	ghost_latency = 0.12,     -- s, simulated one-way latency in ghost mode
 	ghost_jitter = 0.03,      -- s, extra random delay per snapshot
 	ghost_loss = 0.0,         -- 0..1, fraction of snapshots dropped
@@ -103,7 +105,8 @@ end
 local AXIS = { X = 1, Y = 2, Z = 3 }
 local EVEN_ORDER = { XYZ = true, YZX = true, ZXY = true }
 local ORDERS = { "YXZ", "YZX", "XYZ", "XZY", "ZXY", "ZYX" }
-local DEFAULT_CONV = { order = "YXZ", sy = 1, sp = 1, sr = 1 }
+-- Measured in-game (v9.00, 2026-10-08): pitch and roll turn the opposite way to right-handed maths.
+local DEFAULT_CONV = { order = "YXZ", sy = 1, sp = -1, sr = -1 }
 
 local function conv_name(c)
 	return c.order .. (c.sy > 0 and "+" or "-") .. (c.sp > 0 and "+" or "-") .. (c.sr > 0 and "+" or "-")
@@ -290,6 +293,7 @@ local function reset()
 		backend = nil,          -- resolved backend: "lua" or "md" (nil while auto is undecided)
 		lua_degrees = false,    -- set if SetObjectSectorPos turns out to take degrees
 		ghost = { queue = {} },
+		health = { frames = 0, gap_max = 0, corr_sum = 0, corr_n = 0, corr_max = 0 },
 		net = { api = nil, status = "idle", reading = false, connected = false, retry_at = 0, last_ping = -1e9, rtt = nil },
 	}
 end
@@ -332,7 +336,7 @@ local function local_tick(now)
 		L.sector, L.prev = sector, nil
 		L.sector_macro = GetComponentData(to64(sector), "macro")
 	end
-	if not L.sector_macro or not L.ship_macro or now - L.last_send < 1 / config.send_rate then
+	if not L.sector_macro or not L.ship_macro or now - L.last_send < 1 / config.send_rate - 0.004 then
 		return nil
 	end
 	local p = C.GetObjectPositionInSector(ship)
@@ -669,6 +673,9 @@ local function drive_lua(now, dt, target)
 	else
 		-- Move with the target's velocity, then blend away the remaining error.
 		local k = 1 - math.exp(-dt / config.smoothing)
+		local H = S.health
+		local miss = math.sqrt((D.x + target.vx * dt - target.x) ^ 2 + (D.y + target.vy * dt - target.y) ^ 2 + (D.z + target.vz * dt - target.z) ^ 2)
+		H.corr_sum, H.corr_n, H.corr_max = H.corr_sum + miss, H.corr_n + 1, math.max(H.corr_max, miss)
 		D.x = D.x + target.vx * dt
 		D.y = D.y + target.vy * dt
 		D.z = D.z + target.vz * dt
@@ -678,6 +685,10 @@ local function drive_lua(now, dt, target)
 		D.q = slerp(D.q, target.q, k)
 	end
 	P.shown = D
+	if config.engine_fx == 1 and now - (P.last_fx or 0) >= 1 / config.engine_fx_rate then
+		P.last_fx = now
+		request("velocity", { target.vx, target.vy, target.vz })
+	end
 	if P.last_cmd then
 		local cur = C.GetObjectPositionInSector(P.id)
 		local dev = math.sqrt((cur.x - P.last_cmd[1]) ^ 2 + (cur.y - P.last_cmd[2]) ^ 2 + (cur.z - P.last_cmd[3]) ^ 2)
@@ -706,12 +717,16 @@ local function health_report(now, backend)
 	local P, R = S.proxy, S.rem
 	if now < (P.report_at or 0) then return end
 	local span = now - (P.report_from or now)
+	local H = S.health
 	if span > 0 then
-		log("health: proxy %s via %s backend, partner %s | %.1f snapshots/s | engine kept it within %s of where it was put",
+		log("health: proxy %s via %s backend, partner %s | %.1f snapshots/s | %.0f updates/s, longest gap %.0f ms"
+			.. " | corrections avg %.2f m, max %.2f m | engine moved it up to %s from where it was put (engine_fx %d)",
 			P.state, backend, partner_whereabouts() or "?", ((R.count or 0) - (P.report_count or 0)) / span,
-			P.max_dev and string.format("%.1f m", P.max_dev) or "n/a")
+			H.frames / span, H.gap_max * 1000, H.corr_n > 0 and H.corr_sum / H.corr_n or 0, H.corr_max,
+			P.max_dev and string.format("%.1f m", P.max_dev) or "n/a", config.engine_fx)
 	end
 	P.report_at, P.report_from, P.report_count, P.max_dev = now + 15, now, R.count or 0, nil
+	S.health = { frames = 0, gap_max = 0, corr_sum = 0, corr_n = 0, corr_max = 0 }
 end
 
 local function drive_md(now, target)
@@ -860,7 +875,9 @@ local function on_probe_result()
 		P.done = true
 		log("probe: no convention fits (best %s, error %.3f); keeping %s. raw: %s",
 			conv_name(conv), err, conv_name(S.conv), table.concat(p, ", "))
-	elseif runner_up > 0.2 then
+	elseif err < 0.001 and runner_up > math.max(0.004, 10 * err) then
+		-- md's vectors are exact, so an exact fit with a clearly worse runner-up decides it, even when
+		-- the runner-up is close (e.g. a roll-sign difference while the player hardly rolls).
 		P.done, P.measured, S.conv = true, true, conv
 		-- Buffered rotations were derived with the old convention.
 		local prev
@@ -995,6 +1012,8 @@ local function on_update()
 	local now = getElapsedTime()
 	local dt = S.last_frame and math.min(now - S.last_frame, 0.25) or 0
 	S.last_frame = now
+	local H = S.health
+	H.frames, H.gap_max = H.frames + 1, math.max(H.gap_max, dt)
 	local ok, err = pcall(tick, now, dt)
 	if not ok and now - S.last_error_at > 5 then
 		S.last_error_at = now

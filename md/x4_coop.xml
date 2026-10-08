@@ -156,6 +156,23 @@
         </cue>
 
         <!--
+          engine_fx experiment: give the proxy (moved every frame by Lua) matching physics velocity, so the
+          engine treats it as moving and it keeps drifting through frames without a Lua update.
+          param3: [vx, vy, vz] in m/s, sector axes
+        -->
+        <cue name="OnVelocity" instantiate="true">
+          <conditions>
+            <event_ui_triggered screen="'x4coop'" control="'velocity'"/>
+            <check_value value="@Root.$Proxy.isoperational"/>
+          </conditions>
+          <actions>
+            <set_object_velocity object="Root.$Proxy" constantvel="true">
+              <linear x="event.param3.{1}" y="event.param3.{2}" z="event.param3.{3}"/>
+            </set_object_velocity>
+          </actions>
+        </cue>
+
+        <!--
           Rotation-convention probe. Lua knows yaw/pitch/roll but not which axis order and signs the engine uses;
           the engine's own basis vectors for the player's ship settle it.
           Reply (player.entity.$x4coop_probe): [yaw, pitch, roll, fx, fy, fz, rx, ry, rz, ux, uy, uz] in sector space.

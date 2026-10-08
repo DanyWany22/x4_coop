@@ -24,6 +24,7 @@ local SC = {
 	net_missing  = { true_conv = { order = "YXZ", sy = 1, sp = 1, sr = 1 }, mode = "net", setpos = "radians", duration = 8, pipes = false, expect_no_proxy = true },
 	sector_jump  = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = 1 }, mode = "ghost", setpos = "radians", duration = 30, jump_at = 18 },
 	net_restart  = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = 1 }, mode = "net", setpos = "radians", duration = 30, pipes = true, partner_restart_at = 16 },
+	low_roll     = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = 1 }, mode = "ghost", setpos = "degrees", duration = 30, roll_amp = 0.03 },
 	steep        = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = 1 }, mode = "ghost", setpos = "radians", duration = 30, steep = true },
 }
 if SCENARIO == "list" then
@@ -83,7 +84,7 @@ local function ramp(t, a, b) return math.max(0, math.min(1, (t - a) / (b - a))) 
 local function player_angles(t)
 	local k = ramp(t, 4, 7)  -- level flight first, so a single probe is ambiguous
 	local pitch_amp = sc.steep and 1.45 or 0.6
-	return 0.2 * t + 0.8 * math.sin(0.15 * t), k * pitch_amp * math.sin(0.23 * t), k * 1.2 * math.sin(0.31 * t)
+	return 0.2 * t + 0.8 * math.sin(0.15 * t), k * pitch_amp * math.sin(0.23 * t), k * (sc.roll_amp or 1.2) * math.sin(0.31 * t)
 end
 
 local function step_player(dt)
@@ -200,6 +201,9 @@ function AddUITriggeredEvent(screen, control, args)
 		local r, u, f = col(m, 1), col(m, 2), col(m, 3)
 		blackboard["$x4coop_probe"] = { o.yaw, o.pitch, o.roll, f[1], f[2], f[3], r[1], r[2], r[3], u[1], u[2], u[3] }
 		queue("x4coop.probe_result")
+	elseif control == "velocity" then
+		local o = proxy_id and objects[proxy_id]
+		if o then o.vel = { args[1], args[2], args[3] } end
 	elseif control == "join" then
 		local o = proxy_id and objects[proxy_id]
 		if o then
@@ -405,6 +409,9 @@ local rs, rmax, r95 = stats(rot_errs)
 say("position error (m): %s   [%d frames]", ps, #pos_errs)
 say("rotation error (rad): %s", rs)
 say("lua errors logged: %d", lua_errors)
+for _, line in ipairs(report) do
+	if line:find("health:", 1, true) then say("last health line seen: %s", line:match("health: (.*)")) end
+end
 
 local said = table.concat(notifications, " / ")
 local ok = lua_errors == 0 and proxy_id == nil and max_proxies <= 1
