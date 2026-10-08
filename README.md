@@ -46,10 +46,16 @@ Self-calibration on first flight:
 ## Install
 
 Copy this folder to `X4 Foundations/extensions/x4_coop/` (it is already there if you are
-reading this in place). Enable "X4 Co-op (prototype)" in the extensions menu.
+reading this in place). New extensions are enabled by default (`enabled="1"` in content.xml).
+To check, start X4 and open **Extensions** from the main menu: "X4 Co-op (prototype)" should
+be listed and ticked. Toggling an extension needs a game restart. While any non-Egosoft
+extension is active, X4 marks the game as modified.
 
-To see what the mod is doing, add `-logfile debuglog.txt` to X4's Steam launch options. The
-log goes to `Documents/Egosoft/X4/<id>/debuglog.txt`; search it for `[x4coop]`.
+To see what the mod is doing, set X4's Steam launch options (Library → right-click X4 →
+Properties → Launch Options) to `-debug scripts -logfile debuglog.txt`. Lua messages are logged
+as errors and always appear; `-debug scripts` adds the MD `debug_text` lines (proxy spawned,
+and so on). The log goes to `Documents/Egosoft/X4/<id>/debuglog.txt`; search it for `[x4coop]`
+and `x4coop:`.
 
 ## Chat commands
 
@@ -112,7 +118,7 @@ The offline tests can't answer these; one in-game session can:
 5. Anything odd: proxy fighting the physics, engine trails missing, collisions, warnings about
    a ship without a pilot.
 
-Paste the `[x4coop]` log lines back into the conversation that's developing this.
+Paste the `[x4coop]` and `x4coop:` log lines back into the conversation that's developing this.
 
 ## Known limitations / next steps
 
