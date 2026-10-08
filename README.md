@@ -184,6 +184,9 @@ python extensions/x4_coop/dev/run_tests.py [--quick]
 
 From a checkout outside the game folder, set `X4_GAME_DIR` first.
 
+To give the mod to another PC: `python dev/package.py` writes `x4_coop-<commit>.zip` (committed
+files only, no test kit) to your Desktop. Unzip it into `X4 Foundations/extensions/`.
+
 ## Files
 
 | path | purpose |
