@@ -100,8 +100,8 @@ tell the conventions apart.
 1. Install **SirNukes' Mod Support APIs** (Steam Workshop or Nexus) and turn **off**
    *Protected UI Mode* (Settings → Extensions). The pipe DLL needs that.
 2. In game: `/x4coop net`.
-3. Terminal 1: `python extensions/x4_coop/bridge/x4_coop_bridge.py --host`
-4. Terminal 2: `python extensions/x4_coop/bridge/fake_peer.py`. It echoes your ship back 150 m
+3. Terminal 1: `python extensions/x4_coop/bridge/x4_coop_bridge.py --host --password test`
+4. Terminal 2: `python extensions/x4_coop/bridge/fake_peer.py --password test`. It echoes your ship back 150 m
    along the sector X axis, or use `--mode orbit` to circle you.
 5. Your status should show `bridge connected` and an RTT.
 
@@ -158,9 +158,9 @@ Each part has a switch: `/x4coop set npc_mirror 0`, `npc_remove 0`, `npc_hull 0`
 
 Useful for testing the network and the shared world without a second person. Run both windowed
 on low settings; each instance gets about half the machine.
-1. Game A (host): bridge `python x4_coop_bridge.py --host`, then `/x4coop net` in game.
+1. Game A (host): bridge `python x4_coop_bridge.py --host --password test`, then `/x4coop net` in game.
 2. Game B (joiner): `/x4coop pipe x4_coop_b` in game, then
-   `python x4_coop_bridge.py --join 127.0.0.1 --pipe x4_coop_b`, then `/x4coop net`.
+   `python x4_coop_bridge.py --join 127.0.0.1 --pipe x4_coop_b --password test`, then `/x4coop net`.
 3. For the shared world, follow the steps above: A saves, B loads that save.
 
 ## Test 3: two players
