@@ -338,8 +338,9 @@
 
         <!--
           NPC bubble (shared world): while Lua sets a radius, list the ships near the player every second, nearest
-          first, without mass traffic, drones, docked ships or proxies. Reply: player.entity.$x4coop_bubble, then
-          raise 'x4coop.bubble'. param3: [radius in metres, 0 = off]
+          first, without mass traffic, drones, docked ships, proxies or stand-ins, at most 40.
+          Reply: player.entity.$x4coop_bubble (the list) and $x4coop_bubble_complete (1 if no eligible ship was left
+          out), then raise 'x4coop.bubble'. param3: [radius in metres, 0 = off]
         -->
         <cue name="OnBubbleConfig" instantiate="true">
           <conditions>
@@ -356,24 +357,30 @@
           </conditions>
           <actions>
             <set_value name="$Center" exact="player.occupiedship"/>
-            <find_ship name="$Found" space="$Center.sector" multiple="true" sortbydistanceto="$Center" sortlimit="60">
+            <find_ship name="$Found" space="$Center.sector" masstraffic="false" multiple="true" sortbydistanceto="$Center">
               <match_distance object="$Center" max="Root.$BubbleRadius"/>
             </find_ship>
             <set_value name="$Bubble" exact="[]"/>
+            <set_value name="$Complete" exact="1"/>
             <do_for_each name="$Candidate" in="$Found">
-              <do_if value="$Bubble.count lt 40 and $Candidate != $Center and $Candidate.isoperational and not $Candidate.ismasstraffic and not $Candidate.isunit and not @$Candidate.dock and $Candidate.parent.isclass.space and not Root.$AllProxies.indexof.{$Candidate} and not @Root.$Adopted.indexof.{$Candidate} and not @Root.$Mirrors.indexof.{$Candidate}">
-                <append_to_list name="$Bubble" exact="$Candidate"/>
+              <do_if value="$Bubble.count ge 40">
+                <set_value name="$Complete" exact="0"/>
               </do_if>
+              <do_elseif value="$Candidate != $Center and $Candidate.isoperational and not $Candidate.ismasstraffic and not $Candidate.isunit and not @$Candidate.dock and $Candidate.parent.isclass.space and not Root.$AllProxies.indexof.{$Candidate} and not @Root.$Adopted.indexof.{$Candidate} and not @Root.$Mirrors.indexof.{$Candidate}">
+                <append_to_list name="$Bubble" exact="$Candidate"/>
+              </do_elseif>
             </do_for_each>
             <set_value name="player.entity.$x4coop_bubble" exact="$Bubble"/>
+            <set_value name="player.entity.$x4coop_bubble_complete" exact="$Complete"/>
             <raise_lua_event name="'x4coop.bubble'"/>
           </actions>
         </cue>
 
         <!--
-          Stand-in for a ship only the host has (NPC bubble, joiner side). Lua moves it like the host's other ships.
+          A ship the host has that Lua can't find nearby (NPC bubble, joiner side). If we have it elsewhere in the
+          sector, that ship is the answer; otherwise a stand-in is created. Lua moves either like the host's others.
           param3: [host_idcode, ship_macro, owner_faction_id, sector_macro, x, y, z, yaw, pitch, roll]
-          Reply: player.entity.$x4coop_mirror = [host_idcode, ship], then raise 'x4coop.npc_mirror'.
+          Reply: appended to player.entity.$x4coop_mirrors as [host_idcode, ship, created], then 'x4coop.npc_mirror'.
         -->
         <cue name="OnNpcMirror" instantiate="true">
           <conditions>
@@ -387,7 +394,23 @@
             <find_sector name="$Sector" macro="@macro.{$Args.{4}}"/>
             <set_value name="$Macro" exact="@macro.{$Args.{2}}"/>
             <set_value name="$Owner" exact="@faction.{$Args.{3}}"/>
-            <do_if value="$Sector and @$Macro.isclass.ship and $Owner">
+            <do_if value="not player.entity.$x4coop_mirrors?">
+              <set_value name="player.entity.$x4coop_mirrors" exact="[]"/>
+            </do_if>
+            <set_value name="$Own" exact="null"/>
+            <do_if value="$Sector and @$Macro.isclass.ship">
+              <find_ship name="$Candidates" space="$Sector" macro="$Macro" multiple="true"/>
+              <do_for_each name="$Candidate" in="$Candidates">
+                <do_if value="not $Own and $Candidate.idcode == $Args.{1} and $Candidate != player.occupiedship and not Root.$AllProxies.indexof.{$Candidate} and not @Root.$Adopted.indexof.{$Candidate} and not Root.$Mirrors.indexof.{$Candidate}">
+                  <set_value name="$Own" exact="$Candidate"/>
+                </do_if>
+              </do_for_each>
+            </do_if>
+            <do_if value="$Own">
+              <append_to_list name="player.entity.$x4coop_mirrors" exact="[$Args.{1}, $Own, 0]"/>
+              <raise_lua_event name="'x4coop.npc_mirror'"/>
+            </do_if>
+            <do_elseif value="$Sector and @$Macro.isclass.ship and $Owner">
               <create_ship name="$Ship" macro="$Macro" sector="$Sector">
                 <owner exact="$Owner" overridenpc="true"/>
                 <pilot>
@@ -401,10 +424,10 @@
               </create_ship>
               <do_if value="@$Ship.isoperational">
                 <append_to_list name="Root.$Mirrors" exact="$Ship"/>
-                <set_value name="player.entity.$x4coop_mirror" exact="[$Args.{1}, $Ship]"/>
+                <append_to_list name="player.entity.$x4coop_mirrors" exact="[$Args.{1}, $Ship, 1]"/>
                 <raise_lua_event name="'x4coop.npc_mirror'"/>
               </do_if>
-            </do_if>
+            </do_elseif>
           </actions>
         </cue>
 
@@ -457,7 +480,7 @@
           <actions>
             <set_value name="$Obj" exact="event.param3.{1}"/>
             <include_actions ref="CheckObj"/>
-            <do_if value="$ObjOk and $Obj.hullpercentage gt event.param3.{2}">
+            <do_if value="$ObjOk">
               <set_object_hull object="$Obj" exact="event.param3.{2}"/>
             </do_if>
           </actions>
@@ -544,6 +567,9 @@
             <do_for_each name="$OldProxy" in="Root.$Adopted">
               <do_if value="$OldProxy.exists">
                 <set_object_min_hull object="$OldProxy" exact="0"/>
+                <set_object_velocity object="$OldProxy" constantvel="false">
+                  <linear x="0" y="0" z="0"/>
+                </set_object_velocity>
               </do_if>
             </do_for_each>
             <set_value name="Root.$Adopted" exact="[]"/>

@@ -62,6 +62,7 @@ def main(argv=None):
     p.add_argument("--yaw-sign", type=float, default=1.0, help="orbit heading sign (+1 or -1)")
     p.add_argument("--name", default="Fake Partner")
     p.add_argument("--password", default=os.environ.get("X4COOP_PASSWORD", ""), help="must match the bridge's --password")
+    p.add_argument("--inject", action="append", default=[], help="raw message to send once at start (testing the bridge's filter)")
     args = p.parse_args(argv)
     codec = Codec(args.password)
 
@@ -85,6 +86,9 @@ def main(argv=None):
 
     def send(msg, now):
         outbox.append((now + args.delay, codec.seal(msg)))
+
+    for raw in args.inject:
+        outbox.append((0.0, codec.seal(raw)))
 
     try:
         while True:

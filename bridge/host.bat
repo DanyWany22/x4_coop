@@ -6,6 +6,8 @@ where py >nul 2>nul && (set "PY=py -3") || (set "PY=python")
 echo Your Tailscale address (give it to your partner):
 tailscale ip -4 2>nul || echo   (Tailscale not found - use your public or LAN address)
 echo.
+:ask
 set /p "PASSWORD=Shared password (letters and digits; your partner types the same): "
+if "%PASSWORD%"=="" goto ask
 %PY% "%~dp0x4_coop_bridge.py" --host --password "%PASSWORD%"
 pause

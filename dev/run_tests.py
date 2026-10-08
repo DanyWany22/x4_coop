@@ -86,6 +86,8 @@ def bridge_session(bridge_args, peers, runs):
         bridge_args = [a for a in bridge_args if a != "--strict"]
     else:
         bridge_args = ["--any-client"] + bridge_args  # game_sim.py is python.exe, not X4.exe
+    if "--password" not in bridge_args:
+        bridge_args = ["--no-password"] + bridge_args
     procs = [subprocess.Popen(PY + [str(MOD / "bridge" / "x4_coop_bridge.py"), "--host", "--port", str(port), "--pipe", pipe] + bridge_args,
                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)]
     ok_before = len(results)
@@ -108,6 +110,28 @@ def bridge_session(bridge_args, peers, runs):
     return log
 
 
+def test_codec():
+    sys.path.insert(0, str(MOD / "bridge"))
+    import x4_coop_bridge as bridge
+    a, b = bridge.Codec("s3cret"), bridge.Codec("s3cret")
+    first = a.seal("K|ABC-1|m|s")
+    check("codec: signed message accepted", b.open(first) == "K|ABC-1|m|s")
+    check("codec: replay rejected", b.open(first) is None and b.last_reject == "replayed")
+    tampered = first.replace(b"ABC-1", b"ABC-2")
+    check("codec: tampered message rejected", bridge.Codec("s3cret").open(tampered) is None)
+    old = bridge.Codec("s3cret")
+    old_time = bridge.time.time
+    bridge.time.time = lambda: old_time() - 600
+    stale = old.seal("D|ABC-1|m|s|50")
+    bridge.time.time = old_time
+    check("codec: ten-minute-old message rejected", b.open(stale) is None and "old" in b.last_reject)
+    check("codec: wrong password rejected", bridge.Codec("other").open(a.seal("P|1")) is None)
+    check("codec: no password is plain", bridge.Codec("").open(bridge.Codec("").seal("P|1")) == "P|1")
+    r = subprocess.run(PY + [str(MOD / "bridge" / "x4_coop_bridge.py"), "--host", "--pipe", "x4_coop_nopw"],
+                       capture_output=True, text=True, timeout=30)
+    check("bridge: refuses to run without a password", r.returncode != 0 and "--password" in r.stderr)
+
+
 def test_bridge():
     anything = lambda out: True  # noqa: E731
     bridge_session([], [["--delay", "0.02"]], [
@@ -122,6 +146,10 @@ def test_bridge():
         ("bridge: wrong password delivers nothing", ["--expect-nothing"], anything),
     ])
     check("bridge: wrong password is logged", "rejected packets" in log)
+    bridge_session([], [["--inject", "R|join", "--inject", "W|evil", "--inject", "N|evil"]], [
+        ("bridge: partner cannot send bridge-only messages",
+         [], lambda out: "'R': 1," in out and "evil" not in out),
+    ])
     log = bridge_session(["--strict"], [[]], [
         ("bridge: refuses a pipe client that is not X4.exe", ["--expect-rejected"], anything),
     ])
@@ -135,6 +163,7 @@ def main():
     with tempfile.TemporaryDirectory() as tmp:
         test_md_schema(tmp)
         test_lua(tmp)
+    test_codec()
     test_bridge()
     failed = results.count(False)
     print(f"\n{len(results) - failed} passed, {failed} failed")

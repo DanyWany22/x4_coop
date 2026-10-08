@@ -34,6 +34,8 @@ local SC = {
 	net_missing  = { true_conv = { order = "YXZ", sy = 1, sp = 1, sr = 1 }, mode = "net", setpos = "radians", duration = 8, pipes = false, expect_no_proxy = true },
 	sector_jump  = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = 1 }, mode = "ghost", setpos = "radians", duration = 30, jump_at = 18 },
 	net_restart  = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = 1 }, mode = "net", setpos = "radians", duration = 30, pipes = true, partner_restart_at = 16 },
+	forced_lua   = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "ghost", setpos = "degrees", duration = 30,
+	                 forced_backend = "lua" },
 	low_roll     = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = 1 }, mode = "ghost", setpos = "degrees", duration = 30, roll_amp = 0.03 },
 	steep        = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = 1 }, mode = "ghost", setpos = "radians", duration = 30, steep = true },
 }
@@ -104,6 +106,8 @@ if sc.npc_test == "join" then
 	objects[407] = { sector = 500, x = pl.x + 200, y = pl.y, z = pl.z, yaw = 0, pitch = 0, roll = 0, macro = SHIP_MACRO, idcode = "NPC-7" }
 	objects[408] = { sector = 500, x = pl.x - 200, y = pl.y, z = pl.z, yaw = 0, pitch = 0, roll = 0, macro = SHIP_MACRO, idcode = "OWN-8",
 		playerowned = true }
+	-- our own copy of the host's NPC-10, far outside our 6 km scan
+	objects[410] = { sector = 500, x = pl.x + 50000, y = pl.y, z = pl.z, yaw = 0, pitch = 0, roll = 0, macro = SHIP_MACRO, idcode = "NPC-10" }
 end
 if sc.partner_ship then
 	objects[PARKED] = { sector = 500, x = 5000, y = 0, z = 5000, yaw = 0, pitch = 0, roll = 0, macro = SHIP_MACRO,
@@ -112,7 +116,7 @@ end
 local next_id, spawns, warps, moves, md_events, lua_errors = 200, 0, 0, 0, {}, 0
 local spawn_sectors, world_requests, adoptions = {}, {}, 0
 local bubble_radius = 0
-local mirror_of_code, obj_actions = {}, {}
+local mirror_of_code, obj_actions, found_own = {}, {}, {}
 local proxy_id = nil
 local history = {}   -- player pose history for ground truth
 
@@ -261,12 +265,23 @@ function AddUITriggeredEvent(screen, control, args)
 		blackboard["$x4coop_probe"] = { o.yaw, o.pitch, o.roll, f[1], f[2], f[3], r[1], r[2], r[3], u[1], u[2], u[3] }
 		queue("x4coop.probe_result")
 	elseif control == "npc_mirror" then
+		blackboard["$x4coop_mirrors"] = blackboard["$x4coop_mirrors"] or {}
+		for oid, o in pairs(objects) do
+			if o.idcode == args[1] and oid ~= PLAYER and oid ~= proxy_id and not o.mirror then
+				local list = blackboard["$x4coop_mirrors"]
+				list[#list + 1] = { args[1], oid, 0 }  -- our own copy, outside the scan
+				found_own[args[1]] = oid
+				queue("x4coop.npc_mirror")
+				return
+			end
+		end
 		local id = next_id
 		next_id = next_id + 1
 		objects[id] = { sector = 500, x = args[5], y = args[6], z = args[7], yaw = args[8], pitch = args[9], roll = args[10],
 			macro = args[2], owner = args[3], idcode = "MIR-" .. id, hull = 100, mirror = true }
 		mirror_of_code[args[1]] = id
-		blackboard["$x4coop_mirror"] = { args[1], id }
+		local list = blackboard["$x4coop_mirrors"]
+		list[#list + 1] = { args[1], id, 1 }
 		queue("x4coop.npc_mirror")
 	elseif control == "npc_clear" then
 		for id, o in pairs(objects) do if o.mirror then objects[id] = nil end end
@@ -277,7 +292,7 @@ function AddUITriggeredEvent(screen, control, args)
 		obj_actions[#obj_actions + 1] = control .. ":" .. tostring(id) .. (args[2] and ("," .. args[2]) or "")
 		if o and (control == "obj_kill" or (control == "obj_remove" and (not o.playerowned or o.mirror))) then
 			objects[id] = nil
-		elseif o and control == "obj_hull" and args[2] < (o.hull or 100) then
+		elseif o and control == "obj_hull" then
 			o.hull = args[2]
 		end
 	elseif control == "bubble" then
@@ -349,8 +364,8 @@ local function fake_host_bubble()
 	next_b = clock + 0.1
 	local h, h0 = history[#history], player_at(clock - 0.05)
 	local entries = {}
-	for i = 1, NPC_COUNT + 1 do
-		local code = i <= NPC_COUNT and ("NPC-" .. i) or "NPC-9"
+	for i = 1, NPC_COUNT + 3 do
+		local code = i <= NPC_COUNT and ("NPC-" .. i) or ({ "NPC-9", "NPC-10", "NPC-11" })[i - NPC_COUNT]
 		local x, y, z = npc_truth(i, clock, h)
 		local x0, y0, z0 = npc_truth(i, h0.t, h0)  -- velocity over the actual history step
 		local dt0 = clock - h0.t
@@ -374,6 +389,7 @@ end
 -- Load the mod and run
 if sc.mode ~= "ghost" then blackboard["$x4coop_mode"] = sc.mode end
 if sc.own_world then blackboard["$x4coop_world"] = sc.own_world end
+if sc.forced_backend then blackboard["$x4coop_backend"] = sc.forced_backend end
 local chunk = assert(loadfile(MOD))
 chunk()
 assert(on_update, "mod did not register onUpdate")
@@ -432,6 +448,7 @@ local HOSTILE = {
 }
 local pos_errs, rot_errs, npc_errs, mirror_errs = {}, {}, {}, {}
 local mapping_sent, mapped_mirror = false, nil
+local found_errs, mode_test_done = {}, false
 local first_live_at, calibrated_at
 local max_proxies = 0
 while clock < sc.duration do
@@ -453,6 +470,7 @@ while clock < sc.duration do
 			end
 		end
 		blackboard["$x4coop_bubble"] = list
+		blackboard["$x4coop_bubble_complete"] = 1
 		if handlers["x4coop.bubble"] then handlers["x4coop.bubble"]("x4coop.bubble") end
 	end
 	fake_host_bubble()
@@ -515,6 +533,11 @@ while clock < sc.duration do
 		piped = true
 		ExecuteDebugCommand("x4coop", "pipe x4_coop_b")
 	end
+	if sc.world_test == "linked" and not mode_test_done and clock > sc.duration - 1 then
+		mode_test_done = true
+		ExecuteDebugCommand("x4coop", "ghost")
+		pipe_reader("K|XYZ-777|" .. SHIP_MACRO .. "|" .. SECTORS[500])
+	end
 	if not chatted and clock > sc.duration - 2 then
 		chatted = true
 		ExecuteDebugCommand("x4coop", "say hello   there")
@@ -549,6 +572,11 @@ while clock < sc.duration do
 	end
 	if sc.npc_test == "join" and clock > 8 and not chatted then
 		local h = history[#history]
+		if found_own["NPC-10"] then
+			local x, y, z = npc_truth(NPC_COUNT + 2, clock, h)
+			local o = objects[410]
+			found_errs[#found_errs + 1] = math.sqrt((o.x - x) ^ 2 + (o.y - y) ^ 2 + (o.z - z) ^ 2)
+		end
 		local mid = mirror_of_code["NPC-9"]
 		if mid and objects[mid] then
 			local x, y, z = npc_truth(NPC_COUNT + 1, clock, h)
@@ -646,6 +674,11 @@ if sc.world_test then
 		ok = ok and #sent_f == 0 and #fires == 0
 	end
 	if sc.world_test == "linked" then
+		local leaked = table.concat(world_requests, " "):find("XYZ-777", 1, true) ~= nil
+		say("partner kill after leaving net mode applied: %s", tostring(leaked))
+		ok = ok and not leaked
+	end
+	if sc.world_test == "linked" then
 		say("pipes used: %s", table.concat(pipe_names, ", "))
 		ok = ok and pipe_names[#pipe_names] == "x4_coop_b"  -- switched, and chat (checked above) still works
 	end
@@ -679,11 +712,19 @@ if sc.npc_test then
 		local acts = table.concat(obj_actions, " ")
 		local sent = table.concat(pipe_writes, "\n")
 		say("npc join: stand-in for NPC-9 = %s, vs host truth (m): %s; actions: %s", tostring(mid), mst, acts)
+		local fst, fmax, f95 = stats(found_errs)
+		local stand_ins = 0
+		for _ in pairs(mirror_of_code) do stand_ins = stand_ins + 1 end
+		say("npc join: stand-ins created %d (md events %d), own far copy NPC-10 found: %s, vs host truth (m): %s",
+			stand_ins, md_events.npc_mirror or 0, tostring(found_own["NPC-10"]), fst)
+		ok = ok and stand_ins == 2 and mirror_of_code["NPC-11"] ~= nil and mirror_of_code["NPC-10"] == nil
+			and found_own["NPC-10"] == 410 and #found_errs > 300 and f95 < 10
 		ok = ok and mid ~= nil and #mirror_errs > 500 and m95 < 10
 			and acts:find("obj_remove:407", 1, true) ~= nil            -- joiner-only NPC removed
 			and acts:find("obj_remove:408", 1, true) == nil            -- player-owned ship kept
 			and acts:find("obj_hull:401,55", 1, true) ~= nil           -- host's lower hull taken
 			and acts:find("obj_hull:402", 1, true) == nil              -- never raised / never for undamaged
+			and mid == mapped_mirror                                    -- no second stand-in after the kill
 			and acts:find("obj_fire:" .. tostring(mapped_mirror), 1, true) ~= nil -- host fires at NPC-9 -> our stand-in
 			and acts:find("obj_kill:" .. tostring(mapped_mirror), 1, true) ~= nil -- host kills NPC-9 -> our stand-in
 			and sent:find("D|NPC-9|", 1, true) ~= nil                   -- our hit on the stand-in, as NPC-9
@@ -705,6 +746,7 @@ else
 		ok = ok and api.math.conv_name(S.conv) == string.format("%s%s%s%s", sc.true_conv.order, sc.true_conv.sy > 0 and "+" or "-", sc.true_conv.sp > 0 and "+" or "-", sc.true_conv.sr > 0 and "+" or "-")
 	end
 	if sc.setpos == "degrees" then ok = ok and S.lua_degrees end
+	if sc.forced_backend then ok = ok and api.config.backend == sc.forced_backend end
 	if sc.setpos == "ignore" then ok = ok and S.backend == "md" end
 	if sc.jump_at then ok = ok and warps >= 1 end
 end

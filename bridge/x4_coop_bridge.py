@@ -36,6 +36,7 @@ KEEPALIVE_S = 1.0
 PARTNER_TIMEOUT_S = 10.0
 STATS_EVERY_S = 30.0
 MAX_PACKETS_PER_S = 200  # a partner sends ~22/s; anything far above that is dropped
+FROM_PARTNER = set("SPQMLKDFB")  # message kinds a partner may send; R, W and N only come from this bridge
 
 # Win32 named pipe API through ctypes, mirroring the parameters SirNukes' own server uses.
 PIPE_ACCESS_DUPLEX = 0x3
@@ -166,10 +167,21 @@ def log(text):
 
 
 class Codec:
-    """Frames one pipe message per datagram: MAGIC, then (with a password) a 16-hex HMAC tag and a space."""
+    """
+    Frames one pipe message per datagram: MAGIC + message. With a password:
+    MAGIC + tag + " " + session:counter:unixtime + " " + message, where tag is the first 16 hex digits of
+    HMAC-SHA256 over everything after it. A replayed datagram fails the counter check; an old one the time check.
+    """
+
+    MAX_SKEW_S = 60      # sender's clock may differ from ours by this much
+    MAX_SESSIONS = 16    # remembered senders (each restart of a bridge is a new session)
 
     def __init__(self, password=""):
         self.key = hashlib.sha256(password.encode("utf-8")).digest() if password else None
+        self.session = os.urandom(4).hex()
+        self.counter = 0
+        self.seen = {}           # session -> highest counter accepted
+        self.last_reject = ""
 
     def _tag(self, data):
         return hmac.new(self.key, data, hashlib.sha256).hexdigest()[:16].encode()
@@ -177,18 +189,38 @@ class Codec:
     def seal(self, msg):
         data = msg.encode("utf-8")
         if self.key:
+            self.counter += 1
+            data = f"{self.session}:{self.counter}:{int(time.time())}".encode() + b" " + data
             data = self._tag(data) + b" " + data
         return MAGIC + data
 
     def open(self, datagram):
-        """The message text, or None for foreign traffic or a wrong/missing password."""
+        """The message text, or None (see last_reject) for foreign, unsigned, replayed or stale traffic."""
         if not datagram.startswith(MAGIC):
+            self.last_reject = "not ours"
             return None
         data = datagram[len(MAGIC):]
         if self.key:
-            tag, sep, data = data.partition(b" ")
-            if not sep or not hmac.compare_digest(tag, self._tag(data)):
+            tag, sep, signed = data.partition(b" ")
+            if not sep or not hmac.compare_digest(tag, self._tag(signed)):
+                self.last_reject = "wrong or missing --password"
                 return None
+            meta, sep, data = signed.partition(b" ")
+            try:
+                session, counter, stamp = meta.decode().split(":")
+                counter, stamp = int(counter), int(stamp)
+            except ValueError:
+                self.last_reject = "malformed"
+                return None
+            if abs(time.time() - stamp) > self.MAX_SKEW_S:
+                self.last_reject = "too old, or the two PCs' clocks differ by over a minute"
+                return None
+            if counter <= self.seen.get(session, 0):
+                self.last_reject = "replayed"
+                return None
+            if session not in self.seen and len(self.seen) >= self.MAX_SESSIONS:
+                self.seen.pop(next(iter(self.seen)))
+            self.seen[session] = counter
         return data.decode("utf-8", "replace")
 
 
@@ -301,7 +333,7 @@ def run(args):
                     stats["rejected"] += 1
                     if now - last_reject_note > 10:
                         last_reject_note = now
-                        log(f"rejected packets from {addr[0]}:{addr[1]}: wrong or missing --password?")
+                        log(f"rejected packets from {addr[0]}:{addr[1]}: {codec.last_reject}")
                 continue
             # One partner at a time: a host keeps its partner's exact address until they go silent;
             # a joiner only listens to its host's IP (its NAT may change the port).
@@ -321,6 +353,9 @@ def run(args):
                 log("partner connected")
                 tell_game("N|partner connected")
             if msg == "H":
+                continue
+            if msg[:1] not in FROM_PARTNER or msg[1:2] != "|":
+                stats["ignored"] += 1
                 continue
             stats["from_peer"] += 1
             tell_game(msg)
@@ -349,6 +384,8 @@ def main(argv=None):
     p.add_argument("--pipe", default="x4_coop", help="pipe name, must match config.pipe in ui/x4_coop.lua")
     p.add_argument("--password", default=os.environ.get("X4COOP_PASSWORD", ""),
                    help="shared secret; both bridges must use the same one (or set X4COOP_PASSWORD)")
+    p.add_argument("--no-password", action="store_true",
+                   help="run without a password: anyone who can reach this port can act as your partner")
     p.add_argument("--any-client", action="store_true",
                    help="let any local program use the pipe, not only X4.exe (for test tools)")
     p.add_argument("--role", choices=["host", "join"],
@@ -356,6 +393,8 @@ def main(argv=None):
     args = p.parse_args(argv)
     if args.peer and not args.role:
         p.error("--peer needs --role host or --role join (exactly one side hosts the shared world)")
+    if not args.password and not args.no_password:
+        p.error("set --password (both players use the same one), or --no-password to accept anyone who can reach you")
     try:
         run(args)
     except KeyboardInterrupt:
