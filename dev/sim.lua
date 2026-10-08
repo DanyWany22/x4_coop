@@ -343,6 +343,7 @@ if sc.pipes then
 				pipe_reader = cb
 				pipe_names[#pipe_names + 1] = name
 				partner_queue[#partner_queue + 1] = { at = clock + 0.05, msg = "W|bridge ready (test)" }
+				partner_queue[#partner_queue + 1] = { at = clock + 0.05, msg = "N|partner connected" }
 				if sc.role then partner_queue[#partner_queue + 1] = { at = clock + 0.05, msg = "R|" .. sc.role } end
 			end,
 			Schedule_Write = function(name, cb, msg)
@@ -441,7 +442,7 @@ if sc.mode ~= "ghost" or sc.backend then
 	clock = 0.1
 end
 local commanded, chatted, hostile_sent, world_sent, piped, fire_sent = false, false, false, false, false, false
-local guest_done, took_ship = false, false
+local guest_done, took_ship, checked = false, false, false
 local adopted_seen = false
 -- Malformed or malicious partner messages: all must be dropped without errors or odd spawns.
 local HOSTILE = {
@@ -557,6 +558,10 @@ while clock < sc.duration do
 		ExecuteDebugCommand("x4coop", "ghost")
 		pipe_reader("K|XYZ-777|" .. SHIP_MACRO .. "|" .. SECTORS[500])
 	end
+	if not checked and clock > sc.duration - 1.5 then
+		checked = true
+		ExecuteDebugCommand("x4coop", "check")
+	end
 	if not chatted and clock > sc.duration - 2 then
 		chatted = true
 		ExecuteDebugCommand("x4coop", "say hello   there")
@@ -647,7 +652,11 @@ for _, line in ipairs(report) do
 end
 
 local said = table.concat(notifications, " / ")
-local ok = lua_errors == 0 and proxy_id == nil and max_proxies <= 1
+local check_line = said:match("check: ([^/]*)") or "(none)"
+say("check said: %s", check_line)
+local want_check = sc.expect_no_proxy and "Mod Support APIs" or (sc.mode == "ghost" and "mode is ghost")
+	or (sc.world_test == "linked" and "all good") or (sc.world_test == "mismatch" and "different worlds") or nil
+local ok = (not want_check or check_line:find(want_check, 1, true) ~= nil) and lua_errors == 0 and proxy_id == nil and max_proxies <= 1
 for _, sector in ipairs(spawn_sectors) do
 	if not SECTORS[500] or (sector ~= SECTORS[500] and sector ~= SECTORS[501]) then
 		say("FAIL: proxy spawned from a bad snapshot (sector %s)", sector)

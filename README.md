@@ -68,6 +68,7 @@ General Controls**, then scroll to the bottom section **"Expert Settings - Use w
 | command | effect |
 |---|---|
 | `/x4coop status` | mode, backend, proxy state, where your partner is and how far, link/RTT, rotation convention |
+| `/x4coop check` | the first thing standing in the way of co-op (missing mod, no bridge, partner not reaching you, different worlds, same ship…) and what to do |
 | `/x4coop join` | warp your ship beside your partner (pilot seat, undocked) |
 | `/x4coop say <text>` | send a chat line to your partner (in ghost mode the ghost repeats it) |
 | `/x4coop guestship` | (host, shared world) park a spare ship next to you for the joiner, then save |

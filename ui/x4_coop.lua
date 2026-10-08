@@ -15,6 +15,7 @@ Per frame this file:
 
 Chat window commands (type them in the chat window, they never leave your PC):
   /x4coop status            print mode, link, proxy state and where your partner is
+  /x4coop check             say what (if anything) stands in the way of playing together, and how to fix it
   /x4coop join              warp your ship beside your partner (pilot seat, undocked)
   /x4coop say <text>        send a chat line to your partner
   /x4coop guestship         (host, shared world) park a spare ship next to you for the joiner, then save
@@ -600,7 +601,7 @@ on_pipe_message = function(msg)
 		if N.connected then
 			notify("bridge disconnected")
 		end
-		N.reading, N.connected, N.retry_at = false, false, now + 3
+		N.reading, N.connected, N.retry_at, N.partner = false, false, now + 3, nil
 		N.status = "bridge not running (start bridge/x4_coop_bridge.py)"
 		return
 	end
@@ -631,7 +632,9 @@ on_pipe_message = function(msg)
 			notify("%s: %s", clean_text(f[2], 32), text)
 		end
 	elseif kind == "N" or kind == "W" then
-		notify("%s", clean_text(f[2], 200))
+		local text = clean_text(f[2], 200)
+		if text == "partner connected" then N.partner = true elseif text == "partner silent" then N.partner = false end
+		notify("%s", text)
 	elseif kind == "R" or kind == "L" or kind == "K" or kind == "D" or kind == "F" or kind == "B" then
 		if config.mode == "net" then on_world_message(kind, f, now) end
 	end
@@ -1367,6 +1370,38 @@ end
 -------------------------------------------------------------------------------
 -- Chat commands
 
+-- The first thing standing in the way of co-op, with what to do about it; "all good" when nothing does.
+local function diagnosis()
+	local N, K, P = S.net, S.link, S.proxy
+	if config.mode ~= "net" then
+		return "mode is " .. config.mode .. ": type /x4coop net to play with a partner"
+	end
+	if N.status == "Mod Support APIs not installed" then
+		return "SirNukes' Mod Support APIs are not installed (Steam Workshop), and they are needed for the network"
+	end
+	if N.status:find("Protected UI Mode", 1, true) then
+		return "turn off Protected UI Mode (Settings, Extensions), then load the save again"
+	end
+	if not N.connected then
+		return "no bridge on this PC: start bridge/host.bat or join.bat"
+			.. (config.pipe ~= "x4_coop" and (" with --pipe " .. config.pipe) or "")
+	end
+	if not N.partner then
+		return "bridge running, but no partner reaching it: check the address, both bridges' password, the host's firewall, and that both clocks are right"
+	end
+	if not K.linked then
+		return "partner connected; world: " .. tostring(K.state or "checking")
+			.. " (fine for flying together; kills, damage and NPCs sync only in a linked shared world)"
+	end
+	if K.clash then
+		return "you are both in the same ship: " .. (K.role == "join" and "type /x4coop takeship" or "the joiner should take the guest ship")
+	end
+	if P.state ~= "live" then
+		return "linked, but your partner's ship isn't here yet (are they in a ship's pilot seat?)"
+	end
+	return "all good: linked shared world, partner " .. (partner_whereabouts() or "visible")
+end
+
 local function status_text()
 	local P, R, N = S.proxy, S.rem, S.net
 	local age = R.last_recv > 0 and string.format("%.1fs ago", getElapsedTime() - R.last_recv) or "never"
@@ -1378,7 +1413,7 @@ local function status_text()
 		conv_name(S.conv), S.probe.measured and "measured" or "assumed")
 end
 
-local USAGE = "usage: /x4coop status | join | say <text> | guestship | takeship | ghost | net | off | backend lua|md|auto | probe | pipe <name> | set <key> <number>"
+local USAGE = "usage: /x4coop status | check | join | say <text> | guestship | takeship | ghost | net | off | backend lua|md|auto | probe | pipe <name> | set <key> <number>"
 
 local function guest_ship()
 	local ship = S.player and GetNPCBlackboard(S.player, "$x4coop_guestship")
@@ -1450,6 +1485,8 @@ local function command(param)
 		notify("%s = %s", args[2], args[3])
 	elseif cmd == "status" then
 		notify("%s", status_text())
+	elseif cmd == "check" then
+		notify("check: %s", diagnosis())
 	elseif cmd == "join" then
 		request("join", {})
 	elseif cmd == "guestship" then
