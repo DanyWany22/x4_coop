@@ -268,6 +268,47 @@
           </actions>
         </cue>
 
+        <!--
+          /x4coop guestship (the host, before saving the shared-world save): a spare ship of the host's type next to
+          them, for the joiner to take after loading that save (/x4coop takeship). It is kept on the player's
+          blackboard, so it travels with the save and has the same ID code in both worlds.
+        -->
+        <cue name="OnGuestShip" instantiate="true">
+          <conditions>
+            <event_ui_triggered screen="'x4coop'" control="'guestship'"/>
+          </conditions>
+          <actions>
+            <set_value name="$Ship" exact="player.occupiedship"/>
+            <set_value name="$Old" exact="@player.entity.$x4coop_guestship"/>
+            <do_if value="@$Old.isoperational">
+              <show_notification text="'Co-op: guest ship %s is already in %s'.[$Old.idcode, $Old.sector.knownname]" timeout="8s"/>
+            </do_if>
+            <do_elseif value="not @$Ship.isoperational or @$Ship.dock or not @$Ship.parent.isclass.space">
+              <show_notification text="'Co-op: sit in the pilot seat of an undocked ship first'" timeout="6s"/>
+            </do_elseif>
+            <do_else>
+              <create_ship name="$Guest" macro="$Ship.macro" sector="$Ship.sector">
+                <owner exact="faction.player" overridenpc="true"/>
+                <pilot actor="null"/>
+                <loadout>
+                  <level exact="0.5"/>
+                </loadout>
+                <safepos object="$Ship" x="$Ship.size * 2" allowyaxis="true"/>
+                <rotation value="$Ship.rotation"/>
+              </create_ship>
+              <do_if value="@$Guest.isoperational">
+                <set_object_name object="$Guest" name="'[Co-op] Guest ship'"/>
+                <set_value name="player.entity.$x4coop_guestship" exact="$Guest"/>
+                <debug_text text="'x4coop: guest ship %s created in %s'.[$Guest.idcode, $Guest.sector.knownname]" chance="$DebugChance"/>
+                <show_notification text="'Co-op: guest ship %s is ready next to you. Save now and give that save to your partner.'.[$Guest.idcode]" timeout="10s"/>
+              </do_if>
+              <do_else>
+                <show_notification text="'Co-op: could not create a guest ship here'" timeout="6s"/>
+              </do_else>
+            </do_else>
+          </actions>
+        </cue>
+
         <!-- param3: text to show the player -->
         <cue name="OnNotify" instantiate="true">
           <conditions>

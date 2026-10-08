@@ -17,6 +17,8 @@ Chat window commands (type them in the chat window, they never leave your PC):
   /x4coop status            print mode, link, proxy state and where your partner is
   /x4coop join              warp your ship beside your partner (pilot seat, undocked)
   /x4coop say <text>        send a chat line to your partner
+  /x4coop guestship         (host, shared world) park a spare ship next to you for the joiner, then save
+  /x4coop takeship          (joiner) move into the guest ship from the host's save
   /x4coop ghost | net | off switch mode (remembered in the savegame)
   /x4coop backend lua|md|auto
   /x4coop probe             re-run the rotation-convention probe
@@ -53,6 +55,8 @@ ffi.cdef[[
 	bool IsComponentOperational(UniverseID componentid);
 	bool IsGamePaused(void);
 	void SetObjectSectorPos(UniverseID objectid, UniverseID sectorid, UIPosRot offset);
+	const char* CanTeleportPlayerTo(UniverseID controllableid, bool allowcontrolling, bool force);
+	bool TeleportPlayerTo(UniverseID controllableid, bool allowcontrolling, bool instant, bool force);
 ]]
 
 local config = {
@@ -1178,7 +1182,8 @@ local function update_link(now)
 	local mine = own_idcode()
 	local clash = K.linked and mine ~= nil and mine == K.partner_ship
 	if clash and not K.clash then
-		notify("you are both flying %s; the joiner should switch to another ship", mine)
+		notify("you are both flying %s; the joiner should switch ships%s", mine,
+			K.role == "join" and " (/x4coop takeship, if the host made a guest ship)" or "")
 	end
 	K.clash = clash
 end
@@ -1373,7 +1378,33 @@ local function status_text()
 		conv_name(S.conv), S.probe.measured and "measured" or "assumed")
 end
 
-local USAGE = "usage: /x4coop status | join | say <text> | ghost | net | off | backend lua|md|auto | probe | pipe <name> | set <key> <number>"
+local USAGE = "usage: /x4coop status | join | say <text> | guestship | takeship | ghost | net | off | backend lua|md|auto | probe | pipe <name> | set <key> <number>"
+
+local function guest_ship()
+	local ship = S.player and GetNPCBlackboard(S.player, "$x4coop_guestship")
+	if not ship then return nil end
+	local id = to64(ship)
+	return C.IsComponentOperational(id) and id or nil
+end
+
+local function take_guest_ship()
+	local id = guest_ship()
+	if not id then
+		notify("no guest ship in this save: the host types /x4coop guestship, saves, and sends you that save")
+		return
+	end
+	if id == C.GetPlayerOccupiedShipID() then
+		notify("you are already in the guest ship")
+		return
+	end
+	local verdict = ffi.string(C.CanTeleportPlayerTo(id, true, true))
+	if verdict ~= "granted" then
+		notify("the game won't move you to the guest ship: %s", verdict)
+		return
+	end
+	C.TeleportPlayerTo(id, true, true, true)
+	notify("moved to the guest ship %s; take the pilot seat", ffi.string(C.GetObjectIDCode(id)))
+end
 
 local function say(text)
 	text = clean_text(text, 200)
@@ -1421,6 +1452,10 @@ local function command(param)
 		notify("%s", status_text())
 	elseif cmd == "join" then
 		request("join", {})
+	elseif cmd == "guestship" then
+		request("guestship", {})
+	elseif cmd == "takeship" then
+		take_guest_ship()
 	elseif cmd == "pipe" then
 		-- A second game on the same PC needs its own pipe (and its own bridge with --pipe). Not saved:
 		-- both games may load the same save.

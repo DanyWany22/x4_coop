@@ -114,6 +114,7 @@ if sc.partner_ship then
 		idcode = sc.partner_ship, pilot = true }
 end
 local next_id, spawns, warps, moves, md_events, lua_errors = 200, 0, 0, 0, {}, 0
+local teleports = {}
 local spawn_sectors, world_requests, adoptions = {}, {}, 0
 local bubble_radius = 0
 local mirror_of_code, obj_actions, found_own = {}, {}, {}
@@ -174,6 +175,8 @@ C = {
 		o.x, o.y, o.z, o.yaw, o.pitch, o.roll = pr.x, pr.y, pr.z, pr.yaw * k, pr.pitch * k, pr.roll * k
 	end,
 	IsGamePaused = function() return false end,
+	CanTeleportPlayerTo = function(id) return objects[id] and "granted" or "no such ship" end,
+	TeleportPlayerTo = function(id) teleports[#teleports + 1] = id; return true end,
 	IsComponentOperational = function(id) return objects[id] ~= nil end,
 }
 package.loaded.ffi = {
@@ -295,6 +298,13 @@ function AddUITriggeredEvent(screen, control, args)
 		elseif o and control == "obj_hull" then
 			o.hull = args[2]
 		end
+	elseif control == "guestship" then
+		local pl = objects[PLAYER]
+		local id = next_id
+		next_id = next_id + 1
+		objects[id] = { sector = pl.sector, x = pl.x + 60, y = pl.y, z = pl.z, yaw = pl.yaw, pitch = pl.pitch, roll = pl.roll,
+			macro = pl.macro, idcode = "GST-" .. id, guest = true }
+		blackboard["$x4coop_guestship"] = id
 	elseif control == "bubble" then
 		bubble_radius = args[1]
 	elseif control == "fire" then
@@ -431,6 +441,7 @@ if sc.mode ~= "ghost" or sc.backend then
 	clock = 0.1
 end
 local commanded, chatted, hostile_sent, world_sent, piped, fire_sent = false, false, false, false, false, false
+local guest_done, took_ship = false, false
 local adopted_seen = false
 -- Malformed or malicious partner messages: all must be dropped without errors or odd spawns.
 local HOSTILE = {
@@ -513,6 +524,14 @@ while clock < sc.duration do
 		fire_sent = true
 		handlers["x4coop.world"]("x4coop.world", "D|TGT-001|ship_arg_s_fighter_01_a_macro|cluster_01_sector001_macro|80")
 	end
+	if sc.world_test == "host" and not guest_done and clock > 12 then
+		guest_done = true
+		ExecuteDebugCommand("x4coop", "guestship")  -- md answers next frame
+	end
+	if sc.world_test == "host" and guest_done and not took_ship and clock > 13 then
+		took_ship = true
+		ExecuteDebugCommand("x4coop", "takeship")
+	end
 	if sc.world_test and not world_sent and clock > 10 then
 		world_sent = true
 		local sector = "cluster_01_sector001_macro"
@@ -591,7 +610,7 @@ while clock < sc.duration do
 	end
 	local count = 0
 	for id, o in pairs(objects) do  -- proxies only: not the player, scenario ships (400+), the parked ship or stand-ins
-		if id ~= PLAYER and id < 400 and id ~= PARKED and not o.mirror then count = count + 1 end
+		if id ~= PLAYER and id < 400 and id ~= PARKED and not o.mirror and not o.guest then count = count + 1 end
 	end
 	max_proxies = math.max(max_proxies, count)
 end
@@ -683,6 +702,9 @@ if sc.world_test then
 		ok = ok and pipe_names[#pipe_names] == "x4_coop_b"  -- switched, and chat (checked above) still works
 	end
 	if sc.world_test == "host" then
+		local guest = blackboard["$x4coop_guestship"]
+		say("guest ship %s, teleports %s", tostring(guest), table.concat(teleports, ","))
+		ok = ok and guest ~= nil and #teleports == 1 and teleports[1] == guest and said:find("moved to the guest ship", 1, true) ~= nil
 		ok = ok and said:find("new co-op world", 1, true) ~= nil and type(blackboard["$x4coop_world"]) == "string"
 	end
 	if sc.world_test == "mismatch" then

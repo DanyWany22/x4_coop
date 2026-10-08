@@ -70,6 +70,8 @@ General Controls**, then scroll to the bottom section **"Expert Settings - Use w
 | `/x4coop status` | mode, backend, proxy state, where your partner is and how far, link/RTT, rotation convention |
 | `/x4coop join` | warp your ship beside your partner (pilot seat, undocked) |
 | `/x4coop say <text>` | send a chat line to your partner (in ghost mode the ghost repeats it) |
+| `/x4coop guestship` | (host, shared world) park a spare ship next to you for the joiner, then save |
+| `/x4coop takeship` | (joiner) move into the guest ship from the host's save |
 | `/x4coop ghost` / `net` / `off` | switch mode (remembered in the savegame) |
 | `/x4coop backend auto` / `lua` / `md` | movement backend (auto = self-test, then pick) |
 | `/x4coop probe` | redo the rotation calibration |
@@ -112,12 +114,14 @@ The bridge only talks to `X4.exe` on this PC. It rejects network clients and oth
 
 Kills and damage sync when both players run **the same world**: the host's save.
 1. Host: start the bridge with `--host`, type `/x4coop net`. The game creates a co-op world id
-   (notification "new co-op world …"). **Save now** and give that save file to your partner
+   (notification "new co-op world …"). Type **`/x4coop guestship`**: a spare ship of your type
+   appears next to you for your partner. **Save now** and give that save file to your partner
    (`Documents/Egosoft/X4/<id>/save/`).
 2. Joiner: put the save in your own save folder, load it, start the bridge with `--join`, type
    `/x4coop net`. Both sides should then show **"world: linked"**.
-3. The joiner starts out in the host's ship (it's the host's save). Switch to another ship; the
-   mod warns while you're both in the same one.
+3. The joiner starts out in the host's ship (it's the host's save). Type **`/x4coop takeship`**
+   to move into the guest ship, then take its pilot seat. Both ships now exist in both worlds,
+   so each of you sees the other's real ship, not a copy.
 
 While linked, a ship one player kills is destroyed in the other's world too (matched by its ID
 code). Each player's hits lower the hull of the same ship on the other side ("lowest hull wins",
