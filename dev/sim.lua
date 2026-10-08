@@ -35,6 +35,10 @@ local SC = {
 	                 role = "host", own_world = "abc123", partner_world = "abc123", econ_test = "host" },
 	econ_join    = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
 	                 role = "join", own_world = "abc123", partner_world = "abc123", econ_test = "join" },
+	relations_join = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
+	                 role = "join", own_world = "abc123", partner_world = "abc123", rel_test = "join" },
+	relations_host = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
+	                 role = "host", own_world = "abc123", partner_world = "abc123", rel_test = "host" },
 	credits      = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
 	                 role = "join", own_world = "abc123", partner_world = "abc123", credits_test = true },
 	npc_apart_join = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
@@ -224,6 +228,11 @@ C = {
 	CanTeleportPlayerTo = function(id) return objects[id] and "granted" or "no such ship" end,
 	GetSaveFolderPath = function() return "C:/fake/Egosoft/X4/1/save" end,
 	IsSaveListLoadingComplete = function() return true end,
+	GetNumAllFactions = function() return 4 end,
+	GetAllFactions = function(buf, n)
+		for i, id in ipairs({ "argon", "teladi", "player", "xenon" }) do buf[i - 1] = id end
+		return 4
+	end,
 	IsSaveValid = function(name) return name == "quicksave" end,
 	ReloadSaveList = function() end,
 	TeleportPlayerTo = function(id) teleports[#teleports + 1] = id; return true end,
@@ -261,6 +270,9 @@ function GetComponentData(id, key)
 end
 function GetNPCBlackboard(_, key) return blackboard[key] end
 player_money, money_requests, empire_requests, partner_gives_acked = 100000, {}, {}, {}
+HOST_RELATIONS = { argon = 0.3, teladi = -0.2, xenon = -1 }
+our_relations = sc.rel_test == "join" and { argon = 0.1, teladi = -0.2, xenon = -1 } or { argon = 0.3, teladi = -0.2, xenon = -1 }
+rel_actions, rel_reads, rel_changes_seen, rel_named = {}, 0, {}, {}
 function GetPlayerMoney() return player_money end
 function SetNPCBlackboard(_, key, v) blackboard[key] = v end
 function ExecuteDebugCommand(cmd, param) say("  ego command /%s %s", cmd, tostring(param)) end
@@ -348,6 +360,29 @@ function AddUITriggeredEvent(screen, control, args)
 		local list = blackboard["$x4coop_mirrors"]
 		list[#list + 1] = { args[1], id, 1 }
 		queue("x4coop.npc_mirror")
+	elseif control == "relations_read" then
+		rel_reads = rel_reads + 1
+		local list = {}
+		for _, id in ipairs(args) do if our_relations[id] then list[#list + 1] = { id, our_relations[id] } end end
+		blackboard["$x4coop_relations"] = list
+		queue("x4coop.relations")
+	elseif control == "relations_sync" then
+		for k = 1, #args - 1, 2 do
+			local id, value = args[k], args[k + 1]
+			if our_relations[id] and math.abs(our_relations[id] - value) > 0.0001 then
+				our_relations[id] = value
+				rel_actions[#rel_actions + 1] = string.format("set:%s=%.4f", id, value)
+			end
+		end
+	elseif control == "relation_add" then
+		local id, change, tag = args[1], args[2], args[3]
+		if our_relations[id] then
+			our_relations[id] = math.max(-1, math.min(1, our_relations[id] + change))
+			rel_actions[#rel_actions + 1] = string.format("add:%s%+.4f", id, change)
+		end
+		queue("x4coop.relation_applied", tag)
+	elseif control == "relations_joiner" then
+		rel_actions[#rel_actions + 1] = "joiner:" .. tostring(args[1])
 	elseif control == "money" then
 		player_money = player_money + args[1]
 		money_requests[#money_requests + 1] = args[1]
@@ -443,6 +478,13 @@ if sc.pipes then
 					partner_queue[#partner_queue + 1] = { at = clock + 2 * ONE_WAY, msg = reply }
 				elseif f[1] == "M" then
 					partner_queue[#partner_queue + 1] = { at = clock + 2 * ONE_WAY, msg = "M|Echo|you said: " .. tostring(f[3]) }
+				elseif f[1] == "V" and f[2] == "change" then
+					rel_changes_seen[#rel_changes_seen + 1] = f[3]
+					if not rel_named[f[3]] then
+						rel_named[f[3]] = true
+						HOST_RELATIONS[f[4]] = HOST_RELATIONS[f[4]] + tonumber(f[5])
+					end
+					partner_queue[#partner_queue + 1] = { at = clock + 2 * ONE_WAY, msg = "V|ack|" .. f[3] }
 				elseif f[1] == "T" and f[2] == "trade" then
 					trades_seen[#trades_seen + 1] = f[3]
 					if not host_named[f[3]] then
@@ -559,6 +601,34 @@ local function trade_script()
 		end
 	elseif sc.econ_test == "host" and pipe_reader then
 		while host_trade_steps[1] and clock >= host_trade_steps[1][1] do table.remove(host_trade_steps, 1)[2]() end
+	end
+end
+
+local rel_next, rel_changed, rel_max_after = 3, false, -2
+local rel_host_steps = {
+	{ 10, function() pipe_reader("V|change|0bcd|teladi|0.020000") end },
+	{ 12, function() pipe_reader("V|change|0bcd|teladi|0.020000") end },  -- sent again: counted once
+}
+local function relations_script()
+	if not sc.rel_test or not pipe_reader then return end
+	if sc.rel_test == "join" then
+		if clock >= rel_next then  -- the host's report, every 2 s here
+			rel_next = clock + 2
+			local values, named = {}, {}
+			for id, v in pairs(HOST_RELATIONS) do values[#values + 1] = string.format("%s:%.6f", id, v) end
+			for tid in pairs(rel_named) do named[#named + 1] = tid end
+			partner_queue[#partner_queue + 1] = { at = clock + ONE_WAY,
+				msg = "V|state|" .. table.concat(values, ",") .. "|" .. table.concat(named, ",") }
+		end
+		if not rel_changed and clock >= 12 then  -- we anger Argon: the game lowers it here at once
+			rel_changed = true
+			our_relations.argon = our_relations.argon - 0.05
+			blackboard["$x4coop_relchanges"] = { { "argon", -0.05 } }
+			queue("x4coop.relation_changed")
+		end
+		if rel_changed and clock > 12.2 then rel_max_after = math.max(rel_max_after, our_relations.argon) end
+	else
+		while rel_host_steps[1] and clock >= rel_host_steps[1][1] do table.remove(rel_host_steps, 1)[2]() end
 	end
 end
 
@@ -684,6 +754,7 @@ while clock < sc.duration do
 	credit_script()
 	death_script()
 	trade_script()
+	relations_script()
 	if sc.partner_restart_at and clock >= sc.partner_restart_at and partner_clock_offset == 1000 then
 		partner_clock_offset = -500
 		say("t=%.1f partner restarted their game (clock jumped back)", clock)
@@ -1100,6 +1171,31 @@ if sc.econ_test == "join" then
 		and acts:find("STN-1:energycells+300", 1, true) ~= nil and acts:find("STN-2:silicon-120", 1, true) ~= nil
 		and acts:find("STN-3:water-100", 1, true) ~= nil and acts:find("STN-3:water-2500", 1, true) ~= nil
 		and acts:find("STN-4:energycells-50", 1, true) ~= nil and acts:find("STN-5:", 1, true) == nil
+end
+if sc.rel_test == "join" then
+	local acts = table.concat(rel_actions, " ")
+	say("relations join: Argon %.4f (host %.4f), highest after our change %.4f; our change sent %d time(s); md: %s",
+		our_relations.argon, HOST_RELATIONS.argon, rel_max_after, #rel_changes_seen, acts:sub(1, 200))
+	ok = ok and math.abs(our_relations.argon - 0.25) < 1e-6 and math.abs(HOST_RELATIONS.argon - 0.25) < 1e-6
+		and rel_max_after < 0.25 + 1e-6 and #rel_changes_seen >= 1 and #rel_changes_seen <= 2
+		and acts:find("set:argon=0.3000", 1, true) ~= nil and acts:find("set:xenon", 1, true) == nil
+		and acts:find("joiner:1", 1, true) ~= nil
+end
+if sc.rel_test == "host" then
+	local acks, states, named_ok = 0, 0, false
+	for _, w in ipairs(pipe_writes) do
+		if w == "V|ack|0bcd" then acks = acks + 1 end
+		if w:sub(1, 8) == "V|state|" then
+			states = states + 1
+			named_ok = w:find("teladi:-0.180000", 1, true) ~= nil and w:find("|0bcd", 1, true) ~= nil
+		end
+	end
+	local adds = 0
+	for _, a in ipairs(rel_actions) do if a:sub(1, 4) == "add:" then adds = adds + 1 end end
+	say("relations host: %d reports (%d reads), the joiner's change added %d time(s), acknowledged %d times, last report includes and names it: %s",
+		states, rel_reads, adds, acks, tostring(named_ok))
+	ok = ok and states >= 2 and adds == 1 and acks == 2 and named_ok and math.abs(our_relations.teladi + 0.18) < 1e-6
+		and table.concat(rel_actions, " "):find("joiner:", 1, true) == nil
 end
 if sc.credits_test then
 	local acks = 0

@@ -357,6 +357,10 @@
           <actions>
             <set_value name="$Obj" exact="event.param"/>
             <do_if value="@$Obj.isclass.ship and @$Obj.sector and not Root.$AllProxies.indexof.{$Obj} and not @Root.$Adopted.indexof.{$Obj}">
+              <do_if value="not Root.$Blame?">
+                <set_value name="Root.$Blame" exact="table[]"/>
+              </do_if>
+              <set_value name="Root.$Blame.{$Obj.owner}" exact="player.age"/>
               <raise_lua_event name="'x4coop.world'" param="'K|' + $Obj.idcode + '|' + $Obj.macro.id + '|' + $Obj.sector.macro.id"/>
             </do_if>
           </actions>
@@ -369,6 +373,10 @@
           <actions>
             <set_value name="$Obj" exact="event.param"/>
             <do_if value="@$Obj.isclass.ship and @$Obj.isoperational and @$Obj.sector and not Root.$AllProxies.indexof.{$Obj} and not @Root.$Adopted.indexof.{$Obj}">
+              <do_if value="not Root.$Blame?">
+                <set_value name="Root.$Blame" exact="table[]"/>
+              </do_if>
+              <set_value name="Root.$Blame.{$Obj.owner}" exact="player.age"/>
               <raise_lua_event name="'x4coop.world'" param="'D|%s|%s|%s|%s|%s'.[$Obj.idcode, $Obj.macro.id, $Obj.sector.macro.id, $Obj.hullpercentage, if $Obj.hasrelation.enemy.{faction.player} then 1 else 0]"/>
             </do_if>
           </actions>
@@ -707,6 +715,10 @@
               <set_value name="$Change" exact="-$Order.amount"/>
             </do_elseif>
             <do_if value="$Station">
+              <do_if value="not Root.$Blame?">
+                <set_value name="Root.$Blame" exact="table[]"/>
+              </do_if>
+              <set_value name="Root.$Blame.{$Station.owner}" exact="player.age"/>
               <do_if value="not player.entity.$x4coop_trades?">
                 <set_value name="player.entity.$x4coop_trades" exact="[]"/>
               </do_if>
@@ -736,6 +748,111 @@
               </actions>
             </cue>
           </cues>
+        </cue>
+
+        <!--
+          Relations (shared faction: one set of relations towards the player; the host's is the truth).
+          relations_read (param3: faction ids): player.entity.$x4coop_relations = [[id, relation], ...], then
+          'x4coop.relations'. relations_sync (joiner; param3: [id, relation, id, relation, ...]) sets ours, and
+          remembers each value so the change it causes isn't mistaken for the joiner's own. relation_add (host;
+          param3: [id, change, tag]) applies a joiner's change and confirms the tag ('x4coop.relation_applied').
+          relations_joiner (param3: [1 or 0]) turns on reporting the joiner's own changes.
+        -->
+        <cue name="OnRelationsRead" instantiate="true">
+          <conditions>
+            <event_ui_triggered screen="'x4coop'" control="'relations_read'"/>
+          </conditions>
+          <actions>
+            <set_value name="$List" exact="[]"/>
+            <do_for_each name="$Id" in="event.param3">
+              <set_value name="$Faction" exact="@faction.{$Id}"/>
+              <do_if value="$Faction and $Faction != faction.player">
+                <append_to_list name="$List" exact="[$Id, $Faction.relationto.{faction.player}]"/>
+              </do_if>
+            </do_for_each>
+            <set_value name="player.entity.$x4coop_relations" exact="$List"/>
+            <raise_lua_event name="'x4coop.relations'"/>
+          </actions>
+        </cue>
+
+        <cue name="OnRelationsSync" instantiate="true">
+          <conditions>
+            <event_ui_triggered screen="'x4coop'" control="'relations_sync'"/>
+          </conditions>
+          <actions>
+            <set_value name="$Args" exact="event.param3"/>
+            <do_if value="not Root.$SyncedRelation?">
+              <set_value name="Root.$SyncedRelation" exact="table[]"/>
+            </do_if>
+            <do_all exact="$Args.count / 2" counter="$k">
+              <set_value name="$Faction" exact="@faction.{$Args.{2 * $k - 1}}"/>
+              <set_value name="$Value" exact="$Args.{2 * $k}"/>
+              <do_if value="$Faction and $Faction != faction.player and ($Faction.relationto.{faction.player} - $Value gt 0.0001 or $Faction.relationto.{faction.player} - $Value lt -0.0001)">
+                <set_value name="Root.$SyncedRelation.{$Faction}" exact="$Value"/>
+                <set_faction_relation faction="$Faction" otherfaction="faction.player" value="$Value"/>
+              </do_if>
+            </do_all>
+          </actions>
+        </cue>
+
+        <cue name="OnRelationAdd" instantiate="true">
+          <conditions>
+            <event_ui_triggered screen="'x4coop'" control="'relation_add'"/>
+          </conditions>
+          <actions>
+            <set_value name="$Faction" exact="@faction.{event.param3.{1}}"/>
+            <do_if value="$Faction and $Faction != faction.player">
+              <set_value name="$Value" exact="[-1.0, [1.0, $Faction.relationto.{faction.player} + event.param3.{2}].min].max"/>
+              <set_faction_relation faction="$Faction" otherfaction="faction.player" value="$Value"/>
+            </do_if>
+            <raise_lua_event name="'x4coop.relation_applied'" param="event.param3.{3}"/>
+          </actions>
+        </cue>
+
+        <cue name="OnRelationsJoiner" instantiate="true">
+          <conditions>
+            <event_ui_triggered screen="'x4coop'" control="'relations_joiner'"/>
+          </conditions>
+          <actions>
+            <set_value name="Root.$RelationsJoiner" exact="event.param3.{1}"/>
+          </actions>
+        </cue>
+
+        <!--
+          Joiner: a change in a faction's relation towards the player that the joiner caused. Missions, smalltalk,
+          scans, hacking and illegal cargo are always the joiner's; attacks, kills, trades and the rest only if the
+          joiner hit, killed or traded with that faction in the last 3 s (the empire's ships do those too, and the
+          host's game counts them). Changes our own sync made are skipped. Reply: appended to
+          player.entity.$x4coop_relchanges as [faction id, change], then 'x4coop.relation_changed'.
+        -->
+        <cue name="OnRelationChanged" instantiate="true">
+          <conditions>
+            <event_faction_relation_changed/>
+            <check_value value="@Root.$RelationsJoiner == 1 and (event.param == faction.player or event.param2 == faction.player)"/>
+          </conditions>
+          <actions>
+            <set_value name="$Other" exact="if event.param == faction.player then event.param2 else event.param"/>
+            <set_value name="$New" exact="event.param3.{1}"/>
+            <set_value name="$Old" exact="event.param3.{2}"/>
+            <set_value name="$Reason" exact="@event.param3.{3}"/>
+            <set_value name="$Ours" exact="false"/>
+            <do_if value="Root.$SyncedRelation? and Root.$SyncedRelation.{$Other}? and $New - Root.$SyncedRelation.{$Other} lt 0.0001 and $New - Root.$SyncedRelation.{$Other} gt -0.0001">
+              <remove_value name="Root.$SyncedRelation.{$Other}"/>
+            </do_if>
+            <do_elseif value="$Reason == relationchangereason.missioncompleted or $Reason == relationchangereason.missionfailed or $Reason == relationchangereason.smalltalkreward or $Reason == relationchangereason.scanningdiscovered or $Reason == relationchangereason.hackingdiscovered or $Reason == relationchangereason.illegalcargo or $Reason == relationchangereason.illegalplot">
+              <set_value name="$Ours" exact="true"/>
+            </do_elseif>
+            <do_elseif value="Root.$Blame? and Root.$Blame.{$Other}? and player.age - Root.$Blame.{$Other} lt 3s">
+              <set_value name="$Ours" exact="true"/>
+            </do_elseif>
+            <do_if value="$Ours and $New != $Old">
+              <do_if value="not player.entity.$x4coop_relchanges?">
+                <set_value name="player.entity.$x4coop_relchanges" exact="[]"/>
+              </do_if>
+              <append_to_list name="player.entity.$x4coop_relchanges" exact="[$Other.id, $New - $Old]"/>
+              <raise_lua_event name="'x4coop.relation_changed'"/>
+            </do_if>
+          </actions>
         </cue>
 
         <cue name="OnNpcClear" instantiate="true">

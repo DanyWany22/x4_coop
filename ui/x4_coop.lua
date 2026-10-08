@@ -57,6 +57,8 @@ ffi.cdef[[
 	bool IsSaveValid(const char* filename);
 	void ReloadSaveList(void);
 	UIPosRot GetObjectPositionInSector(UniverseID objectid);
+	uint32_t GetNumAllFactions(bool includehidden);
+	uint32_t GetAllFactions(const char** result, uint32_t resultlen, bool includehidden);
 	const char* GetPlayerName(void);
 	UniverseID GetPlayerID(void);
 	UniverseID GetPlayerOccupiedShipID(void);
@@ -94,6 +96,8 @@ local config = {
 	economy_cycle = 60,       -- s for the host to send every station once
 	empire_income_to_host = 1, -- shared world: the empire's automated trade income is the host's, not the joiner's
 	credit_timeout = 30,      -- s: credits given that the partner hasn't confirmed by then come back
+	relations = 1,            -- shared world: the faction relations towards the player are the host's, plus the joiner's own changes
+	relation_period = 10,     -- s between the host's relation reports
 	ghost_latency = 0.12,     -- s, simulated one-way latency in ghost mode
 	ghost_jitter = 0.03,      -- s, extra random delay per snapshot
 	ghost_loss = 0.0,         -- 0..1, fraction of snapshots dropped
@@ -335,6 +339,7 @@ local function reset()
 		econ = { on = false, list = {}, by_code = {}, next = 1, budget = 0, cycle = 0, pass = nil, last = nil },
 		credits = { pending = {}, received = {}, empire_on = false, trades_on = false, empire_trades = 0 },
 		trades = { pending = {}, applied = {}, listed = {}, seq = 0, sent = 0, counted = 0 },
+		rel = { joiner_on = false, next_read = 0, pending = {}, applied = {}, named = {}, seq = 0, host = nil, counted = 0 },
 		net = { api = nil, status = "idle", reading = false, connected = false, retry_at = 0, last_ping = -1e9, rtt = nil,
 			partner = kept_partner },
 	}
@@ -689,6 +694,7 @@ local on_pipe_message
 local on_world_message  -- shared-world messages (R, L, K, D), defined after proxy management
 local credits_receive   -- credits from or for the partner (C), defined with the shared world
 local trades_receive    -- the joiner's own trades with stations (T), defined with the economy
+local relations_receive -- faction relations (V), defined with the credits
 local send_link
 
 local function net_send(msg)
@@ -772,6 +778,8 @@ on_pipe_message = function(msg)
 		if config.mode == "net" then credits_receive(f, now) end
 	elseif kind == "T" then
 		if config.mode == "net" then trades_receive(f, now) end
+	elseif kind == "V" then
+		if config.mode == "net" then relations_receive(f, now) end
 	elseif kind == "M" then
 		local text = clean_text(f[3], 200)
 		if text ~= "" then
@@ -1950,6 +1958,144 @@ local function credits_tick(now)
 end
 
 -------------------------------------------------------------------------------
+-- Relations (shared faction: one set of relations towards the player). The host's are the truth: every
+-- relation_period seconds the host reads them all (md OnRelationsRead) and sends them
+-- ("V|state|faction:relation,...|ids of joiner changes included"); the joiner sets its own to match (md
+-- OnRelationsSync). Changes the joiner causes (md OnRelationChanged decides which) go to the host until confirmed
+-- ("V|change|id|faction|change" / "V|ack|id"); the host adds them (md OnRelationAdd), and until a report names
+-- one, the joiner keeps it on top of the host's figures.
+
+local function relations_enabled()
+	return config.mode == "net" and S.link.linked and config.relations == 1
+end
+
+local faction_ids
+local function all_factions()
+	if not faction_ids then
+		faction_ids = {}
+		local n = C.GetNumAllFactions(false)
+		local buf = ffi.new("const char*[?]", math.max(1, n))
+		n = C.GetAllFactions(buf, n, false)
+		for i = 0, n - 1 do
+			local id = ffi.string(buf[i])
+			if id ~= "player" and id:match("^[%w_]+$") then faction_ids[#faction_ids + 1] = id end
+		end
+	end
+	return faction_ids
+end
+
+-- md read the relations: the host reports them; the joiner compares them with the host's
+local function on_relations()
+	local R = S.rel
+	local list = S.player and GetNPCBlackboard(S.player, "$x4coop_relations")
+	if type(list) ~= "table" or not relations_enabled() then return end
+	if S.link.role == "host" then
+		local values, ids = {}, {}
+		for _, v in ipairs(list) do
+			if type(v) == "table" and type(v[1]) == "string" and tonumber(v[2]) then
+				values[#values + 1] = string.format("%s:%.6f", v[1], tonumber(v[2]))
+			end
+		end
+		for tid in pairs(R.named) do ids[#ids + 1] = tid end
+		net_send("V|state|" .. table.concat(values, ",") .. "|" .. table.concat(ids, ","))
+	end
+end
+
+-- Joiner: the host's relations, plus our own changes it hasn't counted yet, become ours.
+local function relations_apply(f)
+	local R = S.rel
+	local named, args = {}, {}
+	for tid in (f[4] or ""):gmatch("[^,]+") do named[tid] = true end
+	local target = {}
+	for item in (f[3] or ""):gmatch("[^,]+") do
+		local id, value = item:match("^([%w_]+):(%-?[%d%.]+)$")
+		if id and tonumber(value) then target[id] = tonumber(value) end
+	end
+	for tid, c in pairs(R.pending) do
+		if named[tid] then
+			R.pending[tid] = nil
+		elseif target[c.faction] then
+			target[c.faction] = math.max(-1, math.min(1, target[c.faction] + c.change))
+		end
+	end
+	for id, value in pairs(target) do
+		args[#args + 1], args[#args + 2] = id, value
+	end
+	if #args > 0 then request("relations_sync", args) end
+end
+
+-- Joiner: md saw a relation change we caused.
+local function on_relation_changed()
+	local R = S.rel
+	local list = S.player and GetNPCBlackboard(S.player, "$x4coop_relchanges")
+	if S.player then SetNPCBlackboard(S.player, "$x4coop_relchanges", nil) end
+	if type(list) ~= "table" then return end
+	local now = getElapsedTime()
+	for _, v in ipairs(list) do
+		local id, change = type(v) == "table" and v[1], type(v) == "table" and tonumber(v[2])
+		if type(id) == "string" and id:match("^[%w_]+$") and change and change ~= 0 then
+			R.seq = R.seq + 1
+			local tid = string.format("%06x%04x", math.floor(now * 1000) % 0x1000000, R.seq % 0x10000)
+			R.pending[tid] = { faction = id, change = change, first = now, last = -1e9 }
+		end
+	end
+end
+
+-- Host: md added a joiner's change; our reports name it from now on.
+local function on_relation_applied(_, tid)
+	if S.rel.applied[tid] then S.rel.named[tid] = getElapsedTime() end
+end
+
+relations_receive = function(f, now)
+	local R, K = S.rel, S.link
+	if not relations_enabled() then return end
+	if f[2] == "state" and K.role == "join" then
+		relations_apply(f)
+	elseif f[2] == "change" and K.role == "host" then
+		local tid, id, change = f[3], f[4], tonumber(f[5])
+		if not (tid and #tid <= 16 and tid:match("^%x+$") and id and #id <= 64 and id:match("^[%w_]+$") and change
+			and change ~= 0 and math.abs(change) <= 2) then
+			return
+		end
+		if not R.applied[tid] then
+			R.applied[tid] = now
+			R.counted = R.counted + 1
+			request("relation_add", { id, change, tid })
+		end
+		net_send("V|ack|" .. tid)
+	elseif f[2] == "ack" and K.role == "join" then
+		local c = R.pending[f[3] or ""]
+		if c then c.acked = true end
+	end
+end
+
+local function relations_tick(now)
+	local R = S.rel
+	local on = relations_enabled()
+	local joiner_on = on and S.link.role == "join"
+	if joiner_on ~= R.joiner_on then
+		R.joiner_on = joiner_on
+		request("relations_joiner", { joiner_on and 1 or 0 })
+	end
+	if not on then return end
+	if S.link.role == "host" and now >= R.next_read then
+		R.next_read = now + config.relation_period
+		request("relations_read", all_factions())
+	end
+	for tid, c in pairs(R.pending) do  -- joiner: send until confirmed
+		if now - c.first > TRADE_KEEP then
+			R.pending[tid] = nil
+		elseif not c.acked and now - c.last >= TRADE_RETRY and S.net.connected then
+			c.last = now
+			net_send(string.format("V|change|%s|%s|%.6f", tid, c.faction, c.change))
+		end
+	end
+	for tid, at in pairs(R.applied) do  -- host: stop naming old changes
+		if now - at > TRADE_KEEP then R.applied[tid], R.named[tid] = nil, nil end
+	end
+end
+
+-------------------------------------------------------------------------------
 -- Chat commands
 
 -- The first thing standing in the way of co-op, with what to do about it; "all good" when nothing does.
@@ -2209,6 +2355,7 @@ local function tick(now, dt)
 	npc_tick(now, dt)
 	econ_tick(now, dt)
 	credits_tick(now)
+	relations_tick(now)
 end
 
 local function on_update()
@@ -2237,6 +2384,9 @@ local function init()
 	RegisterEvent("x4coop.joiner_trade", on_joiner_trade)
 	RegisterEvent("x4coop.stock_applied", on_stock_applied)
 	RegisterEvent("x4coop.area_death", on_area_death)
+	RegisterEvent("x4coop.relations", on_relations)
+	RegisterEvent("x4coop.relation_changed", on_relation_changed)
+	RegisterEvent("x4coop.relation_applied", on_relation_applied)
 	RegisterEvent("x4coop.empire_trade", on_empire_trade)
 	RegisterEvent("x4coop.npc_mirror", on_npc_mirror)
 

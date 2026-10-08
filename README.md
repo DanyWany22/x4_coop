@@ -209,6 +209,15 @@ What syncs while linked:
   the host's next report includes the trade, the joiner's game keeps it, so the station never forgets it
   and never counts it twice.
 
+**Reputation:** you share one faction, so you share its standing with every other faction. The host's
+relations are the truth, and the host's game reports them every 10 seconds (`relation_period`). Changes
+the joiner causes are sent to the host and counted there:
+* missions, smalltalk, being caught scanning, hacking or carrying illegal cargo
+* attacks, kills and trades, but only when the joiner did them personally (the empire's own ships
+  fight and trade in both games, and the host's game already counts those)
+
+`/x4coop set relations 0` turns it off.
+
 **Credits:** you share one empire (the same faction), but each of you has your own wallet.
 * **The empire's income is the host's.** Both games run the empire's automated traders and miners,
   but only the host's game counts them. In the joiner's game, what an empire ship earns on its own
@@ -382,7 +391,7 @@ game's own schema (`libraries/md.xsd`, `libraries/common.xsd`).
 
 Messages (one text line each): `S` snapshot (position, rotation, velocity, ship, hull, shield),
 `P`/`Q` ping, `M` chat, `L` world link, `K` kill, `D` hit, `F` firing at, `B` nearby ships (both
-ways), `E` station stock (host to joiner), `T` a joiner's trade, `C` credits given; `R`/`W`/`N`/`X` are between a game and
+ways), `E` station stock (host to joiner), `T` a joiner's trade, `V` relations, `C` credits given; `R`/`W`/`N`/`X` are between a game and
 its own bridge.
 
 Self-calibration: on first contact the proxy is nudged and read back (does `SetObjectSectorPos`
@@ -418,6 +427,7 @@ python extensions/x4_coop/dev/run_tests.py [--quick]
   credits given both ways (confirmed, counted once when offered twice, returned when unconfirmed),
   the joiner's trades counted on the host (once, named in its reports, never reverted on the joiner),
   deaths near either player reported from any sector (only by the game that rules that area),
+  relations both ways (the host's followed; a joiner's change counted once and never undone in flight),
   hostile messages, guest ship, save handoff commands. Errors are measured against ground truth:
   the partner within ~2–3 m and ~2° (95th percentile) at 220–300 m/s; NPC copies within ~3.5 m.
 * Bridge: password codec (encryption, replay, tamper, stale, other versions), reconnects, chat, wrong password, partner
