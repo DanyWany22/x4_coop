@@ -37,6 +37,8 @@ local SC = {
 	                 role = "join", own_world = "abc123", partner_world = "abc123", econ_test = "join" },
 	credits      = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
 	                 role = "join", own_world = "abc123", partner_world = "abc123", credits_test = true },
+	npc_apart_join = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
+	                 role = "join", own_world = "abc123", partner_world = "abc123", npc_test = "apart_join", partner_sector = 501 },
 	npc_apart    = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
 	                 role = "host", own_world = "abc123", partner_world = "abc123", npc_test = "apart", partner_sector = 501 },
 	world_oldmod = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
@@ -113,7 +115,7 @@ if sc.npc_test then
 			macro = SHIP_MACRO, idcode = "NPC-" .. i }
 	end
 end
-if sc.npc_test == "apart" then
+if sc.npc_test == "apart" or sc.npc_test == "apart_join" then
 	local pl = objects[PLAYER]
 	for i = 1, NPC_COUNT do
 		local x, y, z = npc_truth(20 + i, 0, { x = pl.x + 150, y = pl.y, z = pl.z })
@@ -159,7 +161,7 @@ local last_status = nil
 local spawn_sectors, world_requests, adoptions = {}, {}, 0
 local bubble_radius = 0
 setpos_count = {}
-stock_actions, log_lines = {}, {}
+stock_actions, log_lines, trades_seen, host_named = {}, {}, {}, {}
 local mirror_of_code, obj_actions, found_own = {}, {}, {}
 local proxy_id = nil
 local history = {}   -- player pose history for ground truth
@@ -361,12 +363,13 @@ function AddUITriggeredEvent(screen, control, args)
 	elseif control == "stock" then
 		local o = objects[args[1]]
 		if o and o.station then
-			for k = 2, #args - 1, 2 do
+			for k = 3, #args - 1, 2 do
 				local ware, change = args[k], args[k + 1]
 				o.cargo[ware] = (o.cargo[ware] or 0) + change
 				if o.cargo[ware] <= 0 then o.cargo[ware] = nil end
 				stock_actions[#stock_actions + 1] = string.format("%s:%s%+d", o.idcode, ware, change)
 			end
+			if args[2] ~= "" then queue("x4coop.stock_applied", args[2]) end
 		end
 	elseif control == "npc_clear" then
 		for id, o in pairs(objects) do if o.mirror then objects[id] = nil end end
@@ -440,6 +443,13 @@ if sc.pipes then
 					partner_queue[#partner_queue + 1] = { at = clock + 2 * ONE_WAY, msg = reply }
 				elseif f[1] == "M" then
 					partner_queue[#partner_queue + 1] = { at = clock + 2 * ONE_WAY, msg = "M|Echo|you said: " .. tostring(f[3]) }
+				elseif f[1] == "T" and f[2] == "trade" then
+					trades_seen[#trades_seen + 1] = f[3]
+					if not host_named[f[3]] then
+						host_named[f[3]] = f[4]
+						HOST_STOCK[f[4]][f[5]] = (HOST_STOCK[f[4]][f[5]] or 0) + tonumber(f[6])
+					end
+					partner_queue[#partner_queue + 1] = { at = clock + 2 * ONE_WAY, msg = "T|ack|" .. f[3] }
 				elseif f[1] == "C" and f[2] == "give" then
 					if not next(partner_gives_acked) then
 						partner_gives_acked[f[3]] = f[4]
@@ -479,7 +489,7 @@ local function fake_host_bubble()
 end
 
 local function fake_joiner_bubble()
-	if sc.npc_test ~= "apart" or not pipe_reader or clock < next_b or #history < 2 then return end
+	if (sc.npc_test ~= "apart" and sc.npc_test ~= "apart_join") or not pipe_reader or clock < next_b or #history < 2 then return end
 	next_b = clock + 0.1
 	local h, h0 = history[#history], player_at(clock - 0.05)
 	local c = { x = h.x + ECHO_OFFSET[1], y = h.y, z = h.z }
@@ -509,8 +519,19 @@ local function fake_host_stock()
 	local wares = {}
 	for ware, amount in pairs(HOST_STOCK[code]) do wares[#wares + 1] = ware .. ":" .. amount end
 	table.sort(wares)
-	partner_queue[#partner_queue + 1] = { at = clock + ONE_WAY, msg = string.format("E|stock|%d|%d|%d|%s|%s", econ_pass,
-		econ_index, #HOST_ORDER, code, table.concat(wares, ",")) }
+	local named = {}
+	for tid, at in pairs(host_named) do if at == code then named[#named + 1] = tid end end
+	partner_queue[#partner_queue + 1] = { at = clock + ONE_WAY, msg = string.format("E|stock|%d|%d|%d|%s|%s|%s", econ_pass,
+		econ_index, #HOST_ORDER, code, table.concat(wares, ","), table.concat(named, ",")) }
+end
+
+local death_steps = {
+	{ 15, function() queue("x4coop.area_death", (sc.npc_test == "apart" and "NPC-2|" or "NPC-3|") .. SHIP_MACRO .. "|" .. SECTORS[500]) end },
+	{ 16, function() queue("x4coop.area_death", "NPC-21|" .. SHIP_MACRO .. "|" .. SECTORS[501]) end },
+}
+local function death_script()
+	if sc.npc_test ~= "apart" and sc.npc_test ~= "apart_join" then return end
+	while death_steps[1] and clock >= death_steps[1][1] do table.remove(death_steps, 1)[2]() end
 end
 
 local credit_steps = {
@@ -521,6 +542,26 @@ local credit_steps = {
 	{ 12, function() pipe_reader("C|give|00c0ffee|1234|Partner") end },  -- offered again: count once
 	{ 14, function() ExecuteDebugCommand("x4coop", "give 700") end },      -- never confirmed: comes back
 }
+local trade_done, max_after_trade, host_trade_steps = false, 0, {
+	{ 10, function() pipe_reader("T|trade|0abc|STN-2|hullparts|50") end },
+	{ 12, function() pipe_reader("T|trade|0abc|STN-2|hullparts|50") end },  -- sent again: counted once
+}
+local function trade_script()
+	if sc.econ_test == "join" then
+		if not trade_done and clock >= 12 and pipe_reader then
+			trade_done = true  -- we sell 200 energy cells' worth... we buy 200 from STN-1: the game changes our copy at once
+			objects[701].cargo.energycells = objects[701].cargo.energycells - 200
+			blackboard["$x4coop_trades"] = { { 701, "energycells", -200 } }
+			queue("x4coop.joiner_trade")
+		end
+		if trade_done and clock > 12.2 then
+			max_after_trade = math.max(max_after_trade, objects[701].cargo.energycells or 0)
+		end
+	elseif sc.econ_test == "host" and pipe_reader then
+		while host_trade_steps[1] and clock >= host_trade_steps[1][1] do table.remove(host_trade_steps, 1)[2]() end
+	end
+end
+
 local function credit_script()
 	if not sc.credits_test or not pipe_reader then return end
 	while credit_steps[1] and clock >= credit_steps[1][1] do
@@ -607,7 +648,7 @@ local max_proxies = 0
 while clock < sc.duration do
 	clock = clock + frame_dt
 	step_player(frame_dt)
-	if sc.npc_test == "host" or sc.npc_test == "apart" then
+	if sc.npc_test == "host" or sc.npc_test == "apart" or sc.npc_test == "apart_join" then
 		local h = history[#history]
 		for i = 1, NPC_COUNT do
 			local o = objects[400 + i]
@@ -641,6 +682,8 @@ while clock < sc.duration do
 	fake_joiner_bubble()
 	fake_host_stock()
 	credit_script()
+	death_script()
+	trade_script()
 	if sc.partner_restart_at and clock >= sc.partner_restart_at and partner_clock_offset == 1000 then
 		partner_clock_offset = -500
 		say("t=%.1f partner restarted their game (clock jumped back)", clock)
@@ -765,7 +808,7 @@ while clock < sc.duration do
 			rot_errs[#rot_errs + 1] = mat_angle(engine_mat(o.yaw, o.pitch, o.roll), truth.m)
 		end
 	end
-	if sc.npc_test == "apart" and clock > 8 and not chatted then
+	if (sc.npc_test == "apart" or sc.npc_test == "apart_join") and clock > 8 and not chatted then
 		local h = history[#history]
 		local c = { x = h.x + ECHO_OFFSET[1], y = h.y, z = h.z }
 		for i = 1, NPC_COUNT do
@@ -926,7 +969,7 @@ end
 if sc.npc_test then
 	local bs = {}
 	for _, w in ipairs(pipe_writes) do if w:sub(1, 2) == "B|" then bs[#bs + 1] = w end end
-	if sc.npc_test == "apart" then
+	if sc.npc_test == "apart" or sc.npc_test == "apart_join" then
 		local last = ""  -- our last report from our own sector (at the end, /x4coop join takes us to the joiner)
 		for _, b in ipairs(bs) do if b:find("|" .. SECTORS[500] .. "|", 1, true) then last = b end end
 		local st, emax, e95 = stats(npc_errs)
@@ -937,10 +980,16 @@ if sc.npc_test then
 			st, #npc_errs, tostring(mid), tostring(apart_mirror_sector), mst)
 		say("npc apart: NPC-1 moved by us %d times; our last B lists NPC-1: %s, NPC-21: %s; actions: %s",
 			setpos_count[401] or 0, tostring(last:find("NPC-1,", 1, true) ~= nil), tostring(last:find("NPC-21,", 1, true) ~= nil), acts)
+		local sent = table.concat(pipe_writes, "\n")
+		local ours = sc.npc_test == "apart" and "K|NPC-2|" or "K|NPC-3|"
+		say("npc %s: death in our area reported: %s; death in the partner's area reported: %s", sc.npc_test,
+			tostring(sent:find(ours, 1, true) ~= nil), tostring(sent:find("K|NPC-21|", 1, true) ~= nil))
+		ok = ok and sent:find(ours, 1, true) ~= nil and sent:find("K|NPC-21|", 1, true) == nil
 		ok = ok and #npc_errs > 1000 and e95 < 5
 			and mid ~= nil and apart_mirror_sector == 501 and #mirror_errs > 500 and m95 < 10
 			and (setpos_count[401] or 0) == 0                            -- our own area stays ours
-			and last:find("NPC-1,", 1, true) ~= nil and last:find("NPC-21,", 1, true) == nil
+			-- we report our own area (as joiner, not NPC-1: the host claims that one, falsely, so it is the host's)
+			and last:find(sc.npc_test == "apart" and "NPC-1," or "NPC-2,", 1, true) ~= nil and last:find("NPC-21,", 1, true) == nil
 			and acts:find("obj_remove:427", 1, true) ~= nil             -- only we had it, in the joiner's area
 			and acts:find("obj_remove:428", 1, true) == nil             -- player-owned: kept
 			and acts:find("obj_hull:421,55", 1, true) ~= nil            -- the joiner's lower hull taken
@@ -993,25 +1042,32 @@ if sc.npc_test then
 	end
 end
 if sc.econ_test == "host" then
-	local sent, per_station, last_by_code = 0, {}, {}
+	local sent, per_station, last_by_code, last_named = 0, {}, {}, {}
 	for _, w in ipairs(pipe_writes) do
-		local pass, index, count, code, wares = w:match("^E|stock|(%d+)|(%d+)|(%d+)|([%w%-]+)|(.*)$")
+		local pass, index, count, code, wares, named = w:match("^E|stock|(%d+)|(%d+)|(%d+)|([%w%-]+)|([^|]*)|(.*)$")
 		if code then
 			sent = sent + 1
 			per_station[code] = (per_station[code] or 0) + 1
 			last_by_code[code] = wares
+			last_named[code] = named
 		end
 	end
 	local exact = 0
-	for code, cargo in pairs(HOST_STOCK) do
-		local want = {}
-		for ware, amount in pairs(cargo) do want[#want + 1] = ware .. ":" .. amount end
+	for i = 1, 5 do  -- what we sent last must be what our stations hold at the end
+		local o, want = objects[700 + i], {}
+		for ware, amount in pairs(o.cargo) do want[#want + 1] = ware .. ":" .. amount end
 		table.sort(want)
-		if last_by_code[code] == table.concat(want, ",") then exact = exact + 1 end
+		if last_by_code[o.idcode] == table.concat(want, ",") then exact = exact + 1 end
 	end
+	local acks, counted = 0, 0
+	for _, w in ipairs(pipe_writes) do if w == "T|ack|0abc" then acks = acks + 1 end end
+	for _, a in ipairs(stock_actions) do if a == "STN-2:hullparts+50" then counted = counted + 1 end end
+	say("econ host: the joiner's trade counted %d time(s), acknowledged %d times, named in our STN-2 report: %s",
+		counted, acks, tostring(last_named["STN-2"]))
+	ok = ok and counted == 1 and acks == 2 and last_named["STN-2"] == "0abc" and objects[702].cargo.hullparts == 850
 	say("econ host: %d station reports sent (%.1f/s); each of the 5 stations sent %s times; exact contents %d of 5",
 		sent, sent / sc.duration, tostring(per_station["STN-1"]), exact)
-	ok = ok and sent > 80 and exact == 5 and per_station["STN-9"] == nil and #stock_actions == 0
+	ok = ok and sent > 80 and exact == 5 and per_station["STN-9"] == nil and #stock_actions == 1
 end
 if sc.econ_test == "join" then
 	local passes, first, late_zero = {}, nil, 0
@@ -1036,6 +1092,10 @@ if sc.econ_test == "join" then
 	say("econ join: %d passes logged; first: %s matched, %s missing, drift %s%%; late passes with no drift: %d; stations equal to the host's at the end: %d of 5",
 		#passes, first and first[2] or "-", first and first[3] or "-", first and first[4] or "-", late_zero, equal)
 	say("econ join: stock changes: %s", acts:sub(1, 300))
+	say("econ join: our trade sent %d time(s); STN-1 energy cells after it: highest %d, at the end %d, host %d",
+		#trades_seen, max_after_trade, objects[701].cargo.energycells or 0, HOST_STOCK["STN-1"].energycells)
+	ok = ok and #trades_seen >= 1 and #trades_seen <= 2 and max_after_trade == 5000
+		and objects[701].cargo.energycells == 5000 and HOST_STOCK["STN-1"].energycells == 5000
 	ok = ok and #passes > 30 and first and first[4] > 0 and late_zero > 5 and equal == 5
 		and acts:find("STN-1:energycells+300", 1, true) ~= nil and acts:find("STN-2:silicon-120", 1, true) ~= nil
 		and acts:find("STN-3:water-100", 1, true) ~= nil and acts:find("STN-3:water-2500", 1, true) ~= nil

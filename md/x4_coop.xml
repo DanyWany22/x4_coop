@@ -481,6 +481,10 @@
             </do_for_each>
             <set_value name="player.entity.$x4coop_bubble" exact="$Bubble"/>
             <set_value name="player.entity.$x4coop_bubble_complete" exact="$Complete"/>
+            <do_if value="AreaWatch.$Ships?">
+              <clear_group group="AreaWatch.$Ships"/>
+              <add_to_group groupname="AreaWatch.$Ships" list="$Bubble"/>
+            </do_if>
             <!-- The same around the partner's ship, wherever it is: our copies there follow the partner's reports. -->
             <set_value name="$Near" exact="[]"/>
             <set_value name="$NearComplete" exact="0"/>
@@ -586,8 +590,9 @@
         </cue>
 
         <!--
-          Joiner: set one station's stock to the host's.
-          param3: [station, ware id, change, ware id, change, ...]; a positive change adds, a negative one removes.
+          Change a station's stock: the joiner matching the host's, or the host counting a joiner's trade.
+          param3: [station, tag, ware id, change, ware id, change, ...]; a positive change adds, a negative one
+          removes. A non-empty tag (a joiner trade's id) is confirmed with 'x4coop.stock_applied' once applied.
         -->
         <cue name="OnStock" instantiate="true">
           <conditions>
@@ -597,9 +602,9 @@
             <set_value name="$Args" exact="event.param3"/>
             <set_value name="$Station" exact="$Args.{1}"/>
             <do_if value="@$Station.isclass.station and $Station.isoperational">
-              <do_all exact="($Args.count - 1) / 2" counter="$k">
-                <set_value name="$Ware" exact="@ware.{$Args.{2 * $k}}"/>
-                <set_value name="$Change" exact="$Args.{2 * $k + 1}"/>
+              <do_all exact="($Args.count - 2) / 2" counter="$k">
+                <set_value name="$Ware" exact="@ware.{$Args.{2 * $k + 1}}"/>
+                <set_value name="$Change" exact="$Args.{2 * $k + 2}"/>
                 <do_if value="$Ware and $Change gt 0">
                   <add_cargo object="$Station" ware="$Ware" exact="$Change"/>
                 </do_if>
@@ -607,6 +612,9 @@
                   <remove_cargo object="$Station" ware="$Ware" exact="-$Change"/>
                 </do_elseif>
               </do_all>
+            </do_if>
+            <do_if value="$Args.{2} != ''">
+              <raise_lua_event name="'x4coop.stock_applied'" param="$Args.{2}"/>
             </do_if>
           </actions>
         </cue>
@@ -628,7 +636,8 @@
         </cue>
 
         <!--
-          Shared world, joiner: the empire's automated trade income is the host's (param3: [1 or 0, world id]).
+          Shared world, joiner: the empire's automated trade income is the host's, and the joiner's own trades
+          count on the host (param3: [income 1 or 0, world id, trades 1 or 0]).
           The empire is the player-owned ships in the host's save, listed once per world; ships the joiner buys
           later are the joiner's own.
         -->
@@ -638,7 +647,8 @@
           </conditions>
           <actions>
             <set_value name="Root.$EmpireOn" exact="event.param3.{1}"/>
-            <do_if value="Root.$EmpireOn == 1 and @Root.$EmpireWorld != event.param3.{2}">
+            <set_value name="Root.$JoinerTradesOn" exact="@event.param3.{3}"/>
+            <do_if value="(Root.$EmpireOn == 1 or Root.$JoinerTradesOn == 1) and @Root.$EmpireWorld != event.param3.{2}">
               <find_ship name="$Owned" owner="faction.player" space="player.galaxy" multiple="true"/>
               <set_value name="Root.$EmpireShips" exact="$Owned"/>
               <set_value name="Root.$EmpireWorld" exact="event.param3.{2}"/>
@@ -670,6 +680,62 @@
               <raise_lua_event name="'x4coop.empire_trade'"/>
             </do_if>
           </actions>
+        </cue>
+
+        <!--
+          Shared world, joiner: a trade the joiner made with a station, from the ship they fly or a ship they bought
+          themselves, changed that station's stock; the host's station must count it too. Reply: appended to
+          player.entity.$x4coop_trades as [station, ware id, stock change], then 'x4coop.joiner_trade'.
+        -->
+        <cue name="OnJoinerTrade" instantiate="true">
+          <conditions>
+            <event_trade_completed space="player.galaxy"/>
+            <check_value value="@Root.$JoinerTradesOn == 1 and @event.param2.amount gt 0 and event.param2 != @Root.$LastJoinerOrder"/>
+          </conditions>
+          <actions>
+            <set_value name="$Order" exact="event.param2"/>
+            <set_value name="Root.$LastJoinerOrder" exact="$Order"/>
+            <set_value name="$Seller" exact="@$Order.seller"/>
+            <set_value name="$Buyer" exact="@$Order.buyer"/>
+            <set_value name="$Station" exact="null"/>
+            <do_if value="@$Seller.isclass.ship and $Seller.isplayerowned and ($Seller == player.occupiedship or not @Root.$EmpireShips.indexof.{$Seller}) and @$Buyer.isclass.station">
+              <set_value name="$Station" exact="$Buyer"/>
+              <set_value name="$Change" exact="$Order.amount"/>
+            </do_if>
+            <do_elseif value="@$Buyer.isclass.ship and $Buyer.isplayerowned and ($Buyer == player.occupiedship or not @Root.$EmpireShips.indexof.{$Buyer}) and @$Seller.isclass.station">
+              <set_value name="$Station" exact="$Seller"/>
+              <set_value name="$Change" exact="-$Order.amount"/>
+            </do_elseif>
+            <do_if value="$Station">
+              <do_if value="not player.entity.$x4coop_trades?">
+                <set_value name="player.entity.$x4coop_trades" exact="[]"/>
+              </do_if>
+              <append_to_list name="player.entity.$x4coop_trades" exact="[$Station, $Order.ware.id, $Change]"/>
+              <raise_lua_event name="'x4coop.joiner_trade'"/>
+            </do_if>
+          </actions>
+        </cue>
+
+        <!--
+          Ships in our area (BubbleScan keeps the group): when one is destroyed by anything but the ship we fly
+          (those are reported as our kills), Lua decides whether it was ours to report and tells the partner.
+          param: 'idcode|ship macro|sector macro'
+        -->
+        <cue name="AreaWatch">
+          <actions>
+            <create_group groupname="$Ships"/>
+          </actions>
+          <cues>
+            <cue name="AreaDeath" instantiate="true">
+              <conditions>
+                <event_object_destroyed group="AreaWatch.$Ships"/>
+                <check_value value="@Root.$BubbleRadius gt 0 and event.param != player.occupiedship and @event.object.sector"/>
+              </conditions>
+              <actions>
+                <raise_lua_event name="'x4coop.area_death'" param="event.object.idcode + '|' + event.object.macro.id + '|' + event.object.sector.macro.id"/>
+              </actions>
+            </cue>
+          </cues>
         </cue>
 
         <cue name="OnNpcClear" instantiate="true">

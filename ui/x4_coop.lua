@@ -333,7 +333,8 @@ local function reset()
 			found = {}, mirrors = {}, mirror_of = {}, pending = {}, unmatched = {}, removed = {}, removed_count = 0,
 			dead = {}, my_hits = {}, last_sweep = -1e9 },
 		econ = { on = false, list = {}, by_code = {}, next = 1, budget = 0, cycle = 0, pass = nil, last = nil },
-		credits = { pending = {}, received = {}, empire_on = false, empire_trades = 0 },
+		credits = { pending = {}, received = {}, empire_on = false, trades_on = false, empire_trades = 0 },
+		trades = { pending = {}, applied = {}, listed = {}, seq = 0, sent = 0, counted = 0 },
 		net = { api = nil, status = "idle", reading = false, connected = false, retry_at = 0, last_ping = -1e9, rtt = nil,
 			partner = kept_partner },
 	}
@@ -687,6 +688,7 @@ end
 local on_pipe_message
 local on_world_message  -- shared-world messages (R, L, K, D), defined after proxy management
 local credits_receive   -- credits from or for the partner (C), defined with the shared world
+local trades_receive    -- the joiner's own trades with stations (T), defined with the economy
 local send_link
 
 local function net_send(msg)
@@ -768,6 +770,8 @@ on_pipe_message = function(msg)
 		end
 	elseif kind == "C" then
 		if config.mode == "net" then credits_receive(f, now) end
+	elseif kind == "T" then
+		if config.mode == "net" then trades_receive(f, now) end
 	elseif kind == "M" then
 		local text = clean_text(f[3], 200)
 		if text ~= "" then
@@ -1242,6 +1246,20 @@ local function npc_reset_tables(N)
 	N.pending, N.unmatched, N.dead, N.my_hits = {}, {}, {}, {}
 end
 
+-- md: a ship in our area was destroyed (not by the ship we fly: those are our kills, reported already).
+-- If it was ours to report (in our last poses, so not the partner's area), its copy in the partner's world
+-- dies too.
+local function on_area_death(_, param)
+	local N = S.npc
+	local code, macro, sector = tostring(param or ""):match("^([%w%-]+)|([%w_]+)|([%w_]+)$")
+	local now = getElapsedTime()
+	local q = code and N.prev[code]
+	if not (npc_enabled() and q and now - q.t < 1.5) or (N.dead[code] and now - N.dead[code] < NPC_DEAD_HOLD) then return end
+	N.dead[code] = now
+	N.area_deaths = (N.area_deaths or 0) + 1
+	net_send(table.concat({ "K", code, macro, sector }, "|"))
+end
+
 -- Drop what we follow for one partner ship: its stand-in goes, our own copy returns to its own AI.
 local function npc_forget(N, code)
 	N.ents[code] = nil
@@ -1381,6 +1399,14 @@ end
 -- economy_cycle seconds), and sends it ("E|stock|pass|index|count|station code|ware:amount,..."). The
 -- joiner sets its own copy of each station to the same amounts (md OnStock: add_cargo / remove_cargo) and
 -- measures how far the two had drifted apart since the previous pass.
+-- The joiner's own trades with stations count too (md OnJoinerTrade): each is sent to the host
+-- ("T|trade|id|station|ware|change") until confirmed ("T|ack|id"); the host changes its station the same way,
+-- and its stock reports for that station then name the trade ids it already includes (last field). Until a
+-- report names it, the joiner adds its trade to the host's figures, so the station never forgets it and never
+-- counts it twice.
+
+local TRADE_RETRY = 2        -- s between sends of an unconfirmed trade
+local TRADE_KEEP = 180       -- s a trade is remembered (joiner: until named; host: named in reports)
 
 local ECON_BURST = 10        -- stations at most per frame, after a pause
 
@@ -1433,7 +1459,10 @@ local function econ_send(dt)
 			local wares = {}
 			for ware, amount in pairs(cargo_of(station.id)) do wares[#wares + 1] = ware .. ":" .. amount end
 			table.sort(wares)
-			net_send(string.format("E|stock|%d|%d|%d|%s|%s", E.cycle, E.next - 1, n, station.code, table.concat(wares, ",")))
+			local ids = {}
+			for id in pairs(S.trades.listed[station.code] or {}) do ids[#ids + 1] = id end
+			net_send(string.format("E|stock|%d|%d|%d|%s|%s|%s", E.cycle, E.next - 1, n, station.code, table.concat(wares, ","),
+				table.concat(ids, ",")))
 		end
 	end
 end
@@ -1471,7 +1500,19 @@ local function econ_receive(f)
 		local ware, amount = item:match("^([%w_]+):(%d+)$")
 		if ware and #ware <= 64 then host[ware] = tonumber(amount) end
 	end
-	local args = { lua_id(id) }
+	-- our own trades at this station that the host's figures don't include yet
+	local named = {}
+	for tid in (f[8] or ""):gmatch("[^,]+") do named[tid] = true end
+	for tid, t in pairs(S.trades.pending) do
+		if t.code == code then
+			if named[tid] then
+				S.trades.pending[tid] = nil
+			else
+				host[t.ware] = math.max(0, (host[t.ware] or 0) + t.change)
+			end
+		end
+	end
+	local args = { lua_id(id), "" }
 	for ware, amount in pairs(host) do
 		P.stock = P.stock + amount
 		local diff = amount - (mine[ware] or 0)
@@ -1487,14 +1528,85 @@ local function econ_receive(f)
 		end
 	end
 	P.stations = P.stations + 1
-	if #args > 1 then
-		P.changed, P.wares = P.changed + 1, P.wares + (#args - 1) / 2
+	if #args > 2 then
+		P.changed, P.wares = P.changed + 1, P.wares + (#args - 2) / 2
 		request("stock", args)
+	end
+end
+
+-- Joiner: md saw us trade with a station.
+local function on_joiner_trade()
+	local T = S.trades
+	local list = S.player and GetNPCBlackboard(S.player, "$x4coop_trades")
+	if S.player then SetNPCBlackboard(S.player, "$x4coop_trades", nil) end
+	if type(list) ~= "table" then return end
+	local now = getElapsedTime()
+	for _, v in ipairs(list) do
+		local code = type(v) == "table" and v[1] and C.GetObjectIDCode(to64(v[1]))
+		local ware, change = v[2], tonumber(v[3])
+		if code ~= nil and type(ware) == "string" and ware:match("^[%w_]+$") and change and change ~= 0 then
+			T.seq = T.seq + 1
+			local tid = string.format("%06x%04x", math.floor(now * 1000) % 0x1000000, T.seq % 0x10000)
+			T.pending[tid] = { code = ffi.string(code), ware = ware, change = change, first = now, last = -1e9 }
+		end
+	end
+end
+
+-- Host: md applied a joiner's trade; our reports for that station name it from now on.
+local function on_stock_applied(_, tid)
+	local t = S.trades.applied[tid]
+	if t then
+		S.trades.listed[t.code] = S.trades.listed[t.code] or {}
+		S.trades.listed[t.code][tid] = getElapsedTime()
+	end
+end
+
+trades_receive = function(f, now)
+	local T, K = S.trades, S.link
+	if not (K.linked and econ_enabled()) then return end
+	if f[2] == "trade" and K.role == "host" then
+		local tid, code, ware, change = f[3], f[4], f[5], tonumber(f[6])
+		if not (tid and #tid <= 16 and tid:match("^%x+$") and code and #code <= 16 and code:match("^[%w%-]+$") and ware
+			and #ware <= 64 and ware:match("^[%w_]+$") and change and change ~= 0 and math.abs(change) <= 1e7) then
+			return
+		end
+		if not T.applied[tid] then
+			T.applied[tid] = { code = code, at = now }
+			local id = S.econ.by_code[code]
+			if id and C.IsComponentOperational(id) then
+				T.counted = T.counted + 1
+				request("stock", { lua_id(id), tid, ware, change })
+			end
+		end
+		net_send("T|ack|" .. tid)
+	elseif f[2] == "ack" and K.role == "join" then
+		local t = T.pending[f[3] or ""]
+		if t then t.acked = true end
+	end
+end
+
+local function trades_tick(now)
+	local T = S.trades
+	for tid, t in pairs(T.pending) do  -- joiner: send until confirmed; forget once too old
+		if now - t.first > TRADE_KEEP then
+			T.pending[tid] = nil
+		elseif not t.acked and now - t.last >= TRADE_RETRY and S.net.connected then
+			t.last = now
+			T.sent = T.sent + 1
+			net_send(string.format("T|trade|%s|%s|%s|%d", tid, t.code, t.ware, t.change))
+		end
+	end
+	for tid, t in pairs(T.applied) do  -- host: stop naming old trades
+		if now - t.at > TRADE_KEEP then
+			T.applied[tid] = nil
+			if T.listed[t.code] then T.listed[t.code][tid] = nil end
+		end
 	end
 end
 
 local function econ_tick(now, dt)
 	local E = S.econ
+	trades_tick(now)
 	local on = econ_enabled()
 	if on ~= E.on then
 		E.on = on
@@ -1828,10 +1940,12 @@ local function credits_tick(now)
 			net_send(string.format("C|give|%s|%d|%s", id, give.amount, clean_text(S.loc.name, 32)))
 		end
 	end
-	local on = config.mode == "net" and S.link.linked and S.link.role == "join" and config.empire_income_to_host == 1
-	if on ~= W.empire_on then
-		W.empire_on = on
-		request("empire_income", { on and 1 or 0, world_id() or "" })
+	local joiner = config.mode == "net" and S.link.linked and S.link.role == "join"
+	local on = joiner and config.empire_income_to_host == 1
+	local trades_on = joiner and econ_enabled()
+	if on ~= W.empire_on or trades_on ~= W.trades_on then
+		W.empire_on, W.trades_on = on, trades_on
+		request("empire_income", { on and 1 or 0, world_id() or "", trades_on and 1 or 0 })
 	end
 end
 
@@ -2120,6 +2234,9 @@ local function init()
 	RegisterEvent("x4coop.world", on_world_event)
 	RegisterEvent("x4coop.bubble", on_bubble)
 	RegisterEvent("x4coop.stations", on_stations)
+	RegisterEvent("x4coop.joiner_trade", on_joiner_trade)
+	RegisterEvent("x4coop.stock_applied", on_stock_applied)
+	RegisterEvent("x4coop.area_death", on_area_death)
 	RegisterEvent("x4coop.empire_trade", on_empire_trade)
 	RegisterEvent("x4coop.npc_mirror", on_npc_mirror)
 

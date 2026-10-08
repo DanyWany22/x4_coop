@@ -179,8 +179,10 @@ For kills, damage, gunfire and NPCs to sync, both run the **host's** save:
 What syncs while linked:
 * **Your ships:** each of you sees the other's *real* ship (it exists in both worlds), with their
   hull and shields. Fire in your world can't take it below their real hull.
-* **Kills and damage:** a ship one of you kills dies in the other's world too; hits lower its
-  hull on the other side, so both players' damage adds up.
+* **Kills and damage:** a ship one of you kills dies in the other's world too, wherever it is,
+  even in a sector the other game is only simulating roughly. Hits lower its hull on the other side,
+  so both players' damage adds up. Ships that die near either of you from anything else, such as
+  NPCs fighting or your wingmen, are destroyed in the other's world as well.
 * **Gunfire:** your partner's ship fires at the ship they shoot at (hits or misses).
 * **NPCs near either of you** (within 6 km): each game is the truth for the ships around its own
   player, which it simulates in full; where you're together, the host's game is. Both games send
@@ -202,6 +204,10 @@ What syncs while linked:
   The joiner's log (`[x4coop] economy: pass …`) and `/x4coop status` show each pass: stations matched,
   stations not in the joiner's world, and how far the stock had drifted since the previous pass.
   `/x4coop set economy 0` turns it off; `economy_cycle` sets the seconds per pass.
+* **The joiner's trades count:** when the joiner buys from or sells to a station, from the ship they fly
+  or a ship they bought themselves, the host's game changes that station's stock the same way. Until
+  the host's next report includes the trade, the joiner's game keeps it, so the station never forgets it
+  and never counts it twice.
 
 **Credits:** you share one empire (the same faction), but each of you has your own wallet.
 * **The empire's income is the host's.** Both games run the empire's automated traders and miners,
@@ -376,7 +382,7 @@ game's own schema (`libraries/md.xsd`, `libraries/common.xsd`).
 
 Messages (one text line each): `S` snapshot (position, rotation, velocity, ship, hull, shield),
 `P`/`Q` ping, `M` chat, `L` world link, `K` kill, `D` hit, `F` firing at, `B` nearby ships (both
-ways), `E` station stock (host to joiner), `C` credits given; `R`/`W`/`N`/`X` are between a game and
+ways), `E` station stock (host to joiner), `T` a joiner's trade, `C` credits given; `R`/`W`/`N`/`X` are between a game and
 its own bridge.
 
 Self-calibration: on first contact the proxy is nudged and read back (does `SetObjectSectorPos`
@@ -410,6 +416,8 @@ python extensions/x4_coop/dev/run_tests.py [--quick]
   (stand-ins, removal, hull, the host keeping its own area, no echo), the economy as host and joiner
   (every station sent; drift found, corrected and measured; stations missing on one side),
   credits given both ways (confirmed, counted once when offered twice, returned when unconfirmed),
+  the joiner's trades counted on the host (once, named in its reports, never reverted on the joiner),
+  deaths near either player reported from any sector (only by the game that rules that area),
   hostile messages, guest ship, save handoff commands. Errors are measured against ground truth:
   the partner within ~2–3 m and ~2° (95th percentile) at 220–300 m/s; NPC copies within ~3.5 m.
 * Bridge: password codec (encryption, replay, tamper, stale, other versions), reconnects, chat, wrong password, partner
