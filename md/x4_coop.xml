@@ -855,6 +855,181 @@
           </actions>
         </cue>
 
+        <!--
+          Unlocks (shared faction): research, blueprints and licences either player gains are the other's too.
+          Reported: appended to player.entity.$x4coop_unlocks as [kind, id, extra], then 'x4coop.unlock'; kinds:
+          'r' research (ware id), 'b' blueprint (ware id with extra 'w', or module macro id with extra 'm'),
+          'l' licence (issuing faction id, licence type). OnUnlock (param3: [kind, id, extra]) adds one from the
+          partner, and the report that adding causes here is skipped. 'unlocks' (param3: [1 or 0]) turns reporting on.
+        -->
+        <cue name="OnUnlocksConfig" instantiate="true">
+          <conditions>
+            <event_ui_triggered screen="'x4coop'" control="'unlocks'"/>
+          </conditions>
+          <actions>
+            <set_value name="Root.$UnlocksOn" exact="event.param3.{1}"/>
+          </actions>
+        </cue>
+
+        <cue name="OnResearchUnlocked" instantiate="true">
+          <conditions>
+            <event_player_research_unlocked/>
+            <check_value value="@Root.$UnlocksOn == 1 and event.param"/>
+          </conditions>
+          <actions>
+            <set_value name="$Report" exact="['r', event.param.id, '']"/>
+            <include_actions ref="ReportUnlock"/>
+          </actions>
+        </cue>
+
+        <cue name="OnBlueprintAdded" instantiate="true">
+          <conditions>
+            <event_player_blueprint_added/>
+            <check_value value="@Root.$UnlocksOn == 1 and (event.param or event.param2)"/>
+          </conditions>
+          <actions>
+            <set_value name="$Report" exact="if event.param2 then ['b', event.param2.id, 'w'] else ['b', event.param.id, 'm']"/>
+            <include_actions ref="ReportUnlock"/>
+          </actions>
+        </cue>
+
+        <cue name="OnLicenceAdded" instantiate="true">
+          <conditions>
+            <event_player_licence_added/>
+            <check_value value="@Root.$UnlocksOn == 1 and @event.param.faction"/>
+          </conditions>
+          <actions>
+            <set_value name="$Report" exact="['l', event.param.faction.id, '%s'.[event.param.type]]"/>
+            <include_actions ref="ReportUnlock"/>
+          </actions>
+        </cue>
+
+        <cue name="OnUnlock" instantiate="true">
+          <conditions>
+            <event_ui_triggered screen="'x4coop'" control="'unlock'"/>
+          </conditions>
+          <actions>
+            <set_value name="$Args" exact="event.param3"/>
+            <do_if value="not Root.$PartnerUnlocks?">
+              <set_value name="Root.$PartnerUnlocks" exact="[]"/>
+            </do_if>
+            <append_to_list name="Root.$PartnerUnlocks" exact="$Args.{1} + ':' + $Args.{2} + ':' + $Args.{3}"/>
+            <do_if value="$Args.{1} == 'r' and @ware.{$Args.{2}}">
+              <add_research ware="ware.{$Args.{2}}"/>
+            </do_if>
+            <do_elseif value="$Args.{1} == 'b' and $Args.{3} == 'w' and @ware.{$Args.{2}}">
+              <add_blueprints wares="[ware.{$Args.{2}}]"/>
+            </do_elseif>
+            <do_elseif value="$Args.{1} == 'b' and $Args.{3} == 'm' and @macro.{$Args.{2}}">
+              <add_blueprints macros="[macro.{$Args.{2}}]"/>
+            </do_elseif>
+            <do_elseif value="$Args.{1} == 'l' and @faction.{$Args.{2}}">
+              <set_value name="$Faction" exact="faction.{$Args.{2}}"/>
+                <do_if value="$Args.{3} == 'capitalequipment'">
+                  <add_licence faction="faction.player" licencefaction="$Faction" type="capitalequipment"/>
+                </do_if>
+                <do_elseif value="$Args.{3} == 'capitalship'">
+                  <add_licence faction="faction.player" licencefaction="$Faction" type="capitalship"/>
+                </do_elseif>
+                <do_elseif value="$Args.{3} == 'ceremonyfriend'">
+                  <add_licence faction="faction.player" licencefaction="$Faction" type="ceremonyfriend"/>
+                </do_elseif>
+                <do_elseif value="$Args.{3} == 'ceremonyally'">
+                  <add_licence faction="faction.player" licencefaction="$Faction" type="ceremonyally"/>
+                </do_elseif>
+                <do_elseif value="$Args.{3} == 'generaluseequipment'">
+                  <add_licence faction="faction.player" licencefaction="$Faction" type="generaluseequipment"/>
+                </do_elseif>
+                <do_elseif value="$Args.{3} == 'generaluseship'">
+                  <add_licence faction="faction.player" licencefaction="$Faction" type="generaluseship"/>
+                </do_elseif>
+                <do_elseif value="$Args.{3} == 'intelligence'">
+                  <add_licence faction="faction.player" licencefaction="$Faction" type="intelligence"/>
+                </do_elseif>
+                <do_elseif value="$Args.{3} == 'militaryequipment'">
+                  <add_licence faction="faction.player" licencefaction="$Faction" type="militaryequipment"/>
+                </do_elseif>
+                <do_elseif value="$Args.{3} == 'militaryship'">
+                  <add_licence faction="faction.player" licencefaction="$Faction" type="militaryship"/>
+                </do_elseif>
+                <do_elseif value="$Args.{3} == 'police'">
+                  <add_licence faction="faction.player" licencefaction="$Faction" type="police"/>
+                </do_elseif>
+                <do_elseif value="$Args.{3} == 'station_gen_basic'">
+                  <add_licence faction="faction.player" licencefaction="$Faction" type="station_gen_basic"/>
+                </do_elseif>
+                <do_elseif value="$Args.{3} == 'station_gen_intermediate'">
+                  <add_licence faction="faction.player" licencefaction="$Faction" type="station_gen_intermediate"/>
+                </do_elseif>
+                <do_elseif value="$Args.{3} == 'station_gen_advanced'">
+                  <add_licence faction="faction.player" licencefaction="$Faction" type="station_gen_advanced"/>
+                </do_elseif>
+                <do_elseif value="$Args.{3} == 'station_equip_sm'">
+                  <add_licence faction="faction.player" licencefaction="$Faction" type="station_equip_sm"/>
+                </do_elseif>
+                <do_elseif value="$Args.{3} == 'station_equip_lxl'">
+                  <add_licence faction="faction.player" licencefaction="$Faction" type="station_equip_lxl"/>
+                </do_elseif>
+                <do_elseif value="$Args.{3} == 'station_illegal'">
+                  <add_licence faction="faction.player" licencefaction="$Faction" type="station_illegal"/>
+                </do_elseif>
+                <do_elseif value="$Args.{3} == 'station_race_basic'">
+                  <add_licence faction="faction.player" licencefaction="$Faction" type="station_race_basic"/>
+                </do_elseif>
+                <do_elseif value="$Args.{3} == 'station_race_intermediate'">
+                  <add_licence faction="faction.player" licencefaction="$Faction" type="station_race_intermediate"/>
+                </do_elseif>
+                <do_elseif value="$Args.{3} == 'station_race_advanced'">
+                  <add_licence faction="faction.player" licencefaction="$Faction" type="station_race_advanced"/>
+                </do_elseif>
+                <do_elseif value="$Args.{3} == 'station_venture'">
+                  <add_licence faction="faction.player" licencefaction="$Faction" type="station_venture"/>
+                </do_elseif>
+                <do_elseif value="$Args.{3} == 'subgroupfriend'">
+                  <add_licence faction="faction.player" licencefaction="$Faction" type="subgroupfriend"/>
+                </do_elseif>
+                <do_elseif value="$Args.{3} == 'tradesubscription'">
+                  <add_licence faction="faction.player" licencefaction="$Faction" type="tradesubscription"/>
+                </do_elseif>
+                <do_elseif value="$Args.{3} == 'innercore_access'">
+                  <add_licence faction="faction.player" licencefaction="$Faction" type="innercore_access"/>
+                </do_elseif>
+                <do_elseif value="$Args.{3} == 'outercore_access'">
+                  <add_licence faction="faction.player" licencefaction="$Faction" type="outercore_access"/>
+                </do_elseif>
+                <do_elseif value="$Args.{3} == 'shipsalecontract'">
+                  <add_licence faction="faction.player" licencefaction="$Faction" type="shipsalecontract"/>
+                </do_elseif>
+                <do_elseif value="$Args.{3} == 'hyperion_access'">
+                  <add_licence faction="faction.player" licencefaction="$Faction" type="hyperion_access"/>
+                </do_elseif>
+                <do_elseif value="$Args.{3} == 'envoy_access'">
+                  <add_licence faction="faction.player" licencefaction="$Faction" type="envoy_access"/>
+                </do_elseif>
+                <do_elseif value="$Args.{3} == 'story_paranid_palace_module'">
+                  <add_licence faction="faction.player" licencefaction="$Faction" type="story_paranid_palace_module"/>
+                </do_elseif>
+            </do_elseif>
+          </actions>
+        </cue>
+
+        <!-- In: $Report = [kind, id, extra]. Hands it to Lua, unless it is what the partner just gave us. -->
+        <library name="ReportUnlock">
+          <actions>
+            <set_value name="$Key" exact="$Report.{1} + ':' + $Report.{2} + ':' + $Report.{3}"/>
+            <do_if value="@Root.$PartnerUnlocks.indexof.{$Key}">
+              <remove_from_list name="Root.$PartnerUnlocks" exact="$Key"/>
+            </do_if>
+            <do_else>
+              <do_if value="not player.entity.$x4coop_unlocks?">
+                <set_value name="player.entity.$x4coop_unlocks" exact="[]"/>
+              </do_if>
+              <append_to_list name="player.entity.$x4coop_unlocks" exact="$Report"/>
+              <raise_lua_event name="'x4coop.unlock'"/>
+            </do_else>
+          </actions>
+        </library>
+
         <cue name="OnNpcClear" instantiate="true">
           <conditions>
             <event_ui_triggered screen="'x4coop'" control="'npc_clear'"/>

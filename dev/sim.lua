@@ -39,6 +39,8 @@ local SC = {
 	                 role = "join", own_world = "abc123", partner_world = "abc123", rel_test = "join" },
 	relations_host = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
 	                 role = "host", own_world = "abc123", partner_world = "abc123", rel_test = "host" },
+	unlocks      = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
+	                 role = "join", own_world = "abc123", partner_world = "abc123", unlock_test = true },
 	credits      = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
 	                 role = "join", own_world = "abc123", partner_world = "abc123", credits_test = true },
 	npc_apart_join = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
@@ -273,6 +275,7 @@ player_money, money_requests, empire_requests, partner_gives_acked = 100000, {},
 HOST_RELATIONS = { argon = 0.3, teladi = -0.2, xenon = -1 }
 our_relations = sc.rel_test == "join" and { argon = 0.1, teladi = -0.2, xenon = -1 } or { argon = 0.3, teladi = -0.2, xenon = -1 }
 rel_actions, rel_reads, rel_changes_seen, rel_named = {}, 0, {}, {}
+unlock_requests, unlock_switch, unlock_sends = {}, {}, {}
 function GetPlayerMoney() return player_money end
 function SetNPCBlackboard(_, key, v) blackboard[key] = v end
 function ExecuteDebugCommand(cmd, param) say("  ego command /%s %s", cmd, tostring(param)) end
@@ -381,6 +384,10 @@ function AddUITriggeredEvent(screen, control, args)
 			rel_actions[#rel_actions + 1] = string.format("add:%s%+.4f", id, change)
 		end
 		queue("x4coop.relation_applied", tag)
+	elseif control == "unlocks" then
+		unlock_switch[#unlock_switch + 1] = tostring(args[1])
+	elseif control == "unlock" then
+		unlock_requests[#unlock_requests + 1] = table.concat(args, ":")
 	elseif control == "relations_joiner" then
 		rel_actions[#rel_actions + 1] = "joiner:" .. tostring(args[1])
 	elseif control == "money" then
@@ -478,6 +485,9 @@ if sc.pipes then
 					partner_queue[#partner_queue + 1] = { at = clock + 2 * ONE_WAY, msg = reply }
 				elseif f[1] == "M" then
 					partner_queue[#partner_queue + 1] = { at = clock + 2 * ONE_WAY, msg = "M|Echo|you said: " .. tostring(f[3]) }
+				elseif f[1] == "U" and f[2] == "add" then
+					unlock_sends[#unlock_sends + 1] = f[3] .. ":" .. f[4] .. ":" .. f[5]
+					partner_queue[#partner_queue + 1] = { at = clock + 2 * ONE_WAY, msg = "U|ack|" .. f[3] }
 				elseif f[1] == "V" and f[2] == "change" then
 					rel_changes_seen[#rel_changes_seen + 1] = f[3]
 					if not rel_named[f[3]] then
@@ -632,6 +642,20 @@ local function relations_script()
 	end
 end
 
+local unlock_steps = {
+	{ 10, function()  -- we finish a research here
+		blackboard["$x4coop_unlocks"] = { { "r", "research_teleportation", "" } }
+		queue("x4coop.unlock")
+	end },
+	{ 11, function() pipe_reader("U|add|00aa|b|weapon_gen_m_laser_01_mk1|w") end },
+	{ 13, function() pipe_reader("U|add|00aa|b|weapon_gen_m_laser_01_mk1|w") end },  -- sent again: added once
+	{ 15, function() pipe_reader("U|add|00ab|l|argon|police") end },
+}
+local function unlock_script()
+	if not sc.unlock_test or not pipe_reader then return end
+	while unlock_steps[1] and clock >= unlock_steps[1][1] do table.remove(unlock_steps, 1)[2]() end
+end
+
 local function credit_script()
 	if not sc.credits_test or not pipe_reader then return end
 	while credit_steps[1] and clock >= credit_steps[1][1] do
@@ -755,6 +779,7 @@ while clock < sc.duration do
 	death_script()
 	trade_script()
 	relations_script()
+	unlock_script()
 	if sc.partner_restart_at and clock >= sc.partner_restart_at and partner_clock_offset == 1000 then
 		partner_clock_offset = -500
 		say("t=%.1f partner restarted their game (clock jumped back)", clock)
@@ -1196,6 +1221,18 @@ if sc.rel_test == "host" then
 		states, rel_reads, adds, acks, tostring(named_ok))
 	ok = ok and states >= 2 and adds == 1 and acks == 2 and named_ok and math.abs(our_relations.teladi + 0.18) < 1e-6
 		and table.concat(rel_actions, " "):find("joiner:", 1, true) == nil
+end
+if sc.unlock_test then
+	local acks = 0
+	for _, w in ipairs(pipe_writes) do if w == "U|ack|00aa" then acks = acks + 1 end end
+	local ours = 0
+	for _, u in ipairs(unlock_sends) do if u:find(":r:research_teleportation", 1, true) then ours = ours + 1 end end
+	say("unlocks: ours sent %d time(s); md adds: %s; acks for the partner's blueprint: %d; switch: %s",
+		ours, table.concat(unlock_requests, ", "), acks, table.concat(unlock_switch, ","))
+	ok = ok and ours == 1 and table.concat(unlock_requests, ", ") == "b:weapon_gen_m_laser_01_mk1:w, l:argon:police"
+		and acks == 2 and unlock_switch[1] == "1"
+		and said:find("shared with your partner: research research_teleportation", 1, true) ~= nil
+		and said:find("from your partner: blueprint weapon_gen_m_laser_01_mk1", 1, true) ~= nil
 end
 if sc.credits_test then
 	local acks = 0

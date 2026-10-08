@@ -218,6 +218,9 @@ the joiner causes are sent to the host and counted there:
 
 `/x4coop set relations 0` turns it off.
 
+**Research, blueprints and licences:** whatever either of you unlocks, the other gets too. Each game
+shows the ones that arrive from the partner. `/x4coop set unlocks 0` turns it off.
+
 **Credits:** you share one empire (the same faction), but each of you has your own wallet.
 * **The empire's income is the host's.** Both games run the empire's automated traders and miners,
   but only the host's game counts them. In the joiner's game, what an empire ship earns on its own
@@ -391,7 +394,7 @@ game's own schema (`libraries/md.xsd`, `libraries/common.xsd`).
 
 Messages (one text line each): `S` snapshot (position, rotation, velocity, ship, hull, shield),
 `P`/`Q` ping, `M` chat, `L` world link, `K` kill, `D` hit, `F` firing at, `B` nearby ships (both
-ways), `E` station stock (host to joiner), `T` a joiner's trade, `V` relations, `C` credits given; `R`/`W`/`N`/`X` are between a game and
+ways), `E` station stock (host to joiner), `T` a joiner's trade, `V` relations, `U` research/blueprints/licences, `C` credits given; `R`/`W`/`N`/`X` are between a game and
 its own bridge.
 
 Self-calibration: on first contact the proxy is nudged and read back (does `SetObjectSectorPos`
@@ -428,6 +431,7 @@ python extensions/x4_coop/dev/run_tests.py [--quick]
   the joiner's trades counted on the host (once, named in its reports, never reverted on the joiner),
   deaths near either player reported from any sector (only by the game that rules that area),
   relations both ways (the host's followed; a joiner's change counted once and never undone in flight),
+  research, blueprints and licences both ways (sent until confirmed, added once),
   hostile messages, guest ship, save handoff commands. Errors are measured against ground truth:
   the partner within ~2–3 m and ~2° (95th percentile) at 220–300 m/s; NPC copies within ~3.5 m.
 * Bridge: password codec (encryption, replay, tamper, stale, other versions), reconnects, chat, wrong password, partner

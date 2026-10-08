@@ -98,6 +98,7 @@ local config = {
 	credit_timeout = 30,      -- s: credits given that the partner hasn't confirmed by then come back
 	relations = 1,            -- shared world: the faction relations towards the player are the host's, plus the joiner's own changes
 	relation_period = 10,     -- s between the host's relation reports
+	unlocks = 1,              -- shared world: research, blueprints and licences either player gains are both players'
 	ghost_latency = 0.12,     -- s, simulated one-way latency in ghost mode
 	ghost_jitter = 0.03,      -- s, extra random delay per snapshot
 	ghost_loss = 0.0,         -- 0..1, fraction of snapshots dropped
@@ -340,6 +341,7 @@ local function reset()
 		credits = { pending = {}, received = {}, empire_on = false, trades_on = false, empire_trades = 0 },
 		trades = { pending = {}, applied = {}, listed = {}, seq = 0, sent = 0, counted = 0 },
 		rel = { joiner_on = false, next_read = 0, pending = {}, applied = {}, named = {}, seq = 0, host = nil, counted = 0 },
+		unlocks = { on = false, pending = {}, seen = {}, seq = 0, sent = 0, received = 0 },
 		net = { api = nil, status = "idle", reading = false, connected = false, retry_at = 0, last_ping = -1e9, rtt = nil,
 			partner = kept_partner },
 	}
@@ -695,6 +697,7 @@ local on_world_message  -- shared-world messages (R, L, K, D), defined after pro
 local credits_receive   -- credits from or for the partner (C), defined with the shared world
 local trades_receive    -- the joiner's own trades with stations (T), defined with the economy
 local relations_receive -- faction relations (V), defined with the credits
+local unlocks_receive   -- research, blueprints, licences (U), defined with the credits
 local send_link
 
 local function net_send(msg)
@@ -780,6 +783,8 @@ on_pipe_message = function(msg)
 		if config.mode == "net" then trades_receive(f, now) end
 	elseif kind == "V" then
 		if config.mode == "net" then relations_receive(f, now) end
+	elseif kind == "U" then
+		if config.mode == "net" then unlocks_receive(f, now) end
 	elseif kind == "M" then
 		local text = clean_text(f[3], 200)
 		if text ~= "" then
@@ -2096,6 +2101,76 @@ local function relations_tick(now)
 end
 
 -------------------------------------------------------------------------------
+-- Unlocks (shared faction): research, blueprints and licences either player gains are the other's too. md
+-- reports them (OnResearchUnlocked, OnBlueprintAdded, OnLicenceAdded); each goes to the partner until confirmed
+-- ("U|add|id|kind|what|extra" / "U|ack|id"), and the partner adds it once (md OnUnlock), without reporting it back.
+
+local UNLOCK_KINDS = { r = true, b = true, l = true }
+
+local function unlocks_enabled()
+	return config.mode == "net" and S.link.linked and config.unlocks == 1
+end
+
+local function on_unlock()
+	local U = S.unlocks
+	local list = S.player and GetNPCBlackboard(S.player, "$x4coop_unlocks")
+	if S.player then SetNPCBlackboard(S.player, "$x4coop_unlocks", nil) end
+	if type(list) ~= "table" or not unlocks_enabled() then return end
+	local now = getElapsedTime()
+	for _, v in ipairs(list) do
+		local kind, what, extra = type(v) == "table" and v[1], type(v) == "table" and v[2], type(v) == "table" and v[3] or ""
+		if UNLOCK_KINDS[kind] and type(what) == "string" and what:match("^[%w_]+$") and tostring(extra):match("^[%w_]*$") then
+			U.seq = U.seq + 1
+			local uid = string.format("%06x%04x", math.floor(now * 1000) % 0x1000000, U.seq % 0x10000)
+			U.pending[uid] = { kind = kind, what = what, extra = tostring(extra), first = now, last = -1e9 }
+			notify("shared with your partner: %s %s", ({ r = "research", b = "blueprint", l = "licence" })[kind], what)
+		end
+	end
+end
+
+unlocks_receive = function(f, now)
+	local U = S.unlocks
+	if not unlocks_enabled() then return end
+	if f[2] == "add" then
+		local uid, kind, what, extra = f[3], f[4], f[5], f[6] or ""
+		if not (uid and #uid <= 16 and uid:match("^%x+$") and UNLOCK_KINDS[kind] and what and #what <= 80
+			and what:match("^[%w_]+$") and #extra <= 40 and extra:match("^[%w_]*$")) then
+			return
+		end
+		if not U.seen[uid] then
+			U.seen[uid] = now
+			U.received = U.received + 1
+			request("unlock", { kind, what, extra })
+			notify("from your partner: %s %s", ({ r = "research", b = "blueprint", l = "licence" })[kind], what)
+		end
+		net_send("U|ack|" .. uid)
+	elseif f[2] == "ack" then
+		U.pending[f[3] or ""] = nil
+	end
+end
+
+local function unlocks_tick(now)
+	local U = S.unlocks
+	local on = unlocks_enabled()
+	if on ~= U.on then
+		U.on = on
+		request("unlocks", { on and 1 or 0 })
+	end
+	for uid, u in pairs(U.pending) do
+		if now - u.first > TRADE_KEEP then
+			U.pending[uid] = nil
+		elseif now - u.last >= TRADE_RETRY and S.net.connected then
+			u.last = now
+			U.sent = U.sent + 1
+			net_send(string.format("U|add|%s|%s|%s|%s", uid, u.kind, u.what, u.extra))
+		end
+	end
+	for uid, at in pairs(U.seen) do
+		if now - at > TRADE_KEEP then U.seen[uid] = nil end
+	end
+end
+
+-------------------------------------------------------------------------------
 -- Chat commands
 
 -- The first thing standing in the way of co-op, with what to do about it; "all good" when nothing does.
@@ -2356,6 +2431,7 @@ local function tick(now, dt)
 	econ_tick(now, dt)
 	credits_tick(now)
 	relations_tick(now)
+	unlocks_tick(now)
 end
 
 local function on_update()
@@ -2387,6 +2463,7 @@ local function init()
 	RegisterEvent("x4coop.relations", on_relations)
 	RegisterEvent("x4coop.relation_changed", on_relation_changed)
 	RegisterEvent("x4coop.relation_applied", on_relation_applied)
+	RegisterEvent("x4coop.unlock", on_unlock)
 	RegisterEvent("x4coop.empire_trade", on_empire_trade)
 	RegisterEvent("x4coop.npc_mirror", on_npc_mirror)
 
