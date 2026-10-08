@@ -41,6 +41,8 @@ local SC = {
 	                 role = "host", own_world = "abc123", partner_world = "abc123", rel_test = "host" },
 	unlocks      = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
 	                 role = "join", own_world = "abc123", partner_world = "abc123", unlock_test = true },
+	timewarp     = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
+	                 role = "join", own_world = "abc123", partner_world = "abc123", warp_test = true },
 	credits      = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
 	                 role = "join", own_world = "abc123", partner_world = "abc123", credits_test = true },
 	npc_apart_join = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
@@ -276,6 +278,7 @@ HOST_RELATIONS = { argon = 0.3, teladi = -0.2, xenon = -1 }
 our_relations = sc.rel_test == "join" and { argon = 0.1, teladi = -0.2, xenon = -1 } or { argon = 0.3, teladi = -0.2, xenon = -1 }
 rel_actions, rel_reads, rel_changes_seen, rel_named = {}, 0, {}, {}
 unlock_requests, unlock_switch, unlock_sends = {}, {}, {}
+sim_warp, warp_requests = { active = false, factor = 1, blocked = false }, {}
 function GetPlayerMoney() return player_money end
 function SetNPCBlackboard(_, key, v) blackboard[key] = v end
 function ExecuteDebugCommand(cmd, param) say("  ego command /%s %s", cmd, tostring(param)) end
@@ -283,6 +286,9 @@ function SaveGame(name, desc) game_saves[#game_saves + 1] = name end
 function LoadGame(name) game_loads[#game_loads + 1] = name end
 
 local function queue(name, param) queued[#queued + 1] = { name, param } end
+function warp_report(followed)
+	queue("x4coop.timewarp", string.format("%d|%ss|%d", sim_warp.active and 1 or 0, sim_warp.active and sim_warp.factor or 1, followed))
+end
 local proxy_adopted = false
 local function destroy_proxies()
 	if proxy_id and not proxy_adopted then objects[proxy_id] = nil end
@@ -384,6 +390,16 @@ function AddUITriggeredEvent(screen, control, args)
 			rel_actions[#rel_actions + 1] = string.format("add:%s%+.4f", id, change)
 		end
 		queue("x4coop.relation_applied", tag)
+	elseif control == "timewarp_sync" then
+		warp_report(1)
+	elseif control == "timewarp" then
+		warp_requests[#warp_requests + 1] = tostring(args[1]) .. ":" .. tostring(args[2])
+		if args[2] > 0 then sim_warp.factor = args[2] end
+		local want = args[1] == 1
+		if want ~= sim_warp.active and not (want and sim_warp.blocked) then
+			sim_warp.active = want
+			warp_report(1)
+		end
 	elseif control == "unlocks" then
 		unlock_switch[#unlock_switch + 1] = tostring(args[1])
 	elseif control == "unlock" then
@@ -656,6 +672,19 @@ local function unlock_script()
 	while unlock_steps[1] and clock >= unlock_steps[1][1] do table.remove(unlock_steps, 1)[2]() end
 end
 
+local warp_steps = {
+	{ 10, function() sim_warp.active, sim_warp.factor = true, 6; warp_report(0) end },      -- we switch SETA on
+	{ 14, function() pipe_reader("Z|state|0|1.00|") end },                                  -- the partner switches it off
+	{ 17, function() sim_warp.blocked = true end },                                         -- enemies near: SETA not allowed
+	{ 18, function() pipe_reader("Z|state|1|6.00|") end },                                  -- the partner switches it on
+	{ 23, function() sim_warp.blocked = false; sim_warp.active, sim_warp.factor = true, 6; warp_report(0) end },  -- ours again
+	{ 24, function() pipe_reader("Z|state|0|1.00|refused") end },                           -- the partner can't follow
+}
+local function warp_script()
+	if not sc.warp_test or not pipe_reader then return end
+	while warp_steps[1] and clock >= warp_steps[1][1] do table.remove(warp_steps, 1)[2]() end
+end
+
 local function credit_script()
 	if not sc.credits_test or not pipe_reader then return end
 	while credit_steps[1] and clock >= credit_steps[1][1] do
@@ -780,6 +809,7 @@ while clock < sc.duration do
 	trade_script()
 	relations_script()
 	unlock_script()
+	warp_script()
 	if sc.partner_restart_at and clock >= sc.partner_restart_at and partner_clock_offset == 1000 then
 		partner_clock_offset = -500
 		say("t=%.1f partner restarted their game (clock jumped back)", clock)
@@ -1233,6 +1263,19 @@ if sc.unlock_test then
 		and acks == 2 and unlock_switch[1] == "1"
 		and said:find("shared with your partner: research research_teleportation", 1, true) ~= nil
 		and said:find("from your partner: blueprint weapon_gen_m_laser_01_mk1", 1, true) ~= nil
+end
+if sc.warp_test then
+	local zs = {}
+	for _, w in ipairs(pipe_writes) do if w:sub(1, 2) == "Z|" then zs[#zs + 1] = w end end
+	say("timewarp: we sent %s; md toggles: %s; SETA at the end: %s", table.concat(zs, " "), table.concat(warp_requests, " "),
+		tostring(sim_warp.active))
+	ok = ok and zs[1] == "Z|state|1|6.00|"                         -- our SETA, to the partner
+		and table.concat(warp_requests, " "):find("0:1", 1, true) ~= nil   -- we follow the partner switching it off
+		and #zs == 3 and zs[2] == "Z|state|0|1.00|refused"          -- the partner's SETA we couldn't follow
+		and zs[3] == "Z|state|1|6.00|"                               -- ours again
+		and said:find("can't follow here", 1, true) ~= nil
+		and said:find("your partner can't use SETA right now", 1, true) ~= nil
+		and sim_warp.active == false                                  -- off again after the partner refused
 end
 if sc.credits_test then
 	local acks = 0

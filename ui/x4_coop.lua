@@ -99,6 +99,7 @@ local config = {
 	relations = 1,            -- shared world: the faction relations towards the player are the host's, plus the joiner's own changes
 	relation_period = 10,     -- s between the host's relation reports
 	unlocks = 1,              -- shared world: research, blueprints and licences either player gains are both players'
+	timewarp_sync = 1,        -- SETA: both games run at the same speed
 	ghost_latency = 0.12,     -- s, simulated one-way latency in ghost mode
 	ghost_jitter = 0.03,      -- s, extra random delay per snapshot
 	ghost_loss = 0.0,         -- 0..1, fraction of snapshots dropped
@@ -342,6 +343,7 @@ local function reset()
 		trades = { pending = {}, applied = {}, listed = {}, seq = 0, sent = 0, counted = 0 },
 		rel = { joiner_on = false, next_read = 0, pending = {}, applied = {}, named = {}, seq = 0, host = nil, counted = 0 },
 		unlocks = { on = false, pending = {}, seen = {}, seq = 0, sent = 0, received = 0 },
+		warp = { on = false, active = false, factor = 1, want = nil, want_at = 0 },
 		net = { api = nil, status = "idle", reading = false, connected = false, retry_at = 0, last_ping = -1e9, rtt = nil,
 			partner = kept_partner },
 	}
@@ -698,6 +700,7 @@ local credits_receive   -- credits from or for the partner (C), defined with the
 local trades_receive    -- the joiner's own trades with stations (T), defined with the economy
 local relations_receive -- faction relations (V), defined with the credits
 local unlocks_receive   -- research, blueprints, licences (U), defined with the credits
+local warp_receive      -- the partner's SETA (Z), defined with the credits
 local send_link
 
 local function net_send(msg)
@@ -785,6 +788,8 @@ on_pipe_message = function(msg)
 		if config.mode == "net" then relations_receive(f, now) end
 	elseif kind == "U" then
 		if config.mode == "net" then unlocks_receive(f, now) end
+	elseif kind == "Z" then
+		if config.mode == "net" then warp_receive(f, now) end
 	elseif kind == "M" then
 		local text = clean_text(f[3], 200)
 		if text ~= "" then
@@ -2171,6 +2176,63 @@ local function unlocks_tick(now)
 end
 
 -------------------------------------------------------------------------------
+-- Time acceleration (SETA): both games run at the same speed. md reports every change of player.timewarp
+-- (TimewarpWatch); the player's own changes go to the partner ("Z|state|active|factor|note"), whose game follows
+-- (md OnTimewarp). If it can't (no SETA, or not allowed right now), it says so ("refused") and the first game
+-- turns SETA off again, so both stay at the same speed.
+
+local WARP_FOLLOW_WAIT = 2   -- s to see our game follow the partner's SETA before giving up
+
+local function warp_enabled()
+	return config.mode == "net" and S.net.connected and S.net.partner and config.timewarp_sync == 1
+end
+
+local function on_timewarp(_, param)
+	local W = S.warp
+	local active, factor, followed = tostring(param or ""):match("^(%d)|([%d%.]+)[^|]*|(%d)$")
+	if not active then return end
+	W.active, W.factor = active == "1", tonumber(factor) or 1
+	if followed == "1" or W.want == W.active then
+		if W.want == W.active then W.want = nil end
+		return
+	end
+	if warp_enabled() then
+		net_send(string.format("Z|state|%d|%.2f|", W.active and 1 or 0, W.factor))
+	end
+end
+
+warp_receive = function(f, now)
+	local W = S.warp
+	if f[2] ~= "state" or not warp_enabled() then return end
+	local active = f[3] == "1"
+	local factor = math.max(0.1, math.min(6, tonumber(f[4]) or 1))
+	if f[5] == "refused" then
+		notify("your partner can't use SETA right now, so it is off for both of you")
+	end
+	if active ~= W.active or (active and math.abs(factor - (W.factor or 1)) > 0.01) then
+		W.want, W.want_at = active, now
+		request("timewarp", { active and 1 or 0, factor })
+	end
+end
+
+local function warp_tick(now)
+	local W = S.warp
+	local on = warp_enabled()
+	if on ~= W.on then
+		W.on = on
+		request("timewarp_sync", { on and 1 or 0 })
+	end
+	if W.want ~= nil and now - W.want_at > WARP_FOLLOW_WAIT then
+		if W.active ~= W.want then
+			notify("your partner turned SETA %s, but it can't follow here (no SETA, or not allowed right now)",
+				W.want and "on" or "off")
+			if on then net_send(string.format("Z|state|%d|%.2f|refused", W.active and 1 or 0, W.factor or 1)) end
+		end
+		W.want = nil
+	end
+end
+
+-------------------------------------------------------------------------------
 -- Chat commands
 
 -- The first thing standing in the way of co-op, with what to do about it; "all good" when nothing does.
@@ -2432,6 +2494,7 @@ local function tick(now, dt)
 	credits_tick(now)
 	relations_tick(now)
 	unlocks_tick(now)
+	warp_tick(now)
 end
 
 local function on_update()
@@ -2464,6 +2527,7 @@ local function init()
 	RegisterEvent("x4coop.relation_changed", on_relation_changed)
 	RegisterEvent("x4coop.relation_applied", on_relation_applied)
 	RegisterEvent("x4coop.unlock", on_unlock)
+	RegisterEvent("x4coop.timewarp", on_timewarp)
 	RegisterEvent("x4coop.empire_trade", on_empire_trade)
 	RegisterEvent("x4coop.npc_mirror", on_npc_mirror)
 

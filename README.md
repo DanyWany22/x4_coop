@@ -160,6 +160,11 @@ mod double-checks the engine's rotation convention (`probe:` in the log).
 3. When both are in a ship, your partner appears ("Nova is in Mars, 412 km away"). `/x4coop join`
    warps you beside them. `/x4coop say <text>` chats.
 
+**SETA (time acceleration):** whichever of you switches it on or off, the other's game follows, at
+the same speed. If the other can't follow (no SETA in their inventory, or not allowed right now, for
+example with enemies near), it's switched off again for both of you, and you're both told.
+`/x4coop set timewarp_sync 0` turns it off.
+
 Same Steam account on both PCs? Put the second one's Steam in **Offline Mode** to run both, and
 turn off Steam Cloud for X4 there so its saves don't overwrite the other PC's.
 
@@ -329,12 +334,12 @@ change a value that already exists; it can't create anything.
 | hull, shields, kills | `set_object_hull`, `set_object_shield`, `destroy_object` | yes |
 | firing at a target | `shoot_at` (AI script) | yes |
 | NPC ships near the players | the same position and hull commands | yes |
-| credits | `add_money`, `remove_money`, `transfer_money` | not yet |
-| station stock, and so prices | `add_cargo`, `remove_cargo` | not yet |
-| trade offers | `create_trade_offer`, `remove_trade_offer` | not yet |
-| faction relations | `set_faction_relation` | not yet |
-| research, blueprints, inventory | `add_research`, `add_blueprints`, `add_inventory` | not yet |
-| time acceleration (SETA) | `set_timewarp_factor` | not yet |
+| credits (gifts, empire income) | `transfer_money` | yes |
+| station stock, and so prices and trade offers | `add_cargo`, `remove_cargo` | yes |
+| faction relations | `set_faction_relation` | yes |
+| research, blueprints, licences | `add_research`, `add_blueprints`, `add_licence` | yes |
+| time acceleration (SETA) | `set_timewarp_factor`, `toggle_timewarp` | yes |
+| inventory items | `add_inventory` | not yet |
 | ownership, orders, missions | `set_owner`, `create_order`, `create_mission` | not yet |
 
 All of these, except `SetObjectSectorPos` and `shoot_at`, are Mission Director commands from the
@@ -394,7 +399,7 @@ game's own schema (`libraries/md.xsd`, `libraries/common.xsd`).
 
 Messages (one text line each): `S` snapshot (position, rotation, velocity, ship, hull, shield),
 `P`/`Q` ping, `M` chat, `L` world link, `K` kill, `D` hit, `F` firing at, `B` nearby ships (both
-ways), `E` station stock (host to joiner), `T` a joiner's trade, `V` relations, `U` research/blueprints/licences, `C` credits given; `R`/`W`/`N`/`X` are between a game and
+ways), `E` station stock (host to joiner), `T` a joiner's trade, `V` relations, `U` research/blueprints/licences, `Z` SETA, `C` credits given; `R`/`W`/`N`/`X` are between a game and
 its own bridge.
 
 Self-calibration: on first contact the proxy is nudged and read back (does `SetObjectSectorPos`
@@ -407,7 +412,6 @@ axis vectors. In-game results so far: degrees, YXZ+--.
   only exists on their side (it shows up as a stand-in on the joiner's side when near the host).
 * Proxies are player-owned (friendly, but listed in your property).
 * No highway or travel-drive visuals for the partner; they reappear when they leave the highway.
-  SETA (time acceleration) is not synchronised; avoid it while playing together.
 * The bridge's encryption uses Python's standard library only: scrypt for the key, a SHAKE-256
   keystream, HMAC-SHA256. That is sound, but it is home-made, not a reviewed protocol like
   Tailscale's WireGuard. A weak password can be guessed offline by anyone who records your traffic.
@@ -431,7 +435,8 @@ python extensions/x4_coop/dev/run_tests.py [--quick]
   the joiner's trades counted on the host (once, named in its reports, never reverted on the joiner),
   deaths near either player reported from any sector (only by the game that rules that area),
   relations both ways (the host's followed; a joiner's change counted once and never undone in flight),
-  research, blueprints and licences both ways (sent until confirmed, added once),
+  research, blueprints and licences both ways (sent until confirmed, added once), SETA both ways
+  (followed; turned off for both when one side can't follow),
   hostile messages, guest ship, save handoff commands. Errors are measured against ground truth:
   the partner within ~2–3 m and ~2° (95th percentile) at 220–300 m/s; NPC copies within ~3.5 m.
 * Bridge: password codec (encryption, replay, tamper, stale, other versions), reconnects, chat, wrong password, partner

@@ -1030,6 +1030,51 @@
           </actions>
         </library>
 
+        <!--
+          Time acceleration (SETA): both games run at the same speed. While 'timewarp_sync' (param3: [1 or 0]) is on,
+          every change of player.timewarp is reported to Lua ('x4coop.timewarp', 'active|factor|followed': followed is 1
+          for a change we made to follow the partner). 'timewarp' (param3: [active, factor]) follows the partner's;
+          toggling only works with SETA in the inventory and when the game allows it.
+        -->
+        <cue name="OnTimewarpSync" instantiate="true">
+          <conditions>
+            <event_ui_triggered screen="'x4coop'" control="'timewarp_sync'"/>
+          </conditions>
+          <actions>
+            <set_value name="Root.$WarpSyncOn" exact="event.param3.{1}"/>
+            <set_value name="Root.$WarpSeen" exact="player.timewarp.active"/>
+            <set_value name="Root.$WarpFactorSeen" exact="player.timewarp.factor"/>
+            <raise_lua_event name="'x4coop.timewarp'" param="'%s|%s|1'.[if player.timewarp.active then 1 else 0, player.timewarp.factor]"/>
+          </actions>
+        </cue>
+
+        <cue name="TimewarpWatch" instantiate="true" checkinterval="500ms">
+          <conditions>
+            <check_value value="@Root.$WarpSyncOn == 1 and (player.timewarp.active != @Root.$WarpSeen or player.timewarp.factor != @Root.$WarpFactorSeen)"/>
+          </conditions>
+          <actions>
+            <set_value name="Root.$WarpSeen" exact="player.timewarp.active"/>
+            <set_value name="Root.$WarpFactorSeen" exact="player.timewarp.factor"/>
+            <set_value name="$Followed" exact="if Root.$WarpFollowUntil? and player.age lt Root.$WarpFollowUntil then 1 else 0"/>
+            <raise_lua_event name="'x4coop.timewarp'" param="'%s|%s|%s'.[if player.timewarp.active then 1 else 0, player.timewarp.factor, $Followed]"/>
+          </actions>
+        </cue>
+
+        <cue name="OnTimewarp" instantiate="true">
+          <conditions>
+            <event_ui_triggered screen="'x4coop'" control="'timewarp'"/>
+          </conditions>
+          <actions>
+            <set_value name="Root.$WarpFollowUntil" exact="player.age + 1s"/>
+            <do_if value="event.param3.{2} gt 0">
+              <set_timewarp_factor factor="event.param3.{2} * 1s"/>
+            </do_if>
+            <do_if value="(event.param3.{1} == 1) != player.timewarp.active">
+              <toggle_timewarp/>
+            </do_if>
+          </actions>
+        </cue>
+
         <cue name="OnNpcClear" instantiate="true">
           <conditions>
             <event_ui_triggered screen="'x4coop'" control="'npc_clear'"/>
