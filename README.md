@@ -9,6 +9,93 @@ by sending messages between them, using only X4's own modding interfaces (no mem
   partner's guns fire at what they shoot at, the host's NPCs near you are in the same places on
   both sides, and each of you sees the other's real ship and its hull and shields.
 
+## For reviewers
+
+This repository is the whole mod. There are **no compiled files**: every file is readable text, and
+nothing is downloaded at runtime.
+
+**Extension files.** These go in `X4 Foundations/extensions/x4_coop/`, and X4 loads them itself:
+
+| file | what X4 does with it |
+|---|---|
+| [`content.xml`](content.xml) | extension manifest |
+| [`ui.xml`](ui.xml) | registers the Lua file with the game's UI |
+| [`ui/x4_coop.lua`](ui/x4_coop.lua) | Lua, run by the game's UI (LuaJIT) |
+| [`md/x4_coop.xml`](md/x4_coop.xml) | Mission Director script (X4's XML scripting) |
+| [`aiscripts/x4coop.proxy.fire.xml`](aiscripts/x4coop.proxy.fire.xml) | AI script that makes the partner's ship fire |
+
+**Installation:** see [Install](#install) and [Playing together](#playing-together).
+
+**Source code:** everything is here:
+* `ui/`, `md/`, `aiscripts/`: the extension above.
+* `bridge/`: the network program each player runs next to the game (Python, standard library
+  only), its launchers and the telemetry tools.
+* `dev/`: offline tests and the test doubles they use.
+
+### How a script mod can network
+
+X4's Lua has no sockets, and this mod doesn't open any in Lua. The networking is done by a separate
+program on each PC, the bridge, which the game reaches through a **Windows named pipe**:
+
+```
+X4 (ui/x4_coop.lua) <-> named pipe <-> bridge (Python: UDP/TCP sockets) <-> network <-> partner's bridge <-> pipe <-> partner's X4
+```
+
+* The Lua opens `\\.\pipe\x4_coop` with Windows' own `CreateFileA`, `ReadFile`, `WriteFile` and
+  `PeekNamedPipe` from kernel32. It calls them through LuaJIT's FFI: on Windows, `ffi.C` also looks
+  up kernel32. See the block marked "own pipe client" in `ui/x4_coop.lua`.
+  `dev/pipe_test.py` runs exactly that block inside the game's own `lua51_64.dll` against a real
+  bridge.
+* Fallback, only used if that can't load: SirNukes' Mod Support APIs, an existing Workshop mod whose
+  small DLL offers the same named pipe to Lua.
+* The bridge ([`bridge/x4_coop_bridge.py`](bridge/x4_coop_bridge.py)) creates the pipe and accepts
+  only `X4.exe` as its client. It relays each message over UDP (encrypted and signed with the
+  players' password) to the partner's bridge, which writes it into the partner's pipe.
+
+### Native code and memory addresses
+
+The mod has **no DLLs, no hooks, no injection, and reads or writes no memory addresses**. The Lua
+calls functions by name through FFI:
+
+* **6 Windows functions** for the pipe (listed above).
+* **15 game functions.** Egosoft's own UI scripts call every one of them; one example file each, from
+  the game's archives:
+
+| function | used by vanilla, e.g. |
+|---|---|
+| `GetObjectPositionInSector` | `ui/addons/ego_detailmonitor/menu_map.lua` |
+| `SetObjectSectorPos` | `ui/addons/ego_detailmonitor/menu_mapeditor.lua` |
+| `GetPlayerOccupiedShipID` | `ui/addons/ego_chatwindow/chatwindow.lua` |
+| `GetContextByClass`, `GetPlayerID` | `ui/addons/ego_detailmonitor/menu_docked.lua` |
+| `GetObjectIDCode` | `ui/addons/ego_detailmonitor/menu_diplomacy.lua` |
+| `GetPlayerName` | `ui/addons/ego_detailmonitor/menu_playerinfo.lua` |
+| `IsComponentOperational`, `CanTeleportPlayerTo`, `TeleportPlayerTo`, `IsSaveListLoadingComplete` | `ui/addons/ego_detailmonitor/menu_map.lua` |
+| `IsGamePaused` | `ui/addons/ego_helptext/helptext.lua` |
+| `GetSaveFolderPath`, `IsSaveValid`, `ReloadSaveList` | `ui/addons/ego_gameoptions/gameoptions.lua` |
+
+Everything else, such as spawning ships, damage, kills and weapons, is ordinary Mission Director
+and AI script. The tests validate those files against the game's own XSD schemas.
+
+### Test doubles (never used when playing together)
+
+* **`ghost` mode,** the default until you type `/x4coop net`, is a single-player demo. The Lua feeds
+  your own ship's position back to itself through a simulated delay and shows it as
+  "[Co-op] Ghost". It never touches the pipe or the network.
+* **`dev/fake_peer.py`** stands in for a partner, so one bridge can be tested alone.
+* **`dev/sim.lua`, `dev/run_lua.py`, `dev/game_sim.py`** are test harnesses: a stubbed game engine
+  for running the mod's Lua in X4's LuaJIT DLL outside the game, and a stand-in for the game's
+  pipe client.
+* **`dev/share_test.py`, `dev/trace_test.py`, `dev/pipe_test.py`** run real bridges on one PC,
+  with stand-ins for the games.
+
+### Checking it yourself
+
+* Play on two PCs. `host.bat` and `join.bat` show the [telemetry overlay](#telemetry-seeing-and-proving-the-link)
+  and record traces. `report.bat` matches every packet one PC sent to its arrival on the other.
+* Capture port 47810 with Wireshark, or with `bridge/capture.bat` (Windows' own Packet Monitor).
+  Every UDP payload starts with `X4C2 `, then the same HMAC tag the bridge's trace lists.
+* `python dev/run_tests.py` runs the offline tests (set `X4_GAME_DIR` outside the game folder).
+
 **Status (2026-10-08):** single-player ghost mode is tested in-game (Terran start, X4 9.00): the
 ghost spawns and follows, the engine's angle unit (degrees) and rotation convention (YXZ+--)
 were measured and are built in. **Networking and the shared world are only tested offline** (a
@@ -18,10 +105,11 @@ two-player sessions are next.
 ## Requirements
 
 * X4 9.00 on both PCs, with the same DLCs (the partner is placed by sector name).
-* For playing together (not for the ghost test): SirNukes'
-  [Mod Support APIs](https://github.com/bvbohnen/x4-projects) (Steam Workshop or Nexus) and
-  **Protected UI Mode off** (Settings → Extensions). Its pipe DLL is how the game talks to the
-  bridge.
+* For playing together (not for the ghost test): the bridge on both PCs. The mod opens the
+  bridge's pipe with Windows' own functions. It isn't known yet whether X4 allows that with
+  **Protected UI Mode** on (Settings → Extensions). If `/x4coop check` says the pipe functions
+  can't be reached, turn Protected UI Mode off. SirNukes'
+  [Mod Support APIs](https://github.com/bvbohnen/x4-projects) are an optional fallback.
 * Python 3.8+ on Windows for the bridge (standard library only, nothing to install).
 * A key for X4's chat window, where the `/x4coop` commands go: **Settings → Controls → General
   Controls**, bottom section **"Expert Settings - Use with Caution!"** → **Toggle Chat Window**.
@@ -63,7 +151,7 @@ mod double-checks the engine's rotation convention (`probe:` in the log).
    * The password encrypts and signs everything between the bridges, including the save.
 2. **In game**, both: `/x4coop net`, then `/x4coop check`. It names the first thing in the way
    (missing mod, no bridge, partner not reaching you, …) and what to do.
-3. When both are in a ship, your partner appears ("Aaron is in Mars, 412 km away"). `/x4coop join`
+3. When both are in a ship, your partner appears ("Nova is in Mars, 412 km away"). `/x4coop join`
    warps you beside them. `/x4coop say <text>` chats.
 
 Same Steam account on both PCs? Put the second one's Steam in **Offline Mode** to run both, and
@@ -171,8 +259,9 @@ effects), `fire_fx` (proxy fires; gives spawned proxies a pilot), `npc_sync`, `n
   `--peer` on both sides (each names the other's public IP; many routers let that through because
   both send first):
   `python x4_coop_bridge.py --peer <their public IP> --role host --password …` (the joiner uses `--role join`).
-* **"pipe DLL blocked":** Protected UI Mode is on. **"Mod Support APIs not installed":** subscribe
-  in the Workshop and restart.
+* **"can't reach Windows' pipe functions":** turn Protected UI Mode off (Settings → Extensions) and
+  load the save again. `/x4coop status` shows which pipe client is in use ("via own" or "via
+  SirNukes"); `/x4coop pipeclient own|sirnukes|auto` switches.
 * **Partner's ship jitters:** the `health:` lines (every 15 s) show updates/s and the longest
   frame gap (stutter from frame timing) and prediction corrections (from the network). `/x4coop
   set engine_fx 0` and `fire_fx 0` turn off the two experiments.
@@ -194,6 +283,8 @@ effects), `fire_fx` (proxy fires; gives spawned proxies a pilot), `npc_sync`, `n
 * **MD** (`md/x4_coop.xml`, X4's Mission Director scripting) does what only scripts can: spawn or
   adopt ships, warp, set hull/shields, destroy, find ships by ID code, notice your kills, hits and
   shots, list ships near you. The AI script makes a proxy fire.
+* **Pipe client** (in `ui/x4_coop.lua`): Windows' kernel32 named-pipe functions through LuaJIT's
+  FFI, or SirNukes' Mod Support APIs as a fallback.
 * **Bridge** (`bridge/x4_coop_bridge.py`) carries the messages: named pipe to the game (only
   `X4.exe` on this PC may connect), UDP to the partner (encrypted and signed with keys made from
   the password, replay protected, one partner at a time), TCP for the save handoff (encrypted too).
@@ -256,5 +347,5 @@ files only, no test kit) to your Desktop. Unzip it into `X4 Foundations/extensio
 | `bridge/x4_coop_overlay.py` | live telemetry window over the game |
 | `bridge/x4_coop_trace_report.py`, `report.bat` | lines up two machines' traces; text and HTML report |
 | `bridge/capture.bat` | Windows Packet Monitor capture of port 47810 (pcapng for Wireshark) |
-| `bridge/fake_peer.py` | a fake partner for testing on one PC |
-| `dev/` | offline tests (`run_tests.py`, `sim.lua`, `run_lua.py`, `game_sim.py`, `share_test.py`, `trace_test.py`, `catx.py`) |
+| `dev/fake_peer.py` | test double: a fake partner, for testing one bridge on one PC |
+| `dev/` | offline tests (`run_tests.py`, `sim.lua`, `run_lua.py`, `game_sim.py`, `pipe_test.py`, `share_test.py`, `trace_test.py`, `catx.py`) |

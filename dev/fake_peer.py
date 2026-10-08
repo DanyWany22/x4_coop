@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-Pretend to be a co-op partner, so the whole network path can be tested on one PC.
+TEST TOOL, never part of a real session: pretends to be a co-op partner, so the whole network path
+(game, pipe, bridge, UDP) can be tested on one PC without a second player.
 
-    python x4_coop_bridge.py --host     # terminal 1: your bridge (X4 running, /x4coop net)
-    python fake_peer.py                 # terminal 2: joins 127.0.0.1:47810
+    python bridge/x4_coop_bridge.py --host --password test  # terminal 1: your bridge (X4 running, /x4coop net)
+    python dev/fake_peer.py --password test                 # terminal 2: joins 127.0.0.1:47810
 
 Modes:
   echo  (default)  mirrors your own ship back to you, shifted by --offset (sector axes, metres).
@@ -23,7 +24,7 @@ import socket
 import sys
 import time
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "bridge"))
 from x4_coop_bridge import Codec  # noqa: E402  (same datagram framing and password check as the real bridge)
 
 

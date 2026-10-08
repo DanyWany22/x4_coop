@@ -97,6 +97,7 @@ local config = {
 	ghost_up = 0,             --    in view from the cockpit (raise these for L/XL ships)
 	ghost_forward = 120,
 	pipe = "x4_coop",
+	pipe_client = "auto",     -- "own" (Windows pipe functions through FFI), "sirnukes" (their DLL), "auto": own first
 }
 
 -- Bump when messages change meaning, so two different builds refuse to link instead of misreading each
@@ -580,7 +581,102 @@ local function ghost_deliver(now)
 end
 
 -------------------------------------------------------------------------------
--- Network: named pipe to the Python bridge (needs SirNukes' Mod Support APIs)
+-- Pipe client. X4's Lua has no sockets, so the network lives in the bridge (bridge/x4_coop_bridge.py), a
+-- separate program on this PC, which the game reaches through a Windows named pipe. This client opens the
+-- pipe with Windows' own kernel32 functions through LuaJIT's FFI (on Windows, ffi.C also searches kernel32),
+-- the same way this file already calls the game's functions: no DLL of ours, no hooks, no memory addresses.
+-- If it is unavailable, SirNukes' Mod Support APIs (their pipe DLL) are used instead when installed.
+-- Both offer the same calls: Schedule_Read(name, callback), Schedule_Write(name, nil, msg) and
+-- Close_Pipe(name); the callback gets each message, or "ERROR" when the pipe is gone.
+-- BEGIN own pipe client (dev/pipe_test.py runs this block against a real bridge)
+local OwnPipe = {}
+do
+	local GENERIC_READ_WRITE, OPEN_EXISTING = 0xC0000000, 3
+	local PIPE_READMODE_MESSAGE, PIPE_NOWAIT = 0x2, 0x1
+	local loaded, handles, readers = nil, {}, {}
+	local buf, bufsize, count, avail, left
+
+	-- true once kernel32's pipe functions resolve (false in the offline simulator's stand-in ffi)
+	function OwnPipe.available()
+		if loaded == nil then
+			loaded = pcall(ffi.cdef, [[
+				void* CreateFileA(const char* name, uint32_t access, uint32_t share, void* security,
+				                  uint32_t disposition, uint32_t flags, void* template_file);
+				int SetNamedPipeHandleState(void* pipe, uint32_t* mode, uint32_t* max_count, uint32_t* timeout);
+				int PeekNamedPipe(void* pipe, void* buffer, uint32_t size, uint32_t* read, uint32_t* available,
+				                  uint32_t* left_this_message);
+				int ReadFile(void* file, void* buffer, uint32_t size, uint32_t* read, void* overlapped);
+				int WriteFile(void* file, const void* buffer, uint32_t size, uint32_t* written, void* overlapped);
+				int CloseHandle(void* handle);
+			]]) and pcall(function()
+				assert(C.CreateFileA and C.SetNamedPipeHandleState and C.PeekNamedPipe and C.ReadFile
+					and C.WriteFile and C.CloseHandle)
+			end)
+			if loaded then
+				bufsize = 65536
+				buf = ffi.new("uint8_t[?]", bufsize)
+				count, avail, left = ffi.new("uint32_t[1]"), ffi.new("uint32_t[1]"), ffi.new("uint32_t[1]")
+			end
+		end
+		return loaded
+	end
+
+	local function close(name, why)
+		if handles[name] then C.CloseHandle(handles[name]) end
+		local callback = readers[name]
+		handles[name], readers[name] = nil, nil
+		if callback and why then callback(why) end
+	end
+
+	function OwnPipe.Schedule_Read(name, callback)
+		readers[name] = callback
+		if handles[name] then return end
+		local h = C.CreateFileA("\\\\.\\pipe\\" .. name, GENERIC_READ_WRITE, 0, nil, OPEN_EXISTING, 0, nil)
+		if ffi.cast("intptr_t", h) == -1 then  -- no bridge listening (or it serves another game)
+			close(name, "ERROR")
+			return
+		end
+		handles[name] = h
+		local mode = ffi.new("uint32_t[1]", PIPE_READMODE_MESSAGE + PIPE_NOWAIT)
+		C.SetNamedPipeHandleState(h, mode, nil, nil)
+	end
+
+	function OwnPipe.Schedule_Write(name, _, msg)
+		-- A failed write is only a lost message; poll() notices a closed pipe.
+		if handles[name] then C.WriteFile(handles[name], msg, #msg, count, nil) end
+	end
+
+	function OwnPipe.Close_Pipe(name)
+		close(name, nil)
+	end
+
+	-- every frame: hand each waiting message to its reader
+	function OwnPipe.poll()
+		for name, h in pairs(handles) do
+			while handles[name] == h do
+				if C.PeekNamedPipe(h, nil, 0, nil, avail, left) == 0 then
+					close(name, "ERROR")  -- the bridge went away
+				elseif avail[0] == 0 then
+					break
+				else
+					if left[0] > bufsize then
+						bufsize = left[0]
+						buf = ffi.new("uint8_t[?]", bufsize)
+					end
+					if C.ReadFile(h, buf, bufsize, count, nil) == 0 then
+						close(name, "ERROR")
+					elseif readers[name] then
+						readers[name](ffi.string(buf, count[0]))
+					end
+				end
+			end
+		end
+	end
+end
+-- END own pipe client
+
+-------------------------------------------------------------------------------
+-- Network: messages to and from the bridge, through the pipe client
 
 local on_pipe_message
 local on_world_message  -- shared-world messages (R, L, K, D), defined after proxy management
@@ -598,16 +694,26 @@ local function net_tick(now)
 	if not N.api then
 		if now < N.retry_at then return end
 		N.retry_at = now + 5
-		local ok, api = pcall(require, PIPES_MODULE)
-		if not ok or type(api) ~= "table" or not api.Schedule_Read then
-			N.status = "Mod Support APIs not installed"
+		if config.pipe_client ~= "sirnukes" and OwnPipe.available() then
+			N.api, N.client, N.retry_at = OwnPipe, "own", 0
+		elseif config.pipe_client == "own" then
+			N.status = "own pipe client unavailable (kernel32 not reachable through FFI)"
 			return
+		else
+			local ok, api = pcall(require, PIPES_MODULE)
+			if not ok or type(api) ~= "table" or not api.Schedule_Read then
+				N.status = "Mod Support APIs not installed"
+				return
+			end
+			if api.winpipe_loaded == false then
+				N.status = "pipe DLL blocked: turn off Protected UI Mode"
+				return
+			end
+			N.api, N.client, N.retry_at = api, "SirNukes", 0
 		end
-		if api.winpipe_loaded == false then
-			N.status = "pipe DLL blocked: turn off Protected UI Mode"
-			return
-		end
-		N.api, N.retry_at = api, 0
+	end
+	if N.api == OwnPipe then
+		OwnPipe.poll()
 	end
 	if not N.reading and now >= N.retry_at then
 		N.reading, N.status = true, "connecting to bridge"
@@ -1446,7 +1552,11 @@ local function diagnosis()
 		return "mode is " .. config.mode .. ": type /x4coop net to play with a partner"
 	end
 	if N.status == "Mod Support APIs not installed" then
-		return "SirNukes' Mod Support APIs are not installed (Steam Workshop), and they are needed for the network"
+		return "this game's Lua can't reach Windows' pipe functions (is Protected UI Mode on? Settings, Extensions), "
+			.. "and the fallback, SirNukes' Mod Support APIs, is not installed"
+	end
+	if N.status:find("own pipe client", 1, true) then
+		return N.status .. ": /x4coop pipeclient auto lets SirNukes' Mod Support APIs take over, if installed"
 	end
 	if N.status:find("Protected UI Mode", 1, true) then
 		return "turn off Protected UI Mode (Settings, Extensions), then load the save again"
@@ -1475,6 +1585,7 @@ local function status_text()
 	local P, R, N = S.proxy, S.rem, S.net
 	local age = R.last_recv > 0 and string.format("%.1fs ago", getElapsedTime() - R.last_recv) or "never"
 	local link = config.mode == "net" and (N.status .. (N.rtt and string.format(", rtt %.0f ms", N.rtt * 1000) or "")
+		.. " | pipe " .. config.pipe .. " via " .. (N.client or "-")
 		.. " | " .. (S.link.role or "?") .. ", world " .. (S.link.state or "unknown")) or "-"
 	return string.format("mode %s | backend %s (%s) | proxy %s%s | partner %s %s, last snapshot %s | link %s | rotation %s %s",
 		config.mode, config.backend, S.backend or "untested", P.state, proxy_is_adopted() and " (their own ship)" or "",
@@ -1482,7 +1593,7 @@ local function status_text()
 		conv_name(S.conv), S.probe.measured and "measured" or "assumed")
 end
 
-local USAGE = "usage: /x4coop status | check | join | say <text> | guestship | takeship | share | loadshared | ghost | net | off | backend lua|md|auto | probe | pipe <name> | set <key> <number>"
+local USAGE = "usage: /x4coop status | check | join | say <text> | guestship | takeship | share | loadshared | ghost | net | off | backend lua|md|auto | probe | pipe <name> | pipeclient auto|own|sirnukes | set <key> <number>"
 
 local function guest_ship()
 	local ship = S.player and GetNPCBlackboard(S.player, "$x4coop_guestship")
@@ -1597,6 +1708,18 @@ local function command(param)
 		share_save()
 	elseif cmd == "loadshared" then
 		load_shared()
+	elseif cmd == "pipeclient" then
+		local choice = args[2]
+		if choice == "auto" or choice == "own" or choice == "sirnukes" then
+			local N = S.net
+			if N.api and N.reading and N.api.Close_Pipe then pcall(N.api.Close_Pipe, config.pipe) end
+			config.pipe_client = choice
+			N.api, N.client, N.reading, N.connected, N.retry_at, N.status = nil, nil, false, false, 0, "connecting to bridge"
+			notify("pipe client: %s", choice)
+		else
+			notify("pipe client %s, in use: %s. /x4coop pipeclient auto|own|sirnukes", config.pipe_client,
+				S.net.client or "none")
+		end
 	elseif cmd == "pipe" then
 		-- A second game on the same PC needs its own pipe (and its own bridge with --pipe). Not saved:
 		-- both games may load the same save.

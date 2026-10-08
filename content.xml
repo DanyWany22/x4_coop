@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<content id="x4_coop" version="1" name="X4 Co-op (prototype)" description="Experimental: shows another player's ship flying alongside you. Offline ghost test works out of the box; networking needs SirNukes' Mod Support APIs and the bridge script in bridge/." author="Aaron" date="2026-10-08" enabled="1" save="0">
-  <!-- Optional: only needed for real networking (named pipes). Listed so it loads before us when present. -->
+<content id="x4_coop" version="1" name="X4 Co-op (prototype)" description="Experimental: two players fly side by side, each in their own game. Offline ghost test works out of the box; playing together needs the bridge program in bridge/ on both PCs." author="X4 Co-op" date="2026-10-08" enabled="1" save="0">
+  <!-- Optional fallback for the pipe to the bridge, used only if the mod's own pipe client can't load.
+       Listed so it loads before us when present. -->
   <dependency id="ws_2042901274" optional="true" name="Mod Support APIs" />
 </content>

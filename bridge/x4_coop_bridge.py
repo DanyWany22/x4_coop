@@ -14,7 +14,8 @@ the internet with UDP and TCP port 47810 forwarded to the host's PC. Both sides 
 --password: it encrypts and signs everything, so nobody else can read or forge the traffic.
 Standard library only: Windows, Python 3.8+.
 
-X4 reaches this pipe through SirNukes' Mod Support APIs (Protected UI Mode must be off).
+X4 reaches this pipe with the mod's own pipe client (Windows' pipe functions through LuaJIT's FFI, in
+ui/x4_coop.lua), or with SirNukes' Mod Support APIs as a fallback.
 Datagrams are b"X4C2 " + header + one encrypted pipe message (see Codec); the message format is
 documented in ui/x4_coop.lua. "H" keepalives are handled here and never reach the game.
 A host serves one partner at a time and takes a new one only after the current one goes silent.
