@@ -135,8 +135,15 @@ you hit, so you can try it alone. Spawned proxies get a drone pilot for this; if
 movement worse, `/x4coop set fire_fx 0` turns it off (then reload or `/x4coop off` and back on).
 Only hits are mirrored for now, not misses.
 
-Not yet: the host's NPC positions don't drive the joiner's copies, so the same pirate can be in
-slightly different places in each world.
+**Same NPCs in the same places:** both games list the ships within 6 km of their player every
+second. The host sends their positions 10 times a second, and the joiner's copies of those ships
+(same ID code) are moved to match, with the same smoothing and prediction as the partner. Their
+own AI still decides when to shoot. Offline tests: the copies stay within about 3 m (95th
+percentile) of the host's ships. `/x4coop set npc_sync 0` turns it off; `npc_radius` sets the
+range. The `health:` lines include an `npc bubble` line with counts.
+
+Not yet (stage B): ships only the host has aren't created on the joiner's side, ships only the
+joiner has aren't removed, and the host's hull values aren't pushed to the joiner's copies.
 
 ## Two games on one PC
 
@@ -189,7 +196,7 @@ Paste the `[x4coop]` and `x4coop:` log lines back into the conversation that's d
 * The proxy is player-owned so it shows as friendly, which also means it appears in your
   property list. A dedicated faction would be cleaner.
 * Partner firing only mirrors hits (not misses), and needs the target ship to exist in your
-  world. NPC positions near the players aren't host-driven yet.
+  world. NPC sync only covers ships both worlds have (see Shared world).
 * No docking, highway or travel-drive visuals yet. SETA (time acceleration)
   is not synchronised.
 * One partner at a time. With `--password`, packets are authenticated but not encrypted, so

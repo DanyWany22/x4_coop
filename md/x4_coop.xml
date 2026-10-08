@@ -334,6 +334,40 @@
           </actions>
         </cue>
 
+        <!--
+          NPC bubble (shared world): while Lua sets a radius, list the ships near the player every second, nearest
+          first, without mass traffic, drones, docked ships or proxies. Reply: player.entity.$x4coop_bubble, then
+          raise 'x4coop.bubble'. param3: [radius in metres, 0 = off]
+        -->
+        <cue name="OnBubbleConfig" instantiate="true">
+          <conditions>
+            <event_ui_triggered screen="'x4coop'" control="'bubble'"/>
+          </conditions>
+          <actions>
+            <set_value name="Root.$BubbleRadius" exact="event.param3.{1}"/>
+          </actions>
+        </cue>
+
+        <cue name="BubbleScan" instantiate="true" checkinterval="1s">
+          <conditions>
+            <check_value value="@Root.$BubbleRadius gt 0 and @player.occupiedship.sector"/>
+          </conditions>
+          <actions>
+            <set_value name="$Center" exact="player.occupiedship"/>
+            <find_ship name="$Found" space="$Center.sector" multiple="true" sortbydistanceto="$Center" sortlimit="60">
+              <match_distance object="$Center" max="Root.$BubbleRadius"/>
+            </find_ship>
+            <set_value name="$Bubble" exact="[]"/>
+            <do_for_each name="$Candidate" in="$Found">
+              <do_if value="$Bubble.count lt 40 and $Candidate != $Center and $Candidate.isoperational and not $Candidate.ismasstraffic and not $Candidate.isunit and not @$Candidate.dock and $Candidate.parent.isclass.space and not Root.$AllProxies.indexof.{$Candidate} and not @Root.$Adopted.indexof.{$Candidate}">
+                <append_to_list name="$Bubble" exact="$Candidate"/>
+              </do_if>
+            </do_for_each>
+            <set_value name="player.entity.$x4coop_bubble" exact="$Bubble"/>
+            <raise_lua_event name="'x4coop.bubble'"/>
+          </actions>
+        </cue>
+
         <!-- The partner is hitting a ship: their proxy fires at the same ship here. param3: [idcode, ship_macro, sector_macro] -->
         <cue name="OnFire" instantiate="true">
           <conditions>

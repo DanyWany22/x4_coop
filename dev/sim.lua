@@ -27,6 +27,10 @@ local SC = {
 	                 role = "join", own_world = "abc123", partner_world = "zzz999", world_test = "mismatch" },
 	world_host   = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
 	                 role = "host", world_test = "host" },
+	npc_host     = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
+	                 role = "host", own_world = "abc123", partner_world = "abc123", npc_test = "host" },
+	npc_join     = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
+	                 role = "join", own_world = "abc123", partner_world = "abc123", npc_test = "join" },
 	net_missing  = { true_conv = { order = "YXZ", sy = 1, sp = 1, sr = 1 }, mode = "net", setpos = "radians", duration = 8, pipes = false, expect_no_proxy = true },
 	sector_jump  = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = 1 }, mode = "ghost", setpos = "radians", duration = 30, jump_at = 18 },
 	net_restart  = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = 1 }, mode = "net", setpos = "radians", duration = 30, pipes = true, partner_restart_at = 16 },
@@ -81,13 +85,27 @@ local SHIP_MACRO = "ship_arg_s_fighter_01_a_macro"
 local objects = {}
 local PLAYER = 100
 local PARKED = 300
+local NPC_COUNT = 4
+local function npc_truth(i, t, h)
+	local ang = 0.3 * t + i * 1.57
+	return h.x + 300 * math.cos(ang), h.y + 50 * i, h.z + 300 * math.sin(ang)
+end
+
 objects[PLAYER] = { sector = 500, x = 1000, y = 0, z = -2000, yaw = 0, pitch = 0, roll = 0, macro = SHIP_MACRO }
+if sc.npc_test then
+	for i = 1, NPC_COUNT do
+		local x, y, z = npc_truth(i, 0, objects[PLAYER])
+		objects[400 + i] = { sector = 500, x = x + (sc.npc_test == "join" and 500 or 0), y = y, z = z, yaw = i * 0.5, pitch = 0, roll = 0,
+			macro = SHIP_MACRO, idcode = "NPC-" .. i }
+	end
+end
 if sc.partner_ship then
 	objects[PARKED] = { sector = 500, x = 5000, y = 0, z = 5000, yaw = 0, pitch = 0, roll = 0, macro = SHIP_MACRO,
 		idcode = sc.partner_ship, pilot = true }
 end
 local next_id, spawns, warps, moves, md_events, lua_errors = 200, 0, 0, 0, {}, 0
 local spawn_sectors, world_requests, adoptions = {}, {}, 0
+local bubble_radius = 0
 local proxy_id = nil
 local history = {}   -- player pose history for ground truth
 
@@ -230,6 +248,8 @@ function AddUITriggeredEvent(screen, control, args)
 		local r, u, f = col(m, 1), col(m, 2), col(m, 3)
 		blackboard["$x4coop_probe"] = { o.yaw, o.pitch, o.roll, f[1], f[2], f[3], r[1], r[2], r[3], u[1], u[2], u[3] }
 		queue("x4coop.probe_result")
+	elseif control == "bubble" then
+		bubble_radius = args[1]
 	elseif control == "fire" then
 		if proxy_id and objects[proxy_id].pilot then world_requests[#world_requests + 1] = "fire:" .. table.concat(args, ",") end
 	elseif control == "world_kill" or control == "world_hull" then
@@ -291,6 +311,24 @@ if sc.pipes then
 		}
 	end
 end
+local next_b = 0
+local function fake_host_bubble()
+	if sc.npc_test ~= "join" or not pipe_reader or clock < next_b or #history < 2 then return end
+	next_b = clock + 0.1
+	local h, h0 = history[#history], player_at(clock - 0.05)
+	local entries = {}
+	for i = 1, NPC_COUNT + 1 do
+		local code = i <= NPC_COUNT and ("NPC-" .. i) or "NPC-9"
+		local x, y, z = npc_truth(i, clock, h)
+		local x0, y0, z0 = npc_truth(i, h0.t, h0)  -- velocity over the actual history step
+		local dt0 = clock - h0.t
+		entries[#entries + 1] = string.format("%s,%s,%.2f,%.2f,%.2f,%.5f,0,0,%.2f,%.2f,%.2f", code, SHIP_MACRO, x, y, z, i * 0.5,
+			(x - x0) / dt0, (y - y0) / dt0, (z - z0) / dt0)
+	end
+	partner_queue[#partner_queue + 1] = { at = clock + ONE_WAY,
+		msg = string.format("B|%.4f|%s|%s", clock + partner_clock_offset, SECTORS[500], table.concat(entries, ";")) }
+end
+
 local function deliver_pipe()
 	if not pipe_reader then return end
 	local keep = {}
@@ -360,12 +398,31 @@ local HOSTILE = {
 	"",
 	"|||||",
 }
-local pos_errs, rot_errs = {}, {}
+local pos_errs, rot_errs, npc_errs = {}, {}, {}
 local first_live_at, calibrated_at
 local max_proxies = 0
 while clock < sc.duration do
 	clock = clock + frame_dt
 	step_player(frame_dt)
+	if sc.npc_test == "host" then
+		local h = history[#history]
+		for i = 1, NPC_COUNT do
+			local o = objects[400 + i]
+			o.x, o.y, o.z = npc_truth(i, clock, h)
+		end
+	end
+	if bubble_radius > 0 and math.floor(clock) ~= math.floor(clock - frame_dt) then
+		local pl, list = objects[PLAYER], {}
+		for id, o in pairs(objects) do
+			if id ~= PLAYER and id ~= proxy_id and o.sector == pl.sector
+				and math.sqrt((o.x - pl.x) ^ 2 + (o.y - pl.y) ^ 2 + (o.z - pl.z) ^ 2) <= bubble_radius then
+				list[#list + 1] = id
+			end
+		end
+		blackboard["$x4coop_bubble"] = list
+		if handlers["x4coop.bubble"] then handlers["x4coop.bubble"]("x4coop.bubble") end
+	end
+	fake_host_bubble()
 	if sc.partner_restart_at and clock >= sc.partner_restart_at and partner_clock_offset == 1000 then
 		partner_clock_offset = -500
 		say("t=%.1f partner restarted their game (clock jumped back)", clock)
@@ -447,8 +504,16 @@ while clock < sc.duration do
 			rot_errs[#rot_errs + 1] = mat_angle(engine_mat(o.yaw, o.pitch, o.roll), truth.m)
 		end
 	end
+	if sc.npc_test == "join" and clock > 8 and not chatted then
+		local h = history[#history]
+		for i = 1, NPC_COUNT do
+			local o = objects[400 + i]
+			local x, y, z = npc_truth(i, clock, h)
+			npc_errs[#npc_errs + 1] = math.sqrt((o.x - x) ^ 2 + (o.y - y) ^ 2 + (o.z - z) ^ 2)
+		end
+	end
 	local count = 0
-	for id in pairs(objects) do if id ~= PLAYER then count = count + 1 end end
+	for id in pairs(objects) do if id ~= PLAYER and not (id > 400 and id <= 400 + NPC_COUNT) and id ~= PARKED then count = count + 1 end end
 	max_proxies = math.max(max_proxies, count)
 end
 
@@ -538,6 +603,25 @@ if sc.world_test then
 	end
 	if sc.world_test == "mismatch" then
 		ok = ok and said:find("different worlds", 1, true) ~= nil and #sent_k == 0 and #sent_d == 0 and #world_requests == 0
+	end
+end
+if sc.npc_test then
+	local bs = {}
+	for _, w in ipairs(pipe_writes) do if w:sub(1, 2) == "B|" then bs[#bs + 1] = w end end
+	if sc.npc_test == "host" then
+		local last = bs[#bs] or ""
+		local codes = 0
+		for i = 1, NPC_COUNT do if last:find("NPC-" .. i .. ",", 1, true) then codes = codes + 1 end end
+		-- the entry for NPC-1 must carry the ship's position at send time (within a frame of motion)
+		local x = tonumber(last:match("NPC%-1,[%w_]+,([%-%d%.]+),"))
+		local o = objects[401]
+		say("npc host: %d B messages (%.1f/s), last one lists %d of %d ships, NPC-1 x %.1f vs %.1f",
+			#bs, #bs / sc.duration, codes, NPC_COUNT, x or -1, o.x)
+		ok = ok and #bs > 8 * (sc.duration - 2) and codes == NPC_COUNT and x and math.abs(x - o.x) < 20
+	else
+		local st, emax, e95 = stats(npc_errs)
+		say("npc join: copies vs host truth (m): %s   [%d samples]; B sent by us: %d", st, #npc_errs, #bs)
+		ok = ok and #npc_errs > 1000 and e95 < 5 and #bs == 0
 	end
 end
 if sc.fire_test then

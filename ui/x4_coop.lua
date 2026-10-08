@@ -28,6 +28,7 @@ Wire format (one message per pipe write, '|' separated, also used by the Python 
   P|t / Q|t                                                            ping / pong (RTT)
   M|name|text                                                          chat line
   R|role, L|world|role|ship, K|ship, D|ship|hull, F|ship                shared world (see that section)
+  B|t|sector|code,macro,x,y,z,yaw,pitch,roll,vx,vy,vz;...              host's nearby ships (NPC bubble)
   W|text, N|text                                                       bridge welcome / notice
 ]]
 
@@ -71,6 +72,9 @@ local config = {
 	engine_fx = 1,            -- 1: also give the proxy matching physics velocity (experiment: engine effects,
 	engine_fx_rate = 4,       --    covers frames without a Lua update); commands per second
 	fire_fx = 1,              -- 1: proxies get a pilot and fire at what their player is hitting (ghost: what you hit)
+	npc_sync = 1,             -- 1: in a linked shared world, the host's nearby ships drive the joiner's copies
+	npc_radius = 6000,        -- m, "nearby"
+	npc_rate = 10,            -- host: NPC pose updates per second
 	ghost_latency = 0.12,     -- s, simulated one-way latency in ghost mode
 	ghost_jitter = 0.03,      -- s, extra random delay per snapshot
 	ghost_loss = 0.0,         -- 0..1, fraction of snapshots dropped
@@ -299,6 +303,7 @@ local function reset()
 		ghost = { queue = {} },
 		health = { frames = 0, gap_max = 0, corr_sum = 0, corr_n = 0, corr_max = 0 },
 		link = { role = nil, world = nil, state = nil, linked = false, last_sent = -1e9, last_hit = {} },
+		npc = { sent_radius = nil, members = {}, ents = {}, prev = {}, last_send = -1e9, received = 0, driven = 0 },
 		net = { api = nil, status = "idle", reading = false, connected = false, retry_at = 0, last_ping = -1e9, rtt = nil },
 	}
 end
@@ -411,8 +416,8 @@ end
 -------------------------------------------------------------------------------
 -- Remote snapshots: buffering and sampling
 
-local function on_snapshot(s, now)
-	local R = S.rem
+local function on_snapshot(s, now, R)
+	R = R or S.rem
 	local snaps = R.snaps
 	local last = snaps[#snaps]
 	if last and s.t < last.t - 5 then
@@ -451,10 +456,10 @@ local function latency_estimate()
 	return S.net.rtt and S.net.rtt * 0.5 or 0
 end
 
--- Pose of the partner at sender time tr: Hermite interpolation between snapshots, linear
--- dead reckoning past the newest one.
-local function sample_remote(tr)
-	local snaps = S.rem.snaps
+-- Pose of an entity (default: the partner) at sender time tr: Hermite interpolation between
+-- snapshots, linear dead reckoning past the newest one.
+local function sample_remote(tr, R)
+	local snaps = (R or S.rem).snaps
 	local n = #snaps
 	if n == 0 then return nil end
 	local newest = snaps[n]
@@ -488,8 +493,8 @@ local function sample_remote(tr)
 	end
 end
 
-local function remote_target(now)
-	local R = S.rem
+local function remote_target(now, R)
+	R = R or S.rem
 	if not R.lag then return nil end
 	local tr
 	if config.predict == 1 then
@@ -497,7 +502,7 @@ local function remote_target(now)
 	else
 		tr = now - R.lag - config.interp_delay
 	end
-	return sample_remote(tr)
+	return sample_remote(tr, R)
 end
 
 -------------------------------------------------------------------------------
@@ -617,7 +622,7 @@ on_pipe_message = function(msg)
 		end
 	elseif kind == "N" or kind == "W" then
 		notify("%s", clean_text(f[2], 200))
-	elseif kind == "R" or kind == "L" or kind == "K" or kind == "D" or kind == "F" then
+	elseif kind == "R" or kind == "L" or kind == "K" or kind == "D" or kind == "F" or kind == "B" then
 		on_world_message(kind, f, now)
 	end
 end
@@ -680,24 +685,30 @@ local function backend_selftest(now)
 	end
 end
 
+-- The pose to show this frame: move the shown pose D with the target's velocity, then blend away the
+-- remaining error (snap when far off). Returns the new pose and the error that was blended (nil on a snap).
+local function follow(D, target, dt)
+	if not D or math.sqrt((D.x - target.x) ^ 2 + (D.y - target.y) ^ 2 + (D.z - target.z) ^ 2) > config.snap_distance then
+		return { x = target.x, y = target.y, z = target.z, q = target.q }, nil
+	end
+	local k = 1 - math.exp(-dt / config.smoothing)
+	local miss = math.sqrt((D.x + target.vx * dt - target.x) ^ 2 + (D.y + target.vy * dt - target.y) ^ 2 + (D.z + target.vz * dt - target.z) ^ 2)
+	D.x = D.x + target.vx * dt
+	D.y = D.y + target.vy * dt
+	D.z = D.z + target.vz * dt
+	D.x = D.x + (target.x - D.x) * k
+	D.y = D.y + (target.y - D.y) * k
+	D.z = D.z + (target.z - D.z) * k
+	D.q = slerp(D.q, target.q, k)
+	return D, miss
+end
+
 local function drive_lua(now, dt, target)
 	local P = S.proxy
-	local D = P.shown
-	if not D or math.sqrt((D.x - target.x) ^ 2 + (D.y - target.y) ^ 2 + (D.z - target.z) ^ 2) > config.snap_distance then
-		D = { x = target.x, y = target.y, z = target.z, q = target.q }
-	else
-		-- Move with the target's velocity, then blend away the remaining error.
-		local k = 1 - math.exp(-dt / config.smoothing)
+	local D, miss = follow(P.shown, target, dt)
+	if miss then
 		local H = S.health
-		local miss = math.sqrt((D.x + target.vx * dt - target.x) ^ 2 + (D.y + target.vy * dt - target.y) ^ 2 + (D.z + target.vz * dt - target.z) ^ 2)
 		H.corr_sum, H.corr_n, H.corr_max = H.corr_sum + miss, H.corr_n + 1, math.max(H.corr_max, miss)
-		D.x = D.x + target.vx * dt
-		D.y = D.y + target.vy * dt
-		D.z = D.z + target.vz * dt
-		D.x = D.x + (target.x - D.x) * k
-		D.y = D.y + (target.y - D.y) * k
-		D.z = D.z + (target.z - D.z) * k
-		D.q = slerp(D.q, target.q, k)
 	end
 	P.shown = D
 	if config.engine_fx == 1 and now - (P.last_fx or 0) >= 1 / config.engine_fx_rate then
@@ -739,6 +750,13 @@ local function health_report(now, backend)
 			P.state, backend, partner_whereabouts() or "?", ((R.count or 0) - (P.report_count or 0)) / span,
 			H.frames / span, H.gap_max * 1000, H.corr_n > 0 and H.corr_sum / H.corr_n or 0, H.corr_max,
 			P.max_dev and string.format("%.1f m", P.max_dev) or "n/a", config.engine_fx)
+		if (S.npc.sent_radius or 0) > 0 then
+			local n = 0
+			for _ in pairs(S.npc.members) do n = n + 1 end
+			log("health: npc bubble as %s: %d ships nearby, %d driven, %.0f poses/s received",
+				S.link.role or "?", n, S.npc.driven, S.npc.received / span)
+		end
+		S.npc.received = 0
 	end
 	P.report_at, P.report_from, P.report_count, P.max_dev = now + 15, now, R.count or 0, nil
 	S.health = { frames = 0, gap_max = 0, corr_sum = 0, corr_n = 0, corr_max = 0 }
@@ -857,6 +875,114 @@ local function proxy_tick(now, dt)
 end
 
 -------------------------------------------------------------------------------
+-- NPC bubble (shared world, stage A). Both games list the ships near their player (md BubbleScan,
+-- every second). The host sends their poses at npc_rate; the joiner moves its own copies of the
+-- same ships (same ID code) with the partner's smoothing and prediction, so a fight looks the same
+-- on both sides. Ships only one side has are left alone for now (stage B).
+
+local function npc_enabled()
+	return config.mode == "net" and S.link.linked and config.npc_sync == 1 and S.backend == "lua"
+end
+
+-- md finished a scan: player.entity.$x4coop_bubble lists the nearby ships, nearest first.
+local function on_bubble()
+	local list = S.player and GetNPCBlackboard(S.player, "$x4coop_bubble")
+	if type(list) ~= "table" then return end
+	local members = {}
+	for _, ship in ipairs(list) do
+		local id = to64(ship)
+		local code = C.GetObjectIDCode(id)
+		if code ~= nil and C.IsComponentOperational(id) then
+			members[ffi.string(code)] = { id = id, macro = GetComponentData(id, "macro") }
+		end
+	end
+	S.npc.members = members
+end
+
+local function npc_send(now)
+	local N = S.npc
+	if now - N.last_send < 1 / config.npc_rate or not S.loc.sector_macro then return end
+	N.last_send = now
+	local entries, prev = {}, N.prev
+	for code, m in pairs(N.members) do
+		if C.IsComponentOperational(m.id) and C.GetContextByClass(m.id, "sector", false) == S.loc.sector then
+			local p = C.GetObjectPositionInSector(m.id)
+			local q = prev[code]
+			local vx, vy, vz = 0, 0, 0
+			if q and now - q.t > 0.001 and now - q.t < 1 then
+				vx, vy, vz = (p.x - q.x) / (now - q.t), (p.y - q.y) / (now - q.t), (p.z - q.z) / (now - q.t)
+			end
+			prev[code] = { t = now, x = p.x, y = p.y, z = p.z }
+			entries[#entries + 1] = string.format("%s,%s,%.2f,%.2f,%.2f,%.5f,%.5f,%.5f,%.2f,%.2f,%.2f",
+				code, m.macro, p.x, p.y, p.z, p.yaw, p.pitch, p.roll, vx, vy, vz)
+		end
+	end
+	if #entries > 0 then
+		net_send(string.format("B|%.4f|%s|%s", now, S.loc.sector_macro, table.concat(entries, ";")))
+	end
+end
+
+-- Joiner: one B message from the host.
+local function npc_receive(f, now)
+	local N = S.npc
+	local t = tonumber(f[2])
+	if not t or f[3] ~= S.loc.sector_macro or not f[4] then return end  -- only the sector we are in
+	for entry in f[4]:gmatch("[^;]+") do
+		local v = {}
+		for field in entry:gmatch("[^,]+") do v[#v + 1] = field end
+		local code, macro = v[1], v[2]
+		if #v == 11 and #code <= 16 and code:match("^[%w%-]+$") and #macro <= 80 and macro:match("^[%w_]+$") then
+			local s = { t = t, sector_macro = f[3], ship_macro = macro }
+			local okay = true
+			for i, k in ipairs({ "x", "y", "z", "yaw", "pitch", "roll", "vx", "vy", "vz" }) do
+				local num = tonumber(v[2 + i])
+				if not num or num ~= num or math.abs(num) > SNAPSHOT_LIMITS[k] then okay = false break end
+				s[k] = num
+			end
+			if okay then
+				local E = N.ents[code] or { snaps = {} }
+				N.ents[code] = E
+				on_snapshot(s, now, E)
+				E.seen = now
+				N.received = N.received + 1
+			end
+		end
+	end
+end
+
+local function npc_tick(now, dt)
+	local N = S.npc
+	local radius = npc_enabled() and config.npc_radius or 0
+	if radius ~= N.sent_radius then
+		N.sent_radius = radius
+		request("bubble", { radius })
+		if radius == 0 then N.ents, N.members = {}, {} end
+	end
+	if radius == 0 or C.IsGamePaused() then return end
+	if S.link.role == "host" then
+		npc_send(now)
+		return
+	end
+	-- Joiner: drive our copies of the host's ships. Ones the host stopped mentioning go back to their own AI.
+	local driven = 0
+	for code, E in pairs(N.ents) do
+		local m = N.members[code]
+		if now - (E.seen or 0) > 2 then
+			N.ents[code] = nil
+		elseif m and C.IsComponentOperational(m.id) then
+			local target = remote_target(now, E)
+			if target then
+				E.shown = follow(E.shown, target, dt)
+				local sector = C.GetContextByClass(m.id, "sector", false)
+				C.SetObjectSectorPos(m.id, sector, make_posrot(E.shown.x, E.shown.y, E.shown.z, E.shown.q))
+				driven = driven + 1
+			end
+		end
+	end
+	N.driven = driven
+end
+
+-------------------------------------------------------------------------------
 -- Shared world. Both players load the same save (the host's), so every ship exists on both sides
 -- with the same ID code. The host's save carries a world id; once both games report the same id,
 -- with one host and one joiner, the local player's kills and hits are mirrored onto the same ships
@@ -938,6 +1064,8 @@ on_world_message = function(kind, f, now)
 			K.partner_ship = (f[4] or ""):match(IDCODE_PATTERN) and f[4] or nil
 			update_link(now)
 		end
+	elseif kind == "B" then
+		if K.linked and K.role == "join" and config.npc_sync == 1 then npc_receive(f, now) end
 	elseif K.linked and valid_world_ref(f[2], f[3], f[4]) then
 		if kind == "F" then
 			request("fire", { f[2], f[3], f[4] })
@@ -989,6 +1117,7 @@ local function on_md_ready()
 	-- md just destroyed any proxy it had
 	S.proxy.id, S.proxy.shown, S.proxy.test = 0, nil, nil
 	set_proxy_state("none", getElapsedTime())
+	S.npc.sent_radius = nil
 	if first then
 		log("md ready; mode=%s backend=%s", config.mode, config.backend)
 	end
@@ -1058,6 +1187,7 @@ local function on_probe_result()
 		end
 		S.proxy.shown = nil
 		S.ghost.queue, S.ghost.prev = {}, nil  -- in-flight ghost offsets used the old axes
+		S.npc.ents = {}
 		log("probe: engine rotation convention is %s (error %.4f, next best %.3f, %d samples)",
 			conv_name(conv), err, runner_up, #P.samples)
 	elseif #P.samples >= 40 then
@@ -1191,6 +1321,7 @@ local function tick(now, dt)
 		if s then net_send(encode_snapshot(s)) end
 	end
 	proxy_tick(now, dt)
+	npc_tick(now, dt)
 end
 
 local function on_update()
@@ -1214,6 +1345,7 @@ local function init()
 	RegisterEvent("x4coop.spawn_failed", on_spawn_failed)
 	RegisterEvent("x4coop.probe_result", on_probe_result)
 	RegisterEvent("x4coop.world", on_world_event)
+	RegisterEvent("x4coop.bubble", on_bubble)
 
 	-- Chat window "/x4coop ..." commands; everything else goes to the original handler.
 	local ego_ExecuteDebugCommand = ExecuteDebugCommand
