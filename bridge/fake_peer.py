@@ -100,6 +100,15 @@ def main(argv=None):
                 if msg.startswith("P|"):
                     send("Q|" + msg[2:], now)
                     continue
+                if msg.startswith("L|"):
+                    # Pretend to be the other half of the same world: same world id, the opposite role.
+                    f = msg.split("|")
+                    if len(f) >= 3:
+                        send(f"L|{f[1]}|{'join' if f[2] == 'host' else 'host'}|FAK-001", now)
+                    continue
+                if msg.startswith(("K|", "D|")):
+                    print(f"world event from player: {msg}", flush=True)
+                    continue
                 if msg.startswith("M|"):
                     said = msg.split("|", 2)[2] if msg.count("|") >= 2 else ""
                     print(f"chat from player: {said}", flush=True)

@@ -78,6 +78,10 @@ def bridge_session(bridge_args, peers, runs):
     """Start a bridge and fake peers (each started after the previous one has connected), then
     run game_sim once per (name, extra args, check) in runs. Returns the bridge log."""
     port, pipe = free_udp_port(), "x4_coop_selftest"
+    if "--strict" in bridge_args:
+        bridge_args = [a for a in bridge_args if a != "--strict"]
+    else:
+        bridge_args = ["--any-client"] + bridge_args  # game_sim.py is python.exe, not X4.exe
     procs = [subprocess.Popen(PY + [str(MOD / "bridge" / "x4_coop_bridge.py"), "--host", "--port", str(port), "--pipe", pipe] + bridge_args,
                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)]
     ok_before = len(results)
@@ -89,7 +93,7 @@ def bridge_session(bridge_args, peers, runs):
         time.sleep(1.0)
         for name, extra, extra_check in runs:
             r = subprocess.run(PY + [str(DEV / "game_sim.py"), pipe, "3"] + extra, capture_output=True, text=True, timeout=30)
-            summary = " ".join(l for l in r.stdout.splitlines() if l.startswith(("counts", "rtt", "partners")))
+            summary = " ".join(l for l in r.stdout.splitlines() if l.startswith(("counts", "rtt", "partners", "dropped")))
             check(name, r.returncode == 0 and extra_check(r.stdout), summary)
     finally:
         for p in reversed(procs):
@@ -114,6 +118,10 @@ def test_bridge():
         ("bridge: wrong password delivers nothing", ["--expect-nothing"], anything),
     ])
     check("bridge: wrong password is logged", "rejected packets" in log)
+    log = bridge_session(["--strict"], [[]], [
+        ("bridge: refuses a pipe client that is not X4.exe", ["--expect-rejected"], anything),
+    ])
+    check("bridge: refusal is logged", "only X4.exe may connect" in log)
     bridge_session([], [["--name", "First"], ["--name", "Intruder"]], [
         ("bridge: host ignores a second partner", [], lambda out: "partners heard: First" in out),
     ])

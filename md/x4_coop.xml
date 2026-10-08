@@ -234,6 +234,81 @@
           </actions>
         </cue>
 
+        <!--
+          Shared world (both players loaded the same save; Lua only forwards these once the worlds are linked).
+          The local player's kills and hits are reported by ship ID code; the partner's are applied to the same
+          ship here. Damage merges as "lowest hull wins", so both players' hits add up.
+        -->
+        <cue name="OnPlayerKill" instantiate="true">
+          <conditions>
+            <event_player_killed_object/>
+          </conditions>
+          <actions>
+            <set_value name="$Obj" exact="event.param"/>
+            <do_if value="@$Obj.isclass.ship and @$Obj.sector and not Root.$AllProxies.indexof.{$Obj}">
+              <raise_lua_event name="'x4coop.world'" param="'K|' + $Obj.idcode + '|' + $Obj.macro.id + '|' + $Obj.sector.macro.id"/>
+            </do_if>
+          </actions>
+        </cue>
+
+        <cue name="OnPlayerHit" instantiate="true">
+          <conditions>
+            <event_player_attacked_object/>
+          </conditions>
+          <actions>
+            <set_value name="$Obj" exact="event.param"/>
+            <do_if value="@$Obj.isclass.ship and @$Obj.isoperational and @$Obj.sector and not Root.$AllProxies.indexof.{$Obj}">
+              <raise_lua_event name="'x4coop.world'" param="'D|%s|%s|%s|%s'.[$Obj.idcode, $Obj.macro.id, $Obj.sector.macro.id, $Obj.hullpercentage]"/>
+            </do_if>
+          </actions>
+        </cue>
+
+        <!-- param3: [idcode, ship_macro, sector_macro] -->
+        <cue name="OnWorldKill" instantiate="true">
+          <conditions>
+            <event_ui_triggered screen="'x4coop'" control="'world_kill'"/>
+          </conditions>
+          <actions>
+            <set_value name="$Args" exact="event.param3"/>
+            <include_actions ref="FindWorldShip"/>
+            <do_if value="$Target">
+              <debug_text text="'x4coop: partner killed %s %s'.[$Target.idcode, $Target.knownname]" chance="$DebugChance"/>
+              <destroy_object object="$Target" explosion="true"/>
+            </do_if>
+          </actions>
+        </cue>
+
+        <!-- param3: [idcode, ship_macro, sector_macro, hull_percentage] -->
+        <cue name="OnWorldHull" instantiate="true">
+          <conditions>
+            <event_ui_triggered screen="'x4coop'" control="'world_hull'"/>
+          </conditions>
+          <actions>
+            <set_value name="$Args" exact="event.param3"/>
+            <include_actions ref="FindWorldShip"/>
+            <do_if value="$Target and $Target.hullpercentage gt $Args.{4}">
+              <set_object_hull object="$Target" exact="$Args.{4}"/>
+            </do_if>
+          </actions>
+        </cue>
+
+        <!-- In: $Args = [idcode, ship_macro, sector_macro, ...]. Out: $Target, the matching ship or null. Never the player's ship or a proxy. -->
+        <library name="FindWorldShip">
+          <actions>
+            <set_value name="$Target" exact="null"/>
+            <find_sector name="$Sector" macro="@macro.{$Args.{3}}"/>
+            <set_value name="$Macro" exact="@macro.{$Args.{2}}"/>
+            <do_if value="$Sector and $Macro">
+              <find_ship name="$Candidates" space="$Sector" macro="$Macro" multiple="true"/>
+              <do_for_each name="$Candidate" in="$Candidates">
+                <do_if value="not $Target and $Candidate.idcode == $Args.{1} and $Candidate != player.occupiedship and not Root.$AllProxies.indexof.{$Candidate}">
+                  <set_value name="$Target" exact="$Candidate"/>
+                </do_if>
+              </do_for_each>
+            </do_if>
+          </actions>
+        </library>
+
         <library name="DestroyProxies">
           <actions>
             <do_for_each name="$OldProxy" in="Root.$AllProxies">

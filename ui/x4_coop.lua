@@ -20,6 +20,7 @@ Chat window commands (type them in the chat window, they never leave your PC):
   /x4coop ghost | net | off switch mode (remembered in the savegame)
   /x4coop backend lua|md|auto
   /x4coop probe             re-run the rotation-convention probe
+  /x4coop pipe <name>       use another pipe name (a second game on the same PC; not saved)
   /x4coop set <key> <value> tweak a numeric setting, e.g. /x4coop set interp_delay 0.15
 
 Wire format (one message per pipe write, '|' separated, also used by the Python tools):
@@ -42,6 +43,7 @@ ffi.cdef[[
 		float roll;
 	} UIPosRot;
 	UniverseID GetContextByClass(UniverseID componentid, const char* classname, bool includeself);
+	const char* GetObjectIDCode(UniverseID objectid);
 	UIPosRot GetObjectPositionInSector(UniverseID objectid);
 	const char* GetPlayerName(void);
 	UniverseID GetPlayerID(void);
@@ -294,6 +296,7 @@ local function reset()
 		lua_degrees = false,    -- set if SetObjectSectorPos turns out to take degrees
 		ghost = { queue = {} },
 		health = { frames = 0, gap_max = 0, corr_sum = 0, corr_n = 0, corr_max = 0 },
+		link = { role = nil, world = nil, state = nil, linked = false, last_sent = -1e9, last_hit = {} },
 		net = { api = nil, status = "idle", reading = false, connected = false, retry_at = 0, last_ping = -1e9, rtt = nil },
 	}
 end
@@ -531,6 +534,8 @@ end
 -- Network: named pipe to the Python bridge (needs SirNukes' Mod Support APIs)
 
 local on_pipe_message
+local on_world_message  -- shared-world messages (R, L, K, D), defined after proxy management
+local send_link
 
 local function net_send(msg)
 	local N = S.net
@@ -562,6 +567,7 @@ local function net_tick(now)
 	if N.connected and now - N.last_ping > 2 then
 		N.last_ping = now
 		net_send(string.format("P|%.4f", now))
+		send_link(now)
 	end
 end
 
@@ -604,6 +610,8 @@ on_pipe_message = function(msg)
 		end
 	elseif kind == "N" or kind == "W" then
 		notify("%s", clean_text(f[2], 200))
+	elseif kind == "R" or kind == "L" or kind == "K" or kind == "D" then
+		on_world_message(kind, f, now)
 	end
 end
 
@@ -811,6 +819,125 @@ local function proxy_tick(now, dt)
 end
 
 -------------------------------------------------------------------------------
+-- Shared world. Both players load the same save (the host's), so every ship exists on both sides
+-- with the same ID code. The host's save carries a world id; once both games report the same id,
+-- with one host and one joiner, the local player's kills and hits are mirrored onto the same ships
+-- in the partner's world (md: OnPlayerKill/OnPlayerHit report, OnWorldKill/OnWorldHull apply).
+
+local WORLD_KEY = "$x4coop_world"
+local IDCODE_PATTERN = "^[%w%-]+$"
+
+local function own_ship_idcode()
+	local ship = C.GetPlayerOccupiedShipID()
+	if ship == 0 then return nil end
+	local code = C.GetObjectIDCode(ship)
+	return code ~= nil and ffi.string(code) or nil
+end
+
+-- The world id lives on the player's blackboard, so it is saved with the game and travels with the save.
+local function world_id()
+	local K = S.link
+	if not K.world and S.player then
+		local id = GetNPCBlackboard(S.player, WORLD_KEY)
+		if type(id) == "string" and id:match("^%w+$") then
+			K.world = id
+		elseif K.role == "host" then
+			K.world = string.format("%06x%06x", math.floor(getElapsedTime() * 1e6) % 16777216, math.random(0, 16777215))
+			SetNPCBlackboard(S.player, WORLD_KEY, K.world)
+			notify("new co-op world %s: save now and give that save to your partner", K.world)
+		end
+	end
+	return K.world
+end
+
+local function update_link(now)
+	local K = S.link
+	local state
+	if not K.role then
+		state = "waiting for the bridge to say host or join"
+	elseif not world_id() then
+		state = "no world id: load the host's latest save"
+	elseif not K.heard_at or now - K.heard_at > 6 then
+		state = "waiting for partner"
+	elseif K.partner_world ~= K.world then
+		state = "different worlds: the joiner must load the host's save made after co-op started"
+	elseif K.partner_role == K.role then
+		state = "both sides are " .. K.role .. "s: one bridge needs --host, the other --join"
+	else
+		state = "linked"
+	end
+	K.linked = state == "linked"
+	if state ~= K.state then
+		K.state = state
+		if state ~= "waiting for partner" or K.linked_before then notify("world: %s", state) end
+		K.linked_before = K.linked_before or K.linked
+	end
+	local mine = own_ship_idcode()
+	local clash = K.linked and mine ~= nil and mine == K.partner_ship
+	if clash and not K.clash then
+		notify("you are both flying %s; the joiner should switch to another ship", mine)
+	end
+	K.clash = clash
+end
+
+send_link = function(now)
+	local K = S.link
+	update_link(now)
+	if K.role then
+		net_send(string.format("L|%s|%s|%s", world_id() or "-", K.role, own_ship_idcode() or "-"))
+	end
+end
+
+local function valid_world_ref(idcode, ship_macro, sector_macro)
+	return type(idcode) == "string" and #idcode <= 16 and idcode:match(IDCODE_PATTERN)
+		and type(ship_macro) == "string" and #ship_macro <= 80 and ship_macro:match("^[%w_]+$")
+		and type(sector_macro) == "string" and #sector_macro <= 80 and sector_macro:match("^[%w_]+$")
+end
+
+on_world_message = function(kind, f, now)
+	local K = S.link
+	if kind == "R" then
+		if (f[2] == "host" or f[2] == "join") and K.role ~= f[2] then
+			K.role = f[2]
+			update_link(now)
+		end
+	elseif kind == "L" then
+		if (f[3] == "host" or f[3] == "join") and type(f[2]) == "string" and f[2]:match("^[%w%-]+$") then
+			K.partner_world, K.partner_role, K.heard_at = f[2], f[3], now
+			K.partner_ship = (f[4] or ""):match(IDCODE_PATTERN) and f[4] or nil
+			update_link(now)
+		end
+	elseif K.linked and valid_world_ref(f[2], f[3], f[4]) then
+		if kind == "K" then
+			request("world_kill", { f[2], f[3], f[4] })
+		else
+			local hull = tonumber(f[5])
+			if hull and hull >= 0 and hull <= 100 then
+				request("world_hull", { f[2], f[3], f[4], hull })
+			end
+		end
+	end
+end
+
+-- md reports the local player's kills ("K|idcode|macro|sector") and hits ("D|...|hull").
+local function on_world_event(_, param)
+	local K = S.link
+	if config.mode ~= "net" or not K.linked then return end
+	local f = split(tostring(param or ""))
+	if not valid_world_ref(f[2], f[3], f[4]) then return end
+	if f[1] == "K" then
+		net_send(table.concat({ "K", f[2], f[3], f[4] }, "|"))
+	elseif f[1] == "D" then
+		local hull = tonumber(tostring(f[5]):match("^%-?[%d%.]+"))
+		local now = getElapsedTime()
+		if hull and now - (K.last_hit[f[2]] or -1e9) >= 0.3 then  -- hits can arrive every frame
+			K.last_hit[f[2]] = now
+			net_send(string.format("D|%s|%s|%s|%.2f", f[2], f[3], f[4], hull))
+		end
+	end
+end
+
+-------------------------------------------------------------------------------
 -- Events from md
 
 local function on_md_ready()
@@ -906,13 +1033,14 @@ end
 local function status_text()
 	local P, R, N = S.proxy, S.rem, S.net
 	local age = R.last_recv > 0 and string.format("%.1fs ago", getElapsedTime() - R.last_recv) or "never"
-	local link = config.mode == "net" and (N.status .. (N.rtt and string.format(", rtt %.0f ms", N.rtt * 1000) or "")) or "-"
+	local link = config.mode == "net" and (N.status .. (N.rtt and string.format(", rtt %.0f ms", N.rtt * 1000) or "")
+		.. " | " .. (S.link.role or "?") .. ", world " .. (S.link.state or "unknown")) or "-"
 	return string.format("mode %s | backend %s (%s) | proxy %s | partner %s %s, last snapshot %s | link %s | rotation %s %s",
 		config.mode, config.backend, S.backend or "untested", P.state, R.name or "-", partner_whereabouts() or "", age, link,
 		conv_name(S.conv), S.probe.measured and "measured" or "assumed")
 end
 
-local USAGE = "usage: /x4coop status | join | say <text> | ghost | net | off | backend lua|md|auto | probe | set <key> <number>"
+local USAGE = "usage: /x4coop status | join | say <text> | ghost | net | off | backend lua|md|auto | probe | pipe <name> | set <key> <number>"
 
 local function say(text)
 	text = clean_text(text, 200)
@@ -953,6 +1081,19 @@ local function command(param)
 		notify("%s", status_text())
 	elseif cmd == "join" then
 		request("join", {})
+	elseif cmd == "pipe" then
+		-- A second game on the same PC needs its own pipe (and its own bridge with --pipe). Not saved:
+		-- both games may load the same save.
+		local name = args[2]
+		if name and #name <= 40 and name:match("^[%w_]+$") then
+			local N = S.net
+			if N.api and N.reading and N.api.Close_Pipe then pcall(N.api.Close_Pipe, config.pipe) end
+			config.pipe = name
+			N.reading, N.connected, N.retry_at, N.status = false, false, 0, "connecting to bridge"
+			notify("pipe %s: start this game's bridge with --pipe %s", name, name)
+		else
+			notify("pipe is %s; /x4coop pipe <name> gives a second game on this PC its own bridge", config.pipe)
+		end
 	elseif cmd == "say" then
 		say(tostring(param):match("^%s*say%s+(.*)$"))
 	else
@@ -1028,6 +1169,7 @@ local function init()
 	RegisterEvent("x4coop.warped", on_warped)
 	RegisterEvent("x4coop.spawn_failed", on_spawn_failed)
 	RegisterEvent("x4coop.probe_result", on_probe_result)
+	RegisterEvent("x4coop.world", on_world_event)
 
 	-- Chat window "/x4coop ..." commands; everything else goes to the original handler.
 	local ego_ExecuteDebugCommand = ExecuteDebugCommand

@@ -17,6 +17,7 @@ X4 reaches this pipe through SirNukes' Mod Support APIs (Protected UI Mode must 
 Datagrams are b"X4C1 " [+ HMAC tag] + one pipe message (see Codec); the message format is
 documented in ui/x4_coop.lua. "H" keepalives are handled here and never reach the game.
 A host serves one partner at a time and takes a new one only after the current one goes silent.
+On connect the game is told its role ("R|host" / "R|join"): the host's save is the shared world.
 """
 import argparse
 import ctypes
@@ -41,6 +42,8 @@ PIPE_ACCESS_DUPLEX = 0x3
 PIPE_TYPE_MESSAGE = 0x4
 PIPE_READMODE_MESSAGE = 0x2
 PIPE_NOWAIT = 0x1
+PIPE_REJECT_REMOTE_CLIENTS = 0x8
+PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 ERROR_BROKEN_PIPE = 109
 ERROR_NO_DATA = 232
 ERROR_PIPE_NOT_CONNECTED = 233
@@ -59,6 +62,11 @@ kernel32.ReadFile.argtypes = [wintypes.HANDLE, wintypes.LPVOID, wintypes.DWORD,
                               ctypes.POINTER(wintypes.DWORD), wintypes.LPVOID]
 kernel32.WriteFile.argtypes = [wintypes.HANDLE, wintypes.LPCVOID, wintypes.DWORD,
                                ctypes.POINTER(wintypes.DWORD), wintypes.LPVOID]
+kernel32.GetNamedPipeClientProcessId.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.ULONG)]
+kernel32.OpenProcess.restype = wintypes.HANDLE
+kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+kernel32.QueryFullProcessImageNameW.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR,
+                                                ctypes.POINTER(wintypes.DWORD)]
 
 
 class PipeClosed(Exception):
@@ -77,8 +85,9 @@ class GamePipe:
     def _create(self):
         # PIPE_NOWAIT on our end only: connect/read/write return at once, so the loop never stalls.
         # The client end keeps its own (message) mode.
+        # PIPE_REJECT_REMOTE_CLIENTS: only processes on this PC; named pipes otherwise accept network clients.
         h = kernel32.CreateNamedPipeW(self.path, PIPE_ACCESS_DUPLEX,
-                                      PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_NOWAIT,
+                                      PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_NOWAIT | PIPE_REJECT_REMOTE_CLIENTS,
                                       1, BUFFER_SIZE, BUFFER_SIZE, 300, None)
         if h == INVALID_HANDLE_VALUE:
             err = ctypes.get_last_error()
@@ -100,6 +109,21 @@ class GamePipe:
             elif err != ERROR_PIPE_LISTENING:
                 raise OSError(err, f"ConnectNamedPipe failed (error {err})")
         return self.connected
+
+    def client(self):
+        """(pid, executable path) of the connected process; path is None if it can't be read."""
+        pid = wintypes.ULONG(0)
+        if not kernel32.GetNamedPipeClientProcessId(self.handle, ctypes.byref(pid)):
+            return None, None
+        proc = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid.value)
+        if not proc:
+            return pid.value, None
+        try:
+            buf, size = ctypes.create_unicode_buffer(32768), wintypes.DWORD(32768)
+            ok = kernel32.QueryFullProcessImageNameW(proc, 0, buf, ctypes.byref(size))
+            return pid.value, buf.value if ok else None
+        finally:
+            kernel32.CloseHandle(proc)
 
     def read(self):
         """Next message from the game, or None if there is none. Raises PipeClosed."""
@@ -191,6 +215,7 @@ def run(args):
     else:
         peer, port = None, args.port or DEFAULT_PORT
     hosting = peer is None  # host mode: adopt the first partner that talks to us
+    role = args.role or ("host" if hosting else "join")  # told to the game: the host's save is the shared world
     codec = Codec(args.password)
     limit = RateLimit(MAX_PACKETS_PER_S, MAX_PACKETS_PER_S * 2)
 
@@ -239,9 +264,16 @@ def run(args):
 
         if not game.connected:
             if game.poll_connect():
-                log("X4 connected")
+                pid, exe = game.client()
+                if not args.any_client and (not exe or os.path.basename(exe).lower() != "x4.exe"):
+                    log(f"rejected pipe client {exe or '?'} (pid {pid}): only X4.exe may connect (--any-client to allow)")
+                    game.close()
+                    time.sleep(0.2)
+                    continue
+                log(f"X4 connected (pid {pid})")
                 where = f"partner {peer[0]}:{peer[1]}" if peer else f"UDP {port}, waiting for a partner"
                 tell_game(f"W|bridge ready ({where})")
+                tell_game(f"R|{role}")
                 if partner_present:
                     tell_game("N|partner connected")
         else:
@@ -317,7 +349,13 @@ def main(argv=None):
     p.add_argument("--pipe", default="x4_coop", help="pipe name, must match config.pipe in ui/x4_coop.lua")
     p.add_argument("--password", default=os.environ.get("X4COOP_PASSWORD", ""),
                    help="shared secret; both bridges must use the same one (or set X4COOP_PASSWORD)")
+    p.add_argument("--any-client", action="store_true",
+                   help="let any local program use the pipe, not only X4.exe (for test tools)")
+    p.add_argument("--role", choices=["host", "join"],
+                   help="whose save is the shared world (default: --host is host, --join is join; required with --peer)")
     args = p.parse_args(argv)
+    if args.peer and not args.role:
+        p.error("--peer needs --role host or --role join (exactly one side hosts the shared world)")
     try:
         run(args)
     except KeyboardInterrupt:

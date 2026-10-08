@@ -21,6 +21,12 @@ local SC = {
 	setpos_ignored = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = 1 }, mode = "ghost", setpos = "ignore", duration = 30, max_pos_err = 60, max_rot_err = 0.25 },
 	md_backend   = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = 1 }, mode = "ghost", setpos = "radians", backend = "md", duration = 30, max_pos_err = 60, max_rot_err = 0.25 },
 	net          = { true_conv = { order = "XYZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "radians", duration = 30, pipes = true },
+	world        = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
+	                 role = "join", own_world = "abc123", partner_world = "abc123", world_test = "linked" },
+	world_mismatch = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
+	                 role = "join", own_world = "abc123", partner_world = "zzz999", world_test = "mismatch" },
+	world_host   = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
+	                 role = "host", world_test = "host" },
 	net_missing  = { true_conv = { order = "YXZ", sy = 1, sp = 1, sr = 1 }, mode = "net", setpos = "radians", duration = 8, pipes = false, expect_no_proxy = true },
 	sector_jump  = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = 1 }, mode = "ghost", setpos = "radians", duration = 30, jump_at = 18 },
 	net_restart  = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = 1 }, mode = "net", setpos = "radians", duration = 30, pipes = true, partner_restart_at = 16 },
@@ -76,7 +82,7 @@ local objects = {}
 local PLAYER = 100
 objects[PLAYER] = { sector = 500, x = 1000, y = 0, z = -2000, yaw = 0, pitch = 0, roll = 0, macro = SHIP_MACRO }
 local next_id, spawns, warps, moves, md_events, lua_errors = 200, 0, 0, 0, {}, 0
-local spawn_sectors = {}
+local spawn_sectors, world_requests = {}, {}
 local proxy_id = nil
 local history = {}   -- player pose history for ground truth
 
@@ -117,6 +123,7 @@ C = {
 	GetPlayerName = function() return "Tester" end,
 	GetPlayerOccupiedShipID = function() return PLAYER end,
 	GetContextByClass = function(id, cls) local o = objects[id]; return o and o.sector or 0 end,
+	GetObjectIDCode = function(id) return id == PLAYER and "PLY-100" or ("SIM-" .. tostring(id)) end,
 	GetObjectPositionInSector = function(id)
 		local o = objects[id]
 		assert(o, "GetObjectPositionInSector on missing object " .. tostring(id))
@@ -201,6 +208,8 @@ function AddUITriggeredEvent(screen, control, args)
 		local r, u, f = col(m, 1), col(m, 2), col(m, 3)
 		blackboard["$x4coop_probe"] = { o.yaw, o.pitch, o.roll, f[1], f[2], f[3], r[1], r[2], r[3], u[1], u[2], u[3] }
 		queue("x4coop.probe_result")
+	elseif control == "world_kill" or control == "world_hull" then
+		world_requests[#world_requests + 1] = control .. ":" .. table.concat(args, ",")
 	elseif control == "velocity" then
 		local o = proxy_id and objects[proxy_id]
 		if o then o.vel = { args[1], args[2], args[3] } end
@@ -219,21 +228,30 @@ end
 
 ---------------------------------------------------------------------------
 -- Fake pipes API + partner (echo with offset, separate clock, 40 ms each way)
-local pipe_reader, partner_queue = nil, {}
+local pipe_reader, partner_queue, pipe_writes, pipe_names = nil, {}, {}, {}
 local ECHO_OFFSET, ONE_WAY = { 150, 0, 0 }, 0.04
 local partner_clock_offset = 1000
 if sc.pipes then
 	package.preload["extensions.sn_mod_support_apis.ui.named_pipes.Interface"] = function()
 		return {
 			winpipe_loaded = true,
+			Close_Pipe = function(name)
+				if pipe_reader then pipe_reader("ERROR") end
+			end,
 			Schedule_Read = function(name, cb, continuous)
 				pipe_reader = cb
+				pipe_names[#pipe_names + 1] = name
 				partner_queue[#partner_queue + 1] = { at = clock + 0.05, msg = "W|bridge ready (test)" }
+				if sc.role then partner_queue[#partner_queue + 1] = { at = clock + 0.05, msg = "R|" .. sc.role } end
 			end,
 			Schedule_Write = function(name, cb, msg)
 				local f = {}
 				for part in (msg .. "|"):gmatch("([^|]*)|") do f[#f + 1] = part end
-				if f[1] == "M" then
+				pipe_writes[#pipe_writes + 1] = msg
+				if f[1] == "L" then
+					local reply = string.format("L|%s|%s|HOS-001", sc.partner_world or f[2], f[3] == "host" and "join" or "host")
+					partner_queue[#partner_queue + 1] = { at = clock + 2 * ONE_WAY, msg = reply }
+				elseif f[1] == "M" then
 					partner_queue[#partner_queue + 1] = { at = clock + 2 * ONE_WAY, msg = "M|Echo|you said: " .. tostring(f[3]) }
 				elseif f[1] == "P" then
 					partner_queue[#partner_queue + 1] = { at = clock + 2 * ONE_WAY, msg = "Q|" .. f[2] }
@@ -260,6 +278,7 @@ end
 ---------------------------------------------------------------------------
 -- Load the mod and run
 if sc.mode ~= "ghost" then blackboard["$x4coop_mode"] = sc.mode end
+if sc.own_world then blackboard["$x4coop_world"] = sc.own_world end
 local chunk = assert(loadfile(MOD))
 chunk()
 assert(on_update, "mod did not register onUpdate")
@@ -300,7 +319,7 @@ end
 if sc.mode ~= "ghost" or sc.backend then
 	clock = 0.1
 end
-local commanded, chatted, hostile_sent = false, false, false
+local commanded, chatted, hostile_sent, world_sent, piped = false, false, false, false, false
 -- Malformed or malicious partner messages: all must be dropped without errors or odd spawns.
 local HOSTILE = {
 	"S|1|nan|cluster_01_sector001_macro|ship_arg_s_fighter_01_a_macro|0|0|0|0|0|0|0|0|0|evil",
@@ -345,6 +364,25 @@ while clock < sc.duration do
 	if sc.mode == "net" and sc.pipes and pipe_reader and not hostile_sent and clock > 5 then
 		hostile_sent = true
 		for _, msg in ipairs(HOSTILE) do pipe_reader(msg) end
+	end
+	if sc.world_test and not world_sent and clock > 10 then
+		world_sent = true
+		local sector = "cluster_01_sector001_macro"
+		handlers["x4coop.world"]("x4coop.world", "K|ABC-123|ship_arg_s_fighter_01_a_macro|" .. sector)
+		handlers["x4coop.world"]("x4coop.world", "D|ABC-124|ship_arg_s_fighter_01_a_macro|" .. sector .. "|57.5LF")
+		handlers["x4coop.world"]("x4coop.world", "D|ABC-124|ship_arg_s_fighter_01_a_macro|" .. sector .. "|50")  -- throttled
+		handlers["x4coop.world"]("x4coop.world", "K|bad id;|ship_arg_s_fighter_01_a_macro|" .. sector)
+		for _, msg in ipairs({
+			"K|XYZ-999|ship_arg_s_fighter_01_a_macro|" .. sector,
+			"D|XYZ-998|ship_arg_s_fighter_01_a_macro|" .. sector .. "|33.3",
+			"D|XYZ-997|ship_arg_s_fighter_01_a_macro|" .. sector .. "|500",
+			"K|XYZ 996|ship_arg_s_fighter_01_a_macro|" .. sector,
+			"K|XYZ-995|ship;evil|" .. sector,
+		}) do pipe_reader(msg) end
+	end
+	if sc.world_test == "linked" and not piped and clock > sc.duration - 4 then
+		piped = true
+		ExecuteDebugCommand("x4coop", "pipe x4_coop_b")
 	end
 	if not chatted and clock > sc.duration - 2 then
 		chatted = true
@@ -427,6 +465,33 @@ if not sc.expect_no_proxy then
 	local where_ok = said:find("in Sector 50", 1, true) ~= nil
 	say("chat reply seen: %s, partner location reported: %s, join requests: %d", tostring(chat_ok), tostring(where_ok), md_events.join or 0)
 	ok = ok and chat_ok and where_ok and (md_events.join or 0) == 1
+end
+if sc.world_test then
+	local said = table.concat(notifications, " / ")
+	local sent_k, sent_d = {}, {}
+	for _, w in ipairs(pipe_writes) do
+		if w:sub(1, 2) == "K|" then sent_k[#sent_k + 1] = w end
+		if w:sub(1, 2) == "D|" then sent_d[#sent_d + 1] = w end
+	end
+	say("world: sent %s | %s ; applied %s", table.concat(sent_k, " "), table.concat(sent_d, " "), table.concat(world_requests, " "))
+	if sc.world_test == "linked" or sc.world_test == "host" then
+		ok = ok and said:find("world: linked", 1, true) ~= nil
+			and #sent_k == 1 and sent_k[1] == "K|ABC-123|ship_arg_s_fighter_01_a_macro|cluster_01_sector001_macro"
+			and #sent_d == 1 and sent_d[1] == "D|ABC-124|ship_arg_s_fighter_01_a_macro|cluster_01_sector001_macro|57.50"
+			and #world_requests == 2
+			and world_requests[1] == "world_kill:XYZ-999,ship_arg_s_fighter_01_a_macro,cluster_01_sector001_macro"
+			and world_requests[2] == "world_hull:XYZ-998,ship_arg_s_fighter_01_a_macro,cluster_01_sector001_macro,33.3"
+	end
+	if sc.world_test == "linked" then
+		say("pipes used: %s", table.concat(pipe_names, ", "))
+		ok = ok and pipe_names[#pipe_names] == "x4_coop_b"  -- switched, and chat (checked above) still works
+	end
+	if sc.world_test == "host" then
+		ok = ok and said:find("new co-op world", 1, true) ~= nil and type(blackboard["$x4coop_world"]) == "string"
+	end
+	if sc.world_test == "mismatch" then
+		ok = ok and said:find("different worlds", 1, true) ~= nil and #sent_k == 0 and #sent_d == 0 and #world_requests == 0
+	end
 end
 if sc.expect_no_proxy then
 	ok = ok and spawns == 0 and said:find("Mod Support APIs not installed", 1, true) ~= nil

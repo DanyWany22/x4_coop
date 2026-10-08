@@ -6,6 +6,7 @@ chat line, and checks what comes back from the partner (fake_peer.py) through th
 
 --gc              finish with the "garbage_collected" message SirNukes' Lua sends when it drops a pipe
 --expect-nothing  pass only if no partner traffic arrives (e.g. wrong password)
+--expect-rejected pass only if the bridge refuses this (non-X4) client
 """
 import ctypes
 import sys
@@ -23,6 +24,7 @@ k.CloseHandle.argtypes = [wintypes.HANDLE]
 
 name, secs = sys.argv[1], float(sys.argv[2])
 expect_nothing = "--expect-nothing" in sys.argv
+expect_rejected = "--expect-rejected" in sys.argv
 path = "\\\\.\\pipe\\" + name
 for _ in range(100):
     h = k.CreateFileW(path, 0xC0000000, 0, None, 3, 0, None)
@@ -53,33 +55,38 @@ def read():
 
 t0 = time.monotonic()
 seq, next_ping, chatted = 0, 0.0, False
-got = {"W": 0, "N": 0, "S": 0, "Q": 0, "M": 0}
+got = {"W": 0, "N": 0, "S": 0, "Q": 0, "M": 0, "R": 0, "L": 0}
 last_s, rtts, names = None, [], set()
-while time.monotonic() - t0 < secs:
-    now = time.monotonic() - t0
-    seq += 1
-    write("S|%d|%.4f|cluster_01_sector001_macro|ship_arg_s_fighter_01_a_macro|%.2f|0.00|5000.00|0.10000|0.00000|0.00000|100.00|0.00|0.00|Tester"
-          % (seq, now, 1000 + 100 * now))
-    if now >= next_ping:
-        next_ping = now + 0.5
-        write("P|%.4f" % now)
-    if not chatted and now > 0.5:
-        chatted = True
-        write("M|Tester|hello partner")
-    while True:
-        m = read()
-        if m is None:
-            break
-        got[m[0]] = got.get(m[0], 0) + 1
-        if m[0] in "WNM":
-            print("  game got:", m)
-        if m[0] == "S":
-            last_s = m
-            names.add(m.split("|")[-1])
-        if m[0] == "Q":
-            rtts.append(now - float(m.split("|")[1]))
-    time.sleep(0.05)
-if "--gc" in sys.argv:
+dropped = False
+try:
+  while time.monotonic() - t0 < secs:
+      now = time.monotonic() - t0
+      seq += 1
+      write("S|%d|%.4f|cluster_01_sector001_macro|ship_arg_s_fighter_01_a_macro|%.2f|0.00|5000.00|0.10000|0.00000|0.00000|100.00|0.00|0.00|Tester"
+            % (seq, now, 1000 + 100 * now))
+      if now >= next_ping:
+          next_ping = now + 0.5
+          write("P|%.4f" % now)
+          write("L|abc123|join|TST-001")
+      if not chatted and now > 0.5:
+          chatted = True
+          write("M|Tester|hello partner")
+      while True:
+          m = read()
+          if m is None:
+              break
+          got[m[0]] = got.get(m[0], 0) + 1
+          if m[0] in "WNMR":
+              print("  game got:", m)
+          if m[0] == "S":
+              last_s = m
+              names.add(m.split("|")[-1])
+          if m[0] == "Q":
+              rtts.append(now - float(m.split("|")[1]))
+      time.sleep(0.05)
+except (AssertionError, OSError):
+    dropped = True  # the bridge closed the pipe on us
+if "--gc" in sys.argv and not dropped:
     write("garbage_collected")
 k.CloseHandle(h)
 print("counts:", got)
@@ -87,9 +94,12 @@ print("last snapshot:", last_s)
 print("partners heard:", ",".join(sorted(names)) or "-")
 if rtts:
     print("rtt ms: min %.1f max %.1f" % (min(rtts) * 1000, max(rtts) * 1000))
-if expect_nothing:
+print("dropped by bridge:", dropped)
+if expect_rejected:
+    ok = dropped and got["W"] == 0 and got["S"] == 0
+elif expect_nothing:
     ok = got["W"] >= 1 and got["S"] == 0 and got["Q"] == 0 and got["M"] == 0
 else:
-    ok = got["W"] >= 1 and got["S"] > 10 and got["Q"] >= 1 and got["M"] >= 1
+    ok = got["W"] >= 1 and got["R"] >= 1 and got["S"] > 10 and got["Q"] >= 1 and got["M"] >= 1 and got["L"] >= 1
 print("RESULT:", "PASS" if ok else "FAIL")
 sys.exit(0 if ok else 1)

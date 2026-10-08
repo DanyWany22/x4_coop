@@ -73,6 +73,7 @@ General Controls**, then scroll to the bottom section **"Expert Settings - Use w
 | `/x4coop ghost` / `net` / `off` | switch mode (remembered in the savegame) |
 | `/x4coop backend auto` / `lua` / `md` | movement backend (auto = self-test, then pick) |
 | `/x4coop probe` | redo the rotation calibration |
+| `/x4coop pipe <name>` | use another pipe (a second game on the same PC; not saved) |
 | `/x4coop set <key> <number>` | tweak a setting live, e.g. `set ghost_right 400`, `set predict 0` |
 
 The settings are in the `config` table at the top of `ui/x4_coop.lua`. If chat commands
@@ -103,6 +104,38 @@ tell the conventions apart.
 4. Terminal 2: `python extensions/x4_coop/bridge/fake_peer.py`. It echoes your ship back 150 m
    along the sector X axis, or use `--mode orbit` to circle you.
 5. Your status should show `bridge connected` and an RTT.
+
+The bridge only talks to `X4.exe` on this PC. It rejects network clients and other programs
+(`--any-client` lifts the program check, for test tools like `dev/game_sim.py`).
+
+## Shared world (same save, host referees)
+
+Kills and damage sync when both players run **the same world**: the host's save.
+1. Host: start the bridge with `--host`, type `/x4coop net`. The game creates a co-op world id
+   (notification "new co-op world …"). **Save now** and give that save file to your partner
+   (`Documents/Egosoft/X4/<id>/save/`).
+2. Joiner: put the save in your own save folder, load it, start the bridge with `--join`, type
+   `/x4coop net`. Both sides should then show **"world: linked"**.
+3. The joiner starts out in the host's ship (it's the host's save). Switch to another ship; the
+   mod warns while you're both in the same one.
+
+While linked, a ship one player kills is destroyed in the other's world too (matched by its ID
+code). Each player's hits lower the hull of the same ship on the other side ("lowest hull wins",
+so both players' damage adds up). Both sides must be the same world: with different saves, or
+two hosts, nothing syncs and the mod tells you why.
+
+Not yet: the host's NPC positions don't drive the joiner's copies (the same pirate can be in
+slightly different places in each world), your partner's guns don't visibly fire, and the
+joiner's own ship also sits in the host's world as a parked duplicate.
+
+## Two games on one PC
+
+Useful for testing the network and the shared world without a second person. Run both windowed
+on low settings; each instance gets about half the machine.
+1. Game A (host): bridge `python x4_coop_bridge.py --host`, then `/x4coop net` in game.
+2. Game B (joiner): `/x4coop pipe x4_coop_b` in game, then
+   `python x4_coop_bridge.py --join 127.0.0.1 --pipe x4_coop_b`, then `/x4coop net`.
+3. For the shared world, follow the steps above: A saves, B loads that save.
 
 ## Test 3: two players
 
@@ -142,12 +175,12 @@ Paste the `[x4coop]` and `x4coop:` log lines back into the conversation that's d
 
 ## Known limitations / next steps
 
-* Only movement is shared. Universes are separate (NPCs and stations differ per player).
+* Separate saves share only movement and chat. Kills and damage need the shared world (see above).
 * The proxy is player-owned so it shows as friendly, which also means it appears in your
   property list. A dedicated faction would be cleaner.
-* Weapons and damage are not synced yet. The game offers `event_weapon_fired` (detects your
-  shots) and the AI action `shoot_at` (makes a ship fire, but needs a pilot and a target in your
-  universe). Whether a partner's shots should be cosmetic or do damage is the next design question.
+* Your partner's guns don't visibly fire yet (planned: `event_player_attacked_object` on their
+  side, the AI action `shoot_at` on the proxy here). NPC positions near the players aren't
+  host-driven yet.
 * No docking, highway or travel-drive visuals yet. SETA (time acceleration)
   is not synchronised.
 * One partner at a time. With `--password`, packets are authenticated but not encrypted, so
