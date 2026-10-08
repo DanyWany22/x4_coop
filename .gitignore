@@ -2,3 +2,7 @@ __pycache__/
 *.pyc
 # local test output
 dev/out_*.txt
+# telemetry: traces, captures and reports; overlay position and errors
+bridge/traces/
+bridge/x4_coop_overlay.json
+bridge/x4_coop_overlay.log

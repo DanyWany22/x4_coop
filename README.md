@@ -119,6 +119,45 @@ Settings (`set`, or the `config` table at the top of `ui/x4_coop.lua`): `send_ra
 effects), `fire_fx` (proxy fires; gives spawned proxies a pilot), `npc_sync`, `npc_radius`,
 `npc_mirror`, `npc_remove`, `npc_hull` (the shared-world NPC parts), and more.
 
+## Telemetry: seeing and proving the link
+
+`host.bat` and `join.bat` start the bridge with `--overlay --trace`:
+
+* **Overlay** (`x4_coop_overlay.py`): a small window on top of the game, updated 10 times a second:
+  * the link state and encryption
+  * this PC (name, process, X4's process, UDP binding, the address it sends from)
+  * the partner PC (name, process, address, round trip measured by the bridges)
+  * packets and KB per second each way
+  * both ships as they cross the wire: position, speed, hull, shield and each machine's own game clock
+  * the distance between the ships, hits, kills and chat
+  * the latest datagrams' sizes, counters and first bytes (`58 34 43 32 20` is "X4C2 ")
+
+  X4 must run **borderless or windowed**, because exclusive fullscreen covers other windows. The window
+  lets clicks through to the game. **Ctrl+Shift+F12** lets you drag it, and right-click then closes it;
+  press Ctrl+Shift+F12 again to lock it. **Ctrl+Shift+F11** hides or shows it.
+* **Trace** (`bridge\traces\x4coop-<PC>-<role>-<time>.jsonl`, about 1.5 MB a minute): one JSON object
+  per line, for:
+  * the socket bindings
+  * X4's pipe connection
+  * the partner machine and round trip
+  * the TCP save transfer
+  * **every datagram**: direction, local and remote address and port, sizes, our header (magic, HMAC
+    tag, session, counter, send time), the first 64 bytes as sent or received (`--trace-bytes 0` for
+    all of them), the decrypted message and what the bridge did with it.
+* **Two-machine report:** copy one PC's trace to the other and drag both onto `report.bat` (or run
+  `python x4_coop_trace_report.py A.jsonl B.jsonl --html report.html`). Each datagram is matched to
+  its arrival on the other PC by its 128-bit HMAC tag. The report shows:
+  * how many arrived, and the one-way trip each way
+  * the clock offset between the PCs, estimated from the packets
+  * that the bytes and the decrypted text are identical on both sides
+  * a side-by-side timeline of both PCs' own ships, each simulated by its own game with its own clock
+  * every hit and kill, with when it reached the other PC
+  * an HTML page with the two flight paths, trip times and both speeds over time
+* **Independent capture:** `capture.bat` (run as administrator) records every packet on port 47810
+  with Windows' own Packet Monitor and converts it to `.pcapng` for Wireshark and to text. The IP
+  and UDP headers come from Windows, not from the mod. Each payload's first bytes and HMAC tag match
+  a datagram in the bridge's trace.
+
 ## Troubleshooting
 
 * `/x4coop check` first.
@@ -196,6 +235,9 @@ python extensions/x4_coop/dev/run_tests.py [--quick]
 * Bridge: password codec (encryption, replay, tamper, stale, other versions), reconnects, chat, wrong password, partner
   injecting bridge messages, non-X4 pipe clients, second partner, and a real save handoff
   between two bridges (`dev/share_test.py`).
+* Telemetry: two bridges record traces while two stand-in games fly different paths and report a
+  hit and a kill; the report must match every datagram both ways with identical bytes and text
+  (`dev/trace_test.py`; `--keep DIR --overlay 12` also shows the overlay).
 
 From a checkout outside the game folder, set `X4_GAME_DIR` first.
 
@@ -211,5 +253,8 @@ files only, no test kit) to your Desktop. Unzip it into `X4 Foundations/extensio
 | `md/x4_coop.xml` | spawn/adopt/warp proxies, hull/shields, kill/hit/fire events, NPC scan and stand-ins, guest ship |
 | `aiscripts/x4coop.proxy.fire.xml` | makes a proxy fire at a ship for a moment |
 | `bridge/x4_coop_bridge.py`, `host.bat`, `join.bat` | the bridge and its launchers |
+| `bridge/x4_coop_overlay.py` | live telemetry window over the game |
+| `bridge/x4_coop_trace_report.py`, `report.bat` | lines up two machines' traces; text and HTML report |
+| `bridge/capture.bat` | Windows Packet Monitor capture of port 47810 (pcapng for Wireshark) |
 | `bridge/fake_peer.py` | a fake partner for testing on one PC |
-| `dev/` | offline tests (`run_tests.py`, `sim.lua`, `run_lua.py`, `game_sim.py`, `share_test.py`, `catx.py`) |
+| `dev/` | offline tests (`run_tests.py`, `sim.lua`, `run_lua.py`, `game_sim.py`, `share_test.py`, `trace_test.py`, `catx.py`) |

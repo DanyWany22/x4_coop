@@ -20,15 +20,21 @@ documented in ui/x4_coop.lua. "H" keepalives are handled here and never reach th
 A host serves one partner at a time and takes a new one only after the current one goes silent.
 On connect the game is told its role ("R|host" / "R|join"): the host's save is the shared world.
 "X|..." messages are the bridges' own: the save handoff (see SaveShare), never forwarded to a game.
+
+Telemetry (see Telemetry): --trace records the socket bindings and every datagram as JSON lines, --overlay
+shows them live over the game (x4_coop_overlay.py), and x4_coop_trace_report.py lines up two machines' traces.
 """
 import argparse
 import ctypes
 import functools
 import hashlib
 import hmac
+import json
 import os
+import platform
 import queue
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -44,6 +50,8 @@ KEEPALIVE_S = 1.0
 PARTNER_TIMEOUT_S = 10.0
 STATS_EVERY_S = 30.0
 MAX_PACKETS_PER_S = 200  # a partner sends ~22/s; anything far above that is dropped
+TRACE_HEX_BYTES = 64     # telemetry: bytes of each datagram shown in hex (--trace-bytes; 0 = all)
+TRACE_DROPS_PER_S = 10   # telemetry: rejected/ignored/flooded datagrams recorded per second at most
 FROM_PARTNER = set("SPQMLKDFB")  # message kinds a partner may send; R, W and N only come from this bridge
 
 # Win32 named pipe API through ctypes, mirroring the parameters SirNukes' own server uses.
@@ -172,6 +180,139 @@ def parse_address(text, default_port):
 
 def log(text):
     print(time.strftime("%H:%M:%S ") + text, flush=True)
+
+
+def fmt_addr(addr):
+    return f"{addr[0]}:{addr[1]}" if addr else None
+
+
+def local_address(peer, port):
+    """The address this PC sends to peer from: the interface's IP (a UDP connect sends nothing) and our port."""
+    if peer:
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                s.connect(peer)
+                return f"{s.getsockname()[0]}:{port}"
+        except OSError:
+            pass
+    return f"0.0.0.0:{port}"
+
+
+def this_machine():
+    clean = lambda text: str(text).replace("|", "/")  # noqa: E731  (fields of the H keepalive)
+    return {"host": clean(socket.gethostname()), "pid": os.getpid(), "os": clean(platform.platform(terse=True))}
+
+
+def wire_header(data):
+    """Our header of a datagram, readable without the password: magic, HMAC tag, session, counter, send time."""
+    head = {"magic": data[:4].decode("ascii", "replace")}
+    tag, _, rest = data[len(MAGIC):].partition(b" ")
+    meta = rest.partition(b" ")[0]
+    try:
+        session, counter, stamp = meta.decode("ascii").split(":")
+        head.update(tag=tag.decode("ascii"), session=session, counter=int(counter), sent=int(stamp))
+    except (UnicodeDecodeError, ValueError):
+        pass  # unencrypted (--no-password) or not ours
+    return head
+
+
+GAME_FIELDS = {  # field names of the game's messages (see ui/x4_coop.lua), for the trace tools
+    "S": "seq t sector ship x y z yaw pitch roll vx vy vz name idcode hull shield",
+    "D": "code macro sector hull enemy", "K": "code macro sector", "F": "code macro sector",
+    "L": "world role ship protocol", "M": "name text", "P": "t", "Q": "t", "R": "role",
+    "B": "t sector radius complete ships", "H": "host pid os t echo hold",
+}
+
+
+def decode_game(msg):
+    """A message's fields by name, e.g. {"kind": "S", "x": "12.50", ...}. Only the trace tools look inside."""
+    kind, _, rest = (msg or "").partition("|")
+    names = GAME_FIELDS.get(kind, "").split()
+    out = {"kind": kind}
+    if names and rest:
+        out.update(zip(names, rest.split("|", len(names) - 1)))
+    return out
+
+
+class Telemetry:
+    """
+    What this bridge saw, as proof and for debugging: its socket bindings, every datagram (addresses, our
+    header, the bytes on the wire, the decrypted message and what became of it), the partner machine with the
+    round-trip time, X4's pipe connection and the save transfer. One JSON object per line, to --trace FILE and/or
+    live to the overlay window (--overlay). Stays on this PC; nothing here is sent to the partner.
+    """
+
+    def __init__(self, path=None, overlay=False, hex_bytes=TRACE_HEX_BYTES):
+        self.path, self.hex_bytes = path, hex_bytes
+        self.lock = threading.Lock()
+        self.file = None
+        self.feed = None
+        self.last_flush = 0.0
+        self.drops = (0.0, 0)  # (second started, datagrams recorded in it) for the TRACE_DROPS_PER_S limit
+        if path:
+            os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+            self.file = open(path, "a", encoding="utf-8")
+        if overlay:
+            here = os.path.dirname(os.path.abspath(__file__))
+            with open(os.path.join(here, "x4_coop_overlay.log"), "a", encoding="utf-8") as errors:
+                self.proc = subprocess.Popen([sys.executable, "-I", os.path.join(here, "x4_coop_overlay.py")],
+                                             stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=errors,
+                                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            self.feed = queue.Queue(maxsize=5000)
+            threading.Thread(target=self._pump, daemon=True).start()
+
+    @property
+    def on(self):
+        return self.file is not None or self.feed is not None
+
+    def emit(self, ev, **fields):
+        if not self.on:
+            return
+        line = json.dumps({"ev": ev, "wall": round(time.time(), 6), **fields}, separators=(",", ":")) + "\n"
+        with self.lock:
+            if self.file:
+                self.file.write(line)
+                if time.monotonic() - self.last_flush > 1.0:
+                    self.last_flush = time.monotonic()
+                    self.file.flush()
+            feed = self.feed
+        if feed is not None:
+            try:
+                feed.put_nowait(line)
+            except queue.Full:
+                pass  # the overlay is behind: skip lines rather than stall the relay
+
+    def packet(self, direction, data, local, remote, limited=False, **fields):
+        """One datagram. limited: a rejected/ignored one, recorded at most TRACE_DROPS_PER_S times a second."""
+        if not self.on:
+            return
+        if limited:
+            now = time.monotonic()
+            start, count = self.drops if now - self.drops[0] < 1.0 else (now, 0)
+            self.drops = (start, count + 1)
+            if count >= TRACE_DROPS_PER_S:
+                return
+        shown = data if not self.hex_bytes else data[:self.hex_bytes]
+        self.emit("pkt", dir=direction, local=local, remote=fmt_addr(remote), bytes=len(data),
+                  udp_len=len(data) + 8, hdr=wire_header(data), hex=shown.hex(), **fields)
+
+    def _pump(self):
+        while True:
+            line = self.feed.get()
+            try:
+                self.proc.stdin.write(line.encode("utf-8"))
+                if self.feed.empty():
+                    self.proc.stdin.flush()
+            except OSError:  # the overlay window was closed
+                self.feed = None
+                log("overlay closed (the bridge keeps running)")
+                return
+
+    def close(self):
+        with self.lock:
+            if self.file:
+                self.file.close()
+                self.file = None
 
 
 @functools.lru_cache(maxsize=8)
@@ -312,8 +453,9 @@ class SaveShare:
     loop never stalls.
     """
 
-    def __init__(self, codec, port, role):
+    def __init__(self, codec, port, role, tele=None):
         self.codec, self.port, self.role = codec, port, role
+        self.tele = tele or Telemetry()
         self.save_dir = None
         self.pending = None
         self.offer = None
@@ -381,7 +523,9 @@ class SaveShare:
                 conn, addr = o["listener"].accept()
             except (BlockingIOError, OSError):
                 return
-            if not partner or addr[0] != partner[0]:
+            allowed = bool(partner) and addr[0] == partner[0]
+            self.tele.emit("tcp", what="accept", local=f"0.0.0.0:{self.port}", remote=fmt_addr(addr), allowed=allowed)
+            if not allowed:
                 conn.close()
                 return
             self._close_offer()
@@ -412,7 +556,9 @@ class SaveShare:
             return
         token = os.urandom(16).hex()
         self.offer = {"data": data, "token": token, "listener": listener, "deadline": time.time() + OFFER_TTL_S}
-        send_udp(f"X|offer|{len(data)}|{hashlib.sha256(data).hexdigest()}|{token}")
+        sha = hashlib.sha256(data).hexdigest()
+        self.tele.emit("tcp", what="listen", local=f"0.0.0.0:{self.port}", bytes=len(data), sha256=sha)
+        send_udp(f"X|offer|{len(data)}|{sha}|{token}", "bridge")
         self._say(f"offering your save ({len(data) / 1e6:.1f} MB) to your partner")
 
     def _close_offer(self):
@@ -421,7 +567,9 @@ class SaveShare:
             self.offer = None
 
     def _serve(self, conn, offer):
+        started = time.monotonic()
         try:
+            remote = fmt_addr(conn.getpeername())
             conn.settimeout(30)
             line = b""
             while not line.endswith(b"\n") and len(line) < 200:
@@ -431,10 +579,16 @@ class SaveShare:
                 line += chunk
             if not hmac.compare_digest(line.strip(), self._proof(offer["token"])):
                 self.events.put(("log", "save fetch refused: wrong proof"))
+                self.tele.emit("tcp", what="refused", remote=remote, reason="wrong proof")
                 return
             view = memoryview(offer["data"])
+            first = b""
             for i in range(0, len(view), SAVE_CHUNK):  # the 30 s timeout applies per 1 MB chunk
-                conn.sendall(self._crypt(offer["token"], i, view[i:i + SAVE_CHUNK]))
+                chunk = self._crypt(offer["token"], i, view[i:i + SAVE_CHUNK])
+                first = first or chunk[:32]
+                conn.sendall(chunk)
+            self.tele.emit("tcp", what="sent", local=fmt_addr(conn.getsockname()), remote=remote,
+                           bytes=len(view), seconds=round(time.monotonic() - started, 3), hex=first.hex())
             self._say(f"save sent to your partner ({len(offer['data']) / 1e6:.1f} MB)")
         except OSError as e:
             self._say(f"sending the save failed: {e}")
@@ -459,8 +613,10 @@ class SaveShare:
             threading.Thread(target=self._fetch, args=(host, size, sha, token, self.save_dir), daemon=True).start()
 
     def _fetch(self, host, size, sha, token, save_dir):
+        started = time.monotonic()
         try:
             with socket.create_connection(host, timeout=15) as conn:
+                self.tele.emit("tcp", what="connect", local=fmt_addr(conn.getsockname()), remote=fmt_addr(host))
                 conn.settimeout(60)
                 conn.sendall(self._proof(token) + b"\n")
                 chunks, got = [], 0
@@ -471,8 +627,12 @@ class SaveShare:
                     chunks.append(chunk)
                     got += len(chunk)
             data = b"".join(chunks)
+            wire = data[:32].hex()
             data = b"".join(self._crypt(token, i, data[i:i + SAVE_CHUNK]) for i in range(0, len(data), SAVE_CHUNK))
-            if len(data) != size or hashlib.sha256(data).hexdigest() != sha or not gzip_complete(data):
+            intact = len(data) == size and hashlib.sha256(data).hexdigest() == sha and gzip_complete(data)
+            self.tele.emit("tcp", what="received", remote=fmt_addr(host), bytes=len(data), sha256_ok=intact,
+                           seconds=round(time.monotonic() - started, 3), hex=wire)
+            if not intact:
                 self._say("the host's save arrived damaged; ask them to /x4coop share again")
                 return
             target = os.path.join(save_dir, "quicksave.xml.gz")
@@ -490,6 +650,15 @@ class SaveShare:
             self._say(f"fetching the host's save failed: {e}")
         finally:
             self.fetching.release()
+
+
+def trace_path(choice, me, role):
+    """--trace FILE, or with no FILE: bridge/traces/x4coop-<machine>-<role>-<date-time>.jsonl."""
+    if choice != "auto":
+        return choice
+    folder = os.path.join(os.path.dirname(os.path.abspath(__file__)), "traces")
+    name = "".join(c if c.isalnum() or c in "-_" else "_" for c in me["host"])
+    return os.path.join(folder, f"x4coop-{name}-{role}-{time.strftime('%Y%m%d-%H%M%S')}.jsonl")
 
 
 def run(args):
@@ -510,30 +679,53 @@ def run(args):
     sock.bind(("0.0.0.0", port))
     sock.setblocking(False)
     port = sock.getsockname()[1]
-    share = SaveShare(codec, port, role)
+    me = this_machine()
+    tele = Telemetry(trace_path(args.trace, me, role), args.overlay, args.trace_bytes)
+    share = SaveShare(codec, port, role, tele)
 
     game = GamePipe(args.pipe)
+    local = local_address(peer, port)
     log(f"UDP port {port}; " + (f"partner {peer[0]}:{peer[1]}" if peer else "waiting for a partner to join")
         + ("; encrypted with your password" if args.password else ""))
     if args.password and len(args.password) < SHORT_PASSWORD:
         log(f"note: short password. Fine on a LAN or Tailscale; over the open internet use {SHORT_PASSWORD}+ "
             "characters (a few random words), because anyone who records a packet can try guesses offline")
+    if tele.path:
+        log(f"recording a telemetry trace to {tele.path}")
     log(f"waiting for X4 on {game.path}")
+    tele.emit("start", machine=me, role=role, udp_bind=f"0.0.0.0:{port}", local=local, peer=fmt_addr(peer),
+              pipe=game.path, encrypted=bool(args.password), wire=MAGIC.decode().strip(),
+              python=platform.python_version(), trace=tele.path)
 
     stats = {"to_peer": 0, "from_peer": 0, "to_game": 0, "dropped": 0, "rejected": 0, "ignored": 0, "flooded": 0}
     last_heard = 0.0
     partner_present = False
+    partner_clock = None  # (partner's clock in its last keepalive, our clock when it arrived), both ms
     last_keepalive = 0.0
     last_stats = time.monotonic()
     last_reject_note = 0.0
 
-    def send(msg):
+    def send(msg, src="game"):
+        data = codec.seal(msg)
         try:
-            sock.sendto(codec.seal(msg), peer)
-            return True
+            sock.sendto(data, peer)
         except OSError as e:  # e.g. network unreachable; the keepalive retries every second
             log(f"send failed: {e}")
+            tele.emit("send_failed", remote=fmt_addr(peer), error=str(e))
             return False
+        tele.packet("tx", data, local, peer, src=src, msg=msg)
+        return True
+
+    def hello():
+        """Keepalive H: names this machine and carries clocks, so each side measures the round trip."""
+        t = int(time.monotonic() * 1000)
+        echo, hold = (partner_clock[0], t - partner_clock[1]) if partner_clock else (0, 0)
+        return f"H|{me['host']}|{me['pid']}|{me['os']}|{t}|{echo}|{hold}"
+
+    def game_lost(e):
+        log(f"X4 disconnected ({e}); waiting for it to reconnect")
+        tele.emit("pipe", state="disconnected", reason=str(e))
+        game.close()
 
     def tell_game(msg):
         if not game.connected:
@@ -544,8 +736,7 @@ def run(args):
             else:
                 stats["dropped"] += 1
         except PipeClosed as e:
-            log(f"X4 disconnected ({e}); waiting for it to reconnect")
-            game.close()
+            game_lost(e)
 
     while True:
         busy = False
@@ -556,10 +747,12 @@ def run(args):
                 pid, exe = game.client()
                 if not args.any_client and (not exe or os.path.basename(exe).lower() != "x4.exe"):
                     log(f"rejected pipe client {exe or '?'} (pid {pid}): only X4.exe may connect (--any-client to allow)")
+                    tele.emit("pipe", state="rejected", pid=pid, exe=exe)
                     game.close()
                     time.sleep(0.2)
                     continue
                 log(f"X4 connected (pid {pid})")
+                tele.emit("pipe", state="connected", pid=pid, exe=exe, path=game.path)
                 where = f"partner {peer[0]}:{peer[1]}" if peer else f"UDP {port}, waiting for a partner"
                 tell_game(f"W|bridge ready ({where})")
                 tell_game(f"R|{role}")
@@ -577,8 +770,7 @@ def run(args):
                     elif peer and send(msg):
                         stats["to_peer"] += 1
             except PipeClosed as e:
-                log(f"X4 disconnected ({e}); waiting for it to reconnect")
-                game.close()
+                game_lost(e)
 
         while True:
             try:
@@ -590,6 +782,7 @@ def run(args):
             if msg is None:
                 if data.startswith(b"X4C"):  # ours, any version
                     stats["rejected"] += 1
+                    tele.packet("rx", data, local, addr, limited=True, verdict="rejected: " + codec.last_reject)
                     if now - last_reject_note > 10:
                         last_reject_note = now
                         log(f"rejected packets from {addr[0]}:{addr[1]}: {codec.last_reject}")
@@ -599,27 +792,44 @@ def run(args):
             foreign = (addr != peer) if hosting else (addr[0] != peer[0])
             if peer and foreign and (partner_present or not hosting):
                 stats["ignored"] += 1
+                tele.packet("rx", data, local, addr, limited=True, msg=msg, verdict="ignored: not your partner")
                 continue
             if not limit.allow(now):
                 stats["flooded"] += 1
+                tele.packet("rx", data, local, addr, limited=True, verdict="dropped: too many packets")
                 continue
             last_heard = now
             if hosting and addr != peer:
                 peer = addr
+                local = local_address(peer, port)
                 log(f"partner is {addr[0]}:{addr[1]}")
             if not partner_present:
                 partner_present = True
                 log("partner connected")
+                tele.emit("link", state="connected", local=local, remote=fmt_addr(addr))
                 tell_game("N|partner connected")
-            if msg == "H":
+            if msg == "H" or msg.startswith("H|"):
+                h = decode_game(msg)
+                try:
+                    partner_clock = (int(h["t"]), int(now * 1000))
+                    echo, hold = int(h["echo"]), int(h["hold"])
+                    rtt = int(now * 1000) - echo - hold if echo else None
+                    tele.emit("peer", machine={"host": h["host"], "pid": h["pid"], "os": h["os"]},
+                              remote=fmt_addr(addr), rtt_ms=rtt if rtt is not None and 0 <= rtt < 10000 else None)
+                except (KeyError, ValueError):
+                    pass  # a plain "H" from an older bridge
+                tele.packet("rx", data, local, addr, msg=msg, verdict="keepalive")
                 continue
             if msg.startswith("X|offer|") and role == "join":
+                tele.packet("rx", data, local, addr, msg=msg, verdict="save offer")
                 share.on_offer(msg.split("|"), peer)
                 continue
             if msg[:1] not in FROM_PARTNER or msg[1:2] != "|":
                 stats["ignored"] += 1
+                tele.packet("rx", data, local, addr, msg=msg, verdict="ignored: not a partner message")
                 continue
             stats["from_peer"] += 1
+            tele.packet("rx", data, local, addr, msg=msg, verdict="to X4" if game.connected else "X4 not connected")
             tell_game(msg)
 
         share.tick(peer if partner_present else None, send)
@@ -632,13 +842,15 @@ def run(args):
         if partner_present and now - last_heard > PARTNER_TIMEOUT_S:
             partner_present = False
             log("partner silent")
+            tele.emit("link", state="silent", remote=fmt_addr(peer))
             tell_game("N|partner silent")
         if peer and now - last_keepalive > KEEPALIVE_S:
             last_keepalive = now
-            send("H")  # keeps NAT mappings open and lets a host find us
+            send(hello(), "bridge")  # keeps NAT mappings open and lets a host find us
         if now - last_stats > STATS_EVERY_S:
             last_stats = now
             log("stats: " + ", ".join(f"{k} {v}" for k, v in stats.items()))
+            tele.emit("stats", **stats)
         if not busy:
             time.sleep(0.002)
 
@@ -662,6 +874,14 @@ def main(argv=None):
                    help="let any local program use the pipe, not only X4.exe (for test tools)")
     p.add_argument("--role", choices=["host", "join"],
                    help="whose save is the shared world (default: --host is host, --join is join; required with --peer)")
+    p.add_argument("--trace", nargs="?", const="auto", metavar="FILE",
+                   help="record telemetry (bindings, every datagram, partner machine, save transfer) as JSON lines; "
+                        "without FILE: bridge/traces/x4coop-<machine>-<role>-<time>.jsonl. Compare two machines' "
+                        "traces with x4_coop_trace_report.py")
+    p.add_argument("--trace-bytes", type=int, default=TRACE_HEX_BYTES, metavar="N",
+                   help=f"bytes of each datagram recorded in hex (default {TRACE_HEX_BYTES}; 0 = whole datagram)")
+    p.add_argument("--overlay", action="store_true",
+                   help="show the live telemetry window on top of the game (X4 in borderless or windowed mode)")
     args = p.parse_args(argv)
     if args.peer and not args.role:
         p.error("--peer needs --role host or --role join (exactly one side hosts the shared world)")

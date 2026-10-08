@@ -1,6 +1,7 @@
 @echo off
 rem X4 Co-op: host a session. Your partner joins this PC's address on port 47810.
 rem The first time, allow Python through Windows Firewall when asked, or your partner can't reach you.
+rem Shows the telemetry overlay over the game (X4 borderless or windowed) and records a trace in traces\.
 setlocal
 where py >nul 2>nul && (set "PY=py -3") || (set "PY=python")
 echo Give your partner ONE of these addresses:
@@ -15,5 +16,5 @@ echo.
 :ask
 set /p "PASSWORD=Shared password (letters, digits, spaces; over the internet 12+ characters): "
 if "%PASSWORD%"=="" goto ask
-%PY% "%~dp0x4_coop_bridge.py" --host --password "%PASSWORD%"
+%PY% "%~dp0x4_coop_bridge.py" --host --password "%PASSWORD%" --trace --overlay
 pause
