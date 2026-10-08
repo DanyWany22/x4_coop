@@ -167,6 +167,8 @@ on low settings; each instance gets about half the machine.
 
 * Both need the same galaxy: same DLCs and a sector your partner has too. The proxy is placed
   by sector macro name; if you don't have the sector, you get a "could not place partner" notice.
+* Shortcut: double-click `bridge\host.bat` (host) or `bridge\join.bat` (joiner). They ask for the
+  password and the host's address, then start the bridge with the commands below.
 * One player hosts: `python x4_coop_bridge.py --host --password <something>`. The host must be
   reachable on **UDP 47810**: either forward that port on the router, or both join a VPN like
   Tailscale or ZeroTier, which is easier and private.
