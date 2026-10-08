@@ -15,14 +15,14 @@ local function finish(ok)
 end
 
 local SC = {
-	ghost        = { true_conv = { order = "ZXY", sy = -1, sp = 1, sr = -1 }, mode = "ghost", setpos = "radians", duration = 40 },
+	ghost        = { true_conv = { order = "ZXY", sy = -1, sp = 1, sr = -1 }, mode = "ghost", setpos = "radians", duration = 40, fire_test = true },
 	ghost_default= { true_conv = { order = "YXZ", sy = 1, sp = 1, sr = 1 }, mode = "ghost", setpos = "radians", duration = 30 },
 	degrees      = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = 1 }, mode = "ghost", setpos = "degrees", duration = 30 },
 	setpos_ignored = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = 1 }, mode = "ghost", setpos = "ignore", duration = 30, max_pos_err = 60, max_rot_err = 0.25 },
 	md_backend   = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = 1 }, mode = "ghost", setpos = "radians", backend = "md", duration = 30, max_pos_err = 60, max_rot_err = 0.25 },
 	net          = { true_conv = { order = "XYZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "radians", duration = 30, pipes = true },
 	world        = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
-	                 role = "join", own_world = "abc123", partner_world = "abc123", world_test = "linked" },
+	                 role = "join", own_world = "abc123", partner_world = "abc123", world_test = "linked", partner_ship = "HOS-001" },
 	world_mismatch = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
 	                 role = "join", own_world = "abc123", partner_world = "zzz999", world_test = "mismatch" },
 	world_host   = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
@@ -80,9 +80,14 @@ local SECTORS = { [500] = "cluster_01_sector001_macro", [501] = "cluster_01_sect
 local SHIP_MACRO = "ship_arg_s_fighter_01_a_macro"
 local objects = {}
 local PLAYER = 100
+local PARKED = 300
 objects[PLAYER] = { sector = 500, x = 1000, y = 0, z = -2000, yaw = 0, pitch = 0, roll = 0, macro = SHIP_MACRO }
+if sc.partner_ship then
+	objects[PARKED] = { sector = 500, x = 5000, y = 0, z = 5000, yaw = 0, pitch = 0, roll = 0, macro = SHIP_MACRO,
+		idcode = sc.partner_ship, pilot = true }
+end
 local next_id, spawns, warps, moves, md_events, lua_errors = 200, 0, 0, 0, {}, 0
-local spawn_sectors, world_requests = {}, {}
+local spawn_sectors, world_requests, adoptions = {}, {}, 0
 local proxy_id = nil
 local history = {}   -- player pose history for ground truth
 
@@ -123,7 +128,10 @@ C = {
 	GetPlayerName = function() return "Tester" end,
 	GetPlayerOccupiedShipID = function() return PLAYER end,
 	GetContextByClass = function(id, cls) local o = objects[id]; return o and o.sector or 0 end,
-	GetObjectIDCode = function(id) return id == PLAYER and "PLY-100" or ("SIM-" .. tostring(id)) end,
+	GetObjectIDCode = function(id)
+		local o = objects[id]
+		return (o and o.idcode) or (id == PLAYER and "PLY-100") or ("SIM-" .. tostring(id))
+	end,
 	GetObjectPositionInSector = function(id)
 		local o = objects[id]
 		assert(o, "GetObjectPositionInSector on missing object " .. tostring(id))
@@ -162,8 +170,10 @@ function SetNPCBlackboard(_, key, v) blackboard[key] = v end
 function ExecuteDebugCommand(cmd, param) say("  ego command /%s %s", cmd, tostring(param)) end
 
 local function queue(name, param) queued[#queued + 1] = { name, param } end
+local proxy_adopted = false
 local function destroy_proxies()
-	if proxy_id then objects[proxy_id] = nil; proxy_id = nil end
+	if proxy_id and not proxy_adopted then objects[proxy_id] = nil end
+	proxy_id, proxy_adopted = nil, false
 end
 local function sector_by_macro(m)
 	for id, macro in pairs(SECTORS) do if macro == m then return id end end
@@ -181,9 +191,21 @@ function AddUITriggeredEvent(screen, control, args)
 		local sector = sector_by_macro(args[1])
 		if not sector then queue("x4coop.spawn_failed", "unknown sector " .. tostring(args[1])); return end
 		spawn_sectors[#spawn_sectors + 1] = tostring(args[1])
-		proxy_id, next_id = next_id, next_id + 1
-		objects[proxy_id] = { sector = sector, x = args[3], y = args[4], z = args[5], yaw = args[6], pitch = args[7], roll = args[8], macro = args[2], vel = { 0, 0, 0 } }
-		spawns = spawns + 1
+		if args[11] == 1 and args[10] ~= "" then
+			for id, o in pairs(objects) do
+				if id ~= PLAYER and o.idcode == args[10] and not proxy_id then
+					proxy_id, proxy_adopted = id, true
+					o.sector, o.x, o.y, o.z, o.yaw, o.pitch, o.roll = sector, args[3], args[4], args[5], args[6], args[7], args[8]
+					adoptions = adoptions + 1
+				end
+			end
+		end
+		if not proxy_id then
+			proxy_id, next_id = next_id, next_id + 1
+			objects[proxy_id] = { sector = sector, x = args[3], y = args[4], z = args[5], yaw = args[6], pitch = args[7], roll = args[8],
+				macro = args[2], vel = { 0, 0, 0 }, pilot = args[12] == 1 }
+			spawns = spawns + 1
+		end
 		queue("x4coop.proxy_spawned", proxy_id)
 	elseif control == "despawn" then
 		destroy_proxies(); queue("x4coop.proxy_despawned")
@@ -208,6 +230,8 @@ function AddUITriggeredEvent(screen, control, args)
 		local r, u, f = col(m, 1), col(m, 2), col(m, 3)
 		blackboard["$x4coop_probe"] = { o.yaw, o.pitch, o.roll, f[1], f[2], f[3], r[1], r[2], r[3], u[1], u[2], u[3] }
 		queue("x4coop.probe_result")
+	elseif control == "fire" then
+		if proxy_id and objects[proxy_id].pilot then world_requests[#world_requests + 1] = "fire:" .. table.concat(args, ",") end
 	elseif control == "world_kill" or control == "world_hull" then
 		world_requests[#world_requests + 1] = control .. ":" .. table.concat(args, ",")
 	elseif control == "velocity" then
@@ -260,6 +284,7 @@ if sc.pipes then
 					f[3] = string.format("%.4f", tonumber(f[3]) + partner_clock_offset)  -- partner's clock differs
 					f[6] = string.format("%.2f", tonumber(f[6]) + ECHO_OFFSET[1])
 					f[15] = "Echo"
+					if sc.partner_ship then f[16] = sc.partner_ship end
 					partner_queue[#partner_queue + 1] = { at = clock + 2 * ONE_WAY, msg = table.concat(f, "|") }
 				end
 			end,
@@ -319,7 +344,8 @@ end
 if sc.mode ~= "ghost" or sc.backend then
 	clock = 0.1
 end
-local commanded, chatted, hostile_sent, world_sent, piped = false, false, false, false, false
+local commanded, chatted, hostile_sent, world_sent, piped, fire_sent = false, false, false, false, false, false
+local adopted_seen = false
 -- Malformed or malicious partner messages: all must be dropped without errors or odd spawns.
 local HOSTILE = {
 	"S|1|nan|cluster_01_sector001_macro|ship_arg_s_fighter_01_a_macro|0|0|0|0|0|0|0|0|0|evil",
@@ -365,6 +391,10 @@ while clock < sc.duration do
 		hostile_sent = true
 		for _, msg in ipairs(HOSTILE) do pipe_reader(msg) end
 	end
+	if sc.fire_test and not fire_sent and clock > 12 then
+		fire_sent = true
+		handlers["x4coop.world"]("x4coop.world", "D|TGT-001|ship_arg_s_fighter_01_a_macro|cluster_01_sector001_macro|80")
+	end
 	if sc.world_test and not world_sent and clock > 10 then
 		world_sent = true
 		local sector = "cluster_01_sector001_macro"
@@ -378,6 +408,7 @@ while clock < sc.duration do
 			"D|XYZ-997|ship_arg_s_fighter_01_a_macro|" .. sector .. "|500",
 			"K|XYZ 996|ship_arg_s_fighter_01_a_macro|" .. sector,
 			"K|XYZ-995|ship;evil|" .. sector,
+			"F|XYZ-990|ship_arg_s_fighter_01_a_macro|" .. sector,
 		}) do pipe_reader(msg) end
 	end
 	if sc.world_test == "linked" and not piped and clock > sc.duration - 4 then
@@ -392,6 +423,7 @@ while clock < sc.duration do
 	on_update()
 
 	local S = api.state()
+	if proxy_id == PARKED and S.proxy.state == "live" then adopted_seen = true end
 	if S.probe.measured and not calibrated_at then
 		calibrated_at = clock
 	end
@@ -468,11 +500,18 @@ if not sc.expect_no_proxy then
 end
 if sc.world_test then
 	local said = table.concat(notifications, " / ")
-	local sent_k, sent_d = {}, {}
+	local sent_k, sent_d, sent_f, fires, others = {}, {}, {}, {}, {}
 	for _, w in ipairs(pipe_writes) do
 		if w:sub(1, 2) == "K|" then sent_k[#sent_k + 1] = w end
 		if w:sub(1, 2) == "D|" then sent_d[#sent_d + 1] = w end
+		if w:sub(1, 2) == "F|" then sent_f[#sent_f + 1] = w end
 	end
+	for _, r in ipairs(world_requests) do
+		if r:sub(1, 5) == "fire:" then fires[#fires + 1] = r else others[#others + 1] = r end
+	end
+	world_requests = others
+	say("fire: sent %s ; applied %s ; adopted partner ship: %s (%d adoptions)", table.concat(sent_f, " "), table.concat(fires, " "),
+		tostring(adopted_seen), adoptions)
 	say("world: sent %s | %s ; applied %s", table.concat(sent_k, " "), table.concat(sent_d, " "), table.concat(world_requests, " "))
 	if sc.world_test == "linked" or sc.world_test == "host" then
 		ok = ok and said:find("world: linked", 1, true) ~= nil
@@ -481,6 +520,14 @@ if sc.world_test then
 			and #world_requests == 2
 			and world_requests[1] == "world_kill:XYZ-999,ship_arg_s_fighter_01_a_macro,cluster_01_sector001_macro"
 			and world_requests[2] == "world_hull:XYZ-998,ship_arg_s_fighter_01_a_macro,cluster_01_sector001_macro,33.3"
+	end
+	if sc.world_test == "linked" then
+		ok = ok and #sent_f == 1 and sent_f[1] == "F|ABC-124|ship_arg_s_fighter_01_a_macro|cluster_01_sector001_macro"
+			and #fires == 1 and fires[1] == "fire:XYZ-990,ship_arg_s_fighter_01_a_macro,cluster_01_sector001_macro"
+			and adopted_seen and objects[PARKED] ~= nil  -- adopted, and released (not destroyed) after 'off'
+	end
+	if sc.world_test == "mismatch" then
+		ok = ok and #sent_f == 0 and #fires == 0
 	end
 	if sc.world_test == "linked" then
 		say("pipes used: %s", table.concat(pipe_names, ", "))
@@ -492,6 +539,12 @@ if sc.world_test then
 	if sc.world_test == "mismatch" then
 		ok = ok and said:find("different worlds", 1, true) ~= nil and #sent_k == 0 and #sent_d == 0 and #world_requests == 0
 	end
+end
+if sc.fire_test then
+	local fires = {}
+	for _, r in ipairs(world_requests) do if r:sub(1, 5) == "fire:" then fires[#fires + 1] = r end end
+	say("ghost fire requests: %s", table.concat(fires, " "))
+	ok = ok and #fires == 1 and fires[1] == "fire:TGT-001,ship_arg_s_fighter_01_a_macro,cluster_01_sector001_macro"
 end
 if sc.expect_no_proxy then
 	ok = ok and spawns == 0 and said:find("Mod Support APIs not installed", 1, true) ~= nil

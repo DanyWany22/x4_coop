@@ -24,9 +24,10 @@ Chat window commands (type them in the chat window, they never leave your PC):
   /x4coop set <key> <value> tweak a numeric setting, e.g. /x4coop set interp_delay 0.15
 
 Wire format (one message per pipe write, '|' separated, also used by the Python tools):
-  S|seq|t|sector_macro|ship_macro|x|y|z|yaw|pitch|roll|vx|vy|vz|name   snapshot (sender clock t in s)
+  S|seq|t|sector_macro|ship_macro|x|y|z|yaw|pitch|roll|vx|vy|vz|name[|idcode]   snapshot (sender clock t in s)
   P|t / Q|t                                                            ping / pong (RTT)
   M|name|text                                                          chat line
+  R|role, L|world|role|ship, K|ship, D|ship|hull, F|ship                shared world (see that section)
   W|text, N|text                                                       bridge welcome / notice
 ]]
 
@@ -69,6 +70,7 @@ local config = {
 	md_gain = 2.0,            -- 1/s, md backend: velocity correction per metre of error
 	engine_fx = 1,            -- 1: also give the proxy matching physics velocity (experiment: engine effects,
 	engine_fx_rate = 4,       --    covers frames without a Lua update); commands per second
+	fire_fx = 1,              -- 1: proxies get a pilot and fire at what their player is hitting (ghost: what you hit)
 	ghost_latency = 0.12,     -- s, simulated one-way latency in ghost mode
 	ghost_jitter = 0.03,      -- s, extra random delay per snapshot
 	ghost_loss = 0.0,         -- 0..1, fraction of snapshots dropped
@@ -334,6 +336,8 @@ local function local_tick(now)
 	if ship ~= L.ship then
 		L.ship, L.prev = ship, nil
 		L.ship_macro = GetComponentData(to64(ship), "macro")
+		local code = C.GetObjectIDCode(ship)
+		L.idcode = code ~= nil and ffi.string(code) or ""
 	end
 	if sector ~= L.sector then
 		L.sector, L.prev = sector, nil
@@ -345,7 +349,7 @@ local function local_tick(now)
 	local p = C.GetObjectPositionInSector(ship)
 	L.seq = L.seq + 1
 	local s = {
-		seq = L.seq, t = now, sector_macro = L.sector_macro, ship_macro = L.ship_macro, name = L.name,
+		seq = L.seq, t = now, sector_macro = L.sector_macro, ship_macro = L.ship_macro, name = L.name, idcode = L.idcode,
 		x = p.x, y = p.y, z = p.z, yaw = p.yaw, pitch = p.pitch, roll = p.roll, vx = 0, vy = 0, vz = 0,
 	}
 	local prev = L.prev
@@ -367,9 +371,9 @@ local function clean_text(text, max_len)
 end
 
 local function encode_snapshot(s)
-	return string.format("S|%d|%.4f|%s|%s|%.2f|%.2f|%.2f|%.5f|%.5f|%.5f|%.2f|%.2f|%.2f|%s",
+	return string.format("S|%d|%.4f|%s|%s|%.2f|%.2f|%.2f|%.5f|%.5f|%.5f|%.2f|%.2f|%.2f|%s|%s",
 		s.seq, s.t, s.sector_macro, s.ship_macro, s.x, s.y, s.z, s.yaw, s.pitch, s.roll, s.vx, s.vy, s.vz,
-		clean_text(s.name, 32))
+		clean_text(s.name, 32), s.idcode or "")
 end
 
 local function split(msg)
@@ -398,6 +402,9 @@ local function decode_snapshot(f)
 	end
 	s.name = clean_text(f[15], 32)
 	if s.name == "" then s.name = "Partner" end
+	if f[16] and #f[16] <= 16 and f[16]:match("^[%w%-]+$") then
+		s.idcode = f[16]  -- their ship's ID code: in a shared world that ship exists here too
+	end
 	return s
 end
 
@@ -610,7 +617,7 @@ on_pipe_message = function(msg)
 		end
 	elseif kind == "N" or kind == "W" then
 		notify("%s", clean_text(f[2], 200))
-	elseif kind == "R" or kind == "L" or kind == "K" or kind == "D" then
+	elseif kind == "R" or kind == "L" or kind == "K" or kind == "D" or kind == "F" then
 		on_world_message(kind, f, now)
 	end
 end
@@ -752,6 +759,26 @@ local function drive_md(now, target)
 		target.vx + ex * g, target.vy + ey * g, target.vz + ez * g, snap and 1 or 0 })
 end
 
+-- ID code of the ship we are flying, or nil.
+local function own_idcode()
+	local ship = C.GetPlayerOccupiedShipID()
+	local code = ship ~= 0 and C.GetObjectIDCode(ship) or nil
+	return code ~= nil and ffi.string(code) or nil
+end
+
+-- In a shared world the partner's own ship exists here (same ID code) and should be their proxy.
+local function adopt_wanted(snapshot)
+	return config.mode == "net" and S.link.linked and snapshot.idcode ~= nil
+end
+
+local function proxy_is_adopted()
+	local P = S.proxy
+	if P.state ~= "live" or P.id == 0 then return false end
+	local code = C.GetObjectIDCode(P.id)
+	local newest = S.rem.snaps[#S.rem.snaps]
+	return code ~= nil and newest ~= nil and ffi.string(code) == newest.idcode
+end
+
 local function proxy_tick(now, dt)
 	local P, R = S.proxy, S.rem
 	local newest = R.snaps[#R.snaps]
@@ -770,8 +797,11 @@ local function proxy_tick(now, dt)
 		local wait = P.state == "failed" and 10 or 0
 		if now - P.since >= wait then
 			P.sector_macro, P.ship_macro = newest.sector_macro, newest.ship_macro
+			P.adopt_requested = adopt_wanted(newest)
+			P.blocked_by_me = P.adopt_requested and own_idcode() == newest.idcode
 			request("spawn", { newest.sector_macro, newest.ship_macro, newest.x, newest.y, newest.z,
-				newest.yaw, newest.pitch, newest.roll, newest.name or "Partner" })
+				newest.yaw, newest.pitch, newest.roll, newest.name or "Partner",
+				newest.idcode or "", P.adopt_requested and 1 or 0, config.fire_fx == 1 and 1 or 0 })
 			set_proxy_state("spawning", now)
 		end
 		return
@@ -793,6 +823,14 @@ local function proxy_tick(now, dt)
 	end
 	if newest.ship_macro ~= P.ship_macro then
 		despawn_proxy(now)  -- they changed ships; respawn next frame with the new hull
+		return
+	end
+	-- Retry adoption only when something changed: the worlds got linked after the proxy spawned, or
+	-- adoption was blocked because we were sitting in their ship and have since left it.
+	if adopt_wanted(newest) and not proxy_is_adopted()
+		and (not P.adopt_requested or (P.blocked_by_me and own_idcode() ~= newest.idcode)) then
+		log("retrying proxy as %s (their own ship)", newest.idcode)
+		despawn_proxy(now)
 		return
 	end
 	if newest.sector_macro ~= P.sector_macro then
@@ -826,13 +864,6 @@ end
 
 local WORLD_KEY = "$x4coop_world"
 local IDCODE_PATTERN = "^[%w%-]+$"
-
-local function own_ship_idcode()
-	local ship = C.GetPlayerOccupiedShipID()
-	if ship == 0 then return nil end
-	local code = C.GetObjectIDCode(ship)
-	return code ~= nil and ffi.string(code) or nil
-end
 
 -- The world id lives on the player's blackboard, so it is saved with the game and travels with the save.
 local function world_id()
@@ -872,7 +903,7 @@ local function update_link(now)
 		if state ~= "waiting for partner" or K.linked_before then notify("world: %s", state) end
 		K.linked_before = K.linked_before or K.linked
 	end
-	local mine = own_ship_idcode()
+	local mine = own_idcode()
 	local clash = K.linked and mine ~= nil and mine == K.partner_ship
 	if clash and not K.clash then
 		notify("you are both flying %s; the joiner should switch to another ship", mine)
@@ -884,7 +915,7 @@ send_link = function(now)
 	local K = S.link
 	update_link(now)
 	if K.role then
-		net_send(string.format("L|%s|%s|%s", world_id() or "-", K.role, own_ship_idcode() or "-"))
+		net_send(string.format("L|%s|%s|%s", world_id() or "-", K.role, own_idcode() or "-"))
 	end
 end
 
@@ -908,7 +939,9 @@ on_world_message = function(kind, f, now)
 			update_link(now)
 		end
 	elseif K.linked and valid_world_ref(f[2], f[3], f[4]) then
-		if kind == "K" then
+		if kind == "F" then
+			request("fire", { f[2], f[3], f[4] })
+		elseif kind == "K" then
 			request("world_kill", { f[2], f[3], f[4] })
 		else
 			local hull = tonumber(f[5])
@@ -922,9 +955,19 @@ end
 -- md reports the local player's kills ("K|idcode|macro|sector") and hits ("D|...|hull").
 local function on_world_event(_, param)
 	local K = S.link
-	if config.mode ~= "net" or not K.linked then return end
 	local f = split(tostring(param or ""))
 	if not valid_world_ref(f[2], f[3], f[4]) then return end
+	local now = getElapsedTime()
+	if f[1] == "D" and config.fire_fx == 1 and now - (K.last_fire or -1e9) >= 0.5 then
+		-- You are hitting f[2]: your proxy on the other side (or your ghost here) fires at it too.
+		K.last_fire = now
+		if config.mode == "ghost" then
+			request("fire", { f[2], f[3], f[4] })
+		elseif config.mode == "net" and K.linked then
+			net_send(table.concat({ "F", f[2], f[3], f[4] }, "|"))
+		end
+	end
+	if config.mode ~= "net" or not K.linked then return end
 	if f[1] == "K" then
 		net_send(table.concat({ "K", f[2], f[3], f[4] }, "|"))
 	elseif f[1] == "D" then
@@ -1035,8 +1078,9 @@ local function status_text()
 	local age = R.last_recv > 0 and string.format("%.1fs ago", getElapsedTime() - R.last_recv) or "never"
 	local link = config.mode == "net" and (N.status .. (N.rtt and string.format(", rtt %.0f ms", N.rtt * 1000) or "")
 		.. " | " .. (S.link.role or "?") .. ", world " .. (S.link.state or "unknown")) or "-"
-	return string.format("mode %s | backend %s (%s) | proxy %s | partner %s %s, last snapshot %s | link %s | rotation %s %s",
-		config.mode, config.backend, S.backend or "untested", P.state, R.name or "-", partner_whereabouts() or "", age, link,
+	return string.format("mode %s | backend %s (%s) | proxy %s%s | partner %s %s, last snapshot %s | link %s | rotation %s %s",
+		config.mode, config.backend, S.backend or "untested", P.state, proxy_is_adopted() and " (their own ship)" or "",
+		R.name or "-", partner_whereabouts() or "", age, link,
 		conv_name(S.conv), S.probe.measured and "measured" or "assumed")
 end
 

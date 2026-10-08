@@ -2,9 +2,9 @@
 """
 Offline checks for X4 Co-op. No game session needed; run after every change:
 
-    python extensions/x4_coop/dev/run_tests.py
+    python extensions/x4_coop/dev/run_tests.py [--quick]    (--quick skips the slow aiscripts schema)
 
-1. md/*.xml validated against the game's own md.xsd (pulled from the .cat archives; needs lxml)
+1. md/*.xml and aiscripts/*.xml validated against the game's own schemas (from the .cat archives; needs lxml)
 2. ui/x4_coop.lua flown through every sim.lua scenario inside X4's own LuaJIT (lua51_64.dll)
 3. the network bridge end to end: x4_coop_bridge.py + fake_peer.py + game_sim.py (stands in
    for the game's pipe client)
@@ -39,12 +39,16 @@ def test_md_schema(tmp):
         print("SKIP  md schema validation (pip install lxml to enable)")
         return
     cats = sorted(glob.glob(str(GAME / "[0-9][0-9].cat")))
-    catx.extract(tmp, r"^libraries/(md|common)\.xsd$", cats)
-    schema = etree.XMLSchema(etree.parse(str(Path(tmp) / "libraries" / "md.xsd")))
-    for path in sorted((MOD / "md").glob("*.xml")):
-        doc = etree.parse(str(path))
-        ok = schema.validate(doc)
-        check(f"md schema: {path.name}", ok, "; ".join(f"line {e.line}: {e.message}" for e in schema.error_log)[:500])
+    catx.extract(tmp, r"^libraries/(md|common|aiscripts)\.xsd$", cats)
+    folders = (("md", "md.xsd"),) if "--quick" in sys.argv else (("md", "md.xsd"), ("aiscripts", "aiscripts.xsd"))
+    for folder, xsd in folders:
+        paths = sorted((MOD / folder).glob("*.xml"))
+        if not paths:
+            continue
+        schema = etree.XMLSchema(etree.parse(str(Path(tmp) / "libraries" / xsd)))  # aiscripts.xsd takes a minute or two
+        for path in paths:
+            ok = schema.validate(etree.parse(str(path)))
+            check(f"{folder} schema: {path.name}", ok, "; ".join(f"line {e.line}: {e.message}" for e in schema.error_log)[:500])
 
 
 def test_lua(tmp):

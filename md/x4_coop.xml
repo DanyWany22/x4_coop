@@ -52,7 +52,12 @@
           </actions>
         </cue>
 
-        <!-- param3: [sector_macro, ship_macro, x, y, z, yaw, pitch, roll, label] (sector space, metres, radians) -->
+        <!--
+          param3: [sector_macro, ship_macro, x, y, z, yaw, pitch, roll, label, idcode, adopt, pilot]
+          (sector space, metres, radians). adopt=1 (shared world): if a player-owned ship with the partner's ID code
+          exists here and is free, it becomes the proxy instead of a spawned copy, so their ship isn't duplicated.
+          pilot=1: a spawned copy gets a drone pilot so it can run x4coop.proxy.fire.
+        -->
         <cue name="OnSpawn" instantiate="true">
           <conditions>
             <event_ui_triggered screen="'x4coop'" control="'spawn'"/>
@@ -71,28 +76,65 @@
                 <debug_text text="'x4coop: ship macro %s not available here, using fallback'.[$Args.{2}]" chance="$DebugChance"/>
                 <set_value name="$Macro" exact="Root.$FallbackMacro"/>
               </do_if>
-              <create_ship name="$Ship" macro="$Macro" sector="$Sector">
-                <owner exact="faction.player" overridenpc="true"/>
-                <pilot actor="null"/>
-                <loadout>
-                  <level exact="0.5"/>
-                </loadout>
-                <position x="$Args.{3}" y="$Args.{4}" z="$Args.{5}"/>
-                <rotation yaw="$Args.{6} * 57.29577951308232deg" pitch="$Args.{7} * 57.29577951308232deg" roll="$Args.{8} * 57.29577951308232deg"/>
-              </create_ship>
-              <do_if value="@$Ship.isoperational">
-                <append_to_list name="Root.$AllProxies" exact="$Ship"/>
+              <set_value name="$Ship" exact="null"/>
+              <do_if value="@$Args.{11} == 1 and @$Args.{10} != ''">
+                <find_ship name="$Candidates" space="player.galaxy" macro="$Macro" multiple="true"/>
+                <do_for_each name="$Candidate" in="$Candidates">
+                  <do_if value="not $Ship and $Candidate.idcode == $Args.{10} and $Candidate.isplayerowned and $Candidate != player.occupiedship">
+                    <set_value name="$Ship" exact="$Candidate"/>
+                  </do_if>
+                </do_for_each>
+              </do_if>
+              <do_if value="$Ship">
+                <!-- Adopt the partner's own ship: stop whatever it was doing and bring it to where they are. -->
+                <append_to_list name="Root.$Adopted" exact="$Ship"/>
                 <set_value name="Root.$Proxy" exact="$Ship"/>
-                <!-- The real ship lives in the partner's universe; this one must not die, be boarded or be repaired into something else. -->
+                <cancel_all_orders object="$Ship"/>
                 <set_object_min_hull object="$Ship" exact="100"/>
-                <set_object_capturable object="$Ship" capturable="false"/>
-                <set_object_name object="$Ship" name="'[Co-op] ' + $Args.{9}"/>
-                <debug_text text="'x4coop: spawned proxy %s (%s) in %s'.[$Ship, $Macro.id, $Sector.knownname]" chance="$DebugChance"/>
+                <warp object="$Ship" sector="$Sector">
+                  <position x="$Args.{3}" y="$Args.{4}" z="$Args.{5}"/>
+                  <rotation yaw="$Args.{6} * 57.29577951308232deg" pitch="$Args.{7} * 57.29577951308232deg" roll="$Args.{8} * 57.29577951308232deg"/>
+                </warp>
+                <debug_text text="'x4coop: adopted %s (%s) as the partner proxy in %s'.[$Ship.idcode, $Ship.knownname, $Sector.knownname]" chance="$DebugChance"/>
                 <raise_lua_event name="'x4coop.proxy_spawned'" param="$Ship"/>
               </do_if>
               <do_else>
-                <debug_text text="'x4coop: create_ship failed for %s in %s'.[$Macro, $Sector.knownname]" filter="error"/>
-                <raise_lua_event name="'x4coop.spawn_failed'" param="'create_ship failed'"/>
+                <do_if value="@$Args.{12} == 1">
+                  <create_ship name="$Ship" macro="$Macro" sector="$Sector">
+                    <owner exact="faction.player" overridenpc="true"/>
+                    <pilot><select race="race.drone" tags="tag.aipilot"/></pilot>
+                    <loadout>
+                      <level exact="0.5"/>
+                    </loadout>
+                    <position x="$Args.{3}" y="$Args.{4}" z="$Args.{5}"/>
+                    <rotation yaw="$Args.{6} * 57.29577951308232deg" pitch="$Args.{7} * 57.29577951308232deg" roll="$Args.{8} * 57.29577951308232deg"/>
+                  </create_ship>
+                </do_if>
+                <do_else>
+                  <create_ship name="$Ship" macro="$Macro" sector="$Sector">
+                    <owner exact="faction.player" overridenpc="true"/>
+                    <pilot actor="null"/>
+                    <loadout>
+                      <level exact="0.5"/>
+                    </loadout>
+                    <position x="$Args.{3}" y="$Args.{4}" z="$Args.{5}"/>
+                    <rotation yaw="$Args.{6} * 57.29577951308232deg" pitch="$Args.{7} * 57.29577951308232deg" roll="$Args.{8} * 57.29577951308232deg"/>
+                  </create_ship>
+                </do_else>
+                <do_if value="@$Ship.isoperational">
+                  <append_to_list name="Root.$AllProxies" exact="$Ship"/>
+                  <set_value name="Root.$Proxy" exact="$Ship"/>
+                  <!-- The real ship lives in the partner's universe; this one must not die, be boarded or be repaired into something else. -->
+                  <set_object_min_hull object="$Ship" exact="100"/>
+                  <set_object_capturable object="$Ship" capturable="false"/>
+                  <set_object_name object="$Ship" name="'[Co-op] ' + $Args.{9}"/>
+                  <debug_text text="'x4coop: spawned proxy %s (%s) in %s'.[$Ship, $Macro.id, $Sector.knownname]" chance="$DebugChance"/>
+                  <raise_lua_event name="'x4coop.proxy_spawned'" param="$Ship"/>
+                </do_if>
+                <do_else>
+                  <debug_text text="'x4coop: create_ship failed for %s in %s'.[$Macro, $Sector.knownname]" filter="error"/>
+                  <raise_lua_event name="'x4coop.spawn_failed'" param="'create_ship failed'"/>
+                </do_else>
               </do_else>
             </do_else>
           </actions>
@@ -245,7 +287,7 @@
           </conditions>
           <actions>
             <set_value name="$Obj" exact="event.param"/>
-            <do_if value="@$Obj.isclass.ship and @$Obj.sector and not Root.$AllProxies.indexof.{$Obj}">
+            <do_if value="@$Obj.isclass.ship and @$Obj.sector and not Root.$AllProxies.indexof.{$Obj} and not @Root.$Adopted.indexof.{$Obj}">
               <raise_lua_event name="'x4coop.world'" param="'K|' + $Obj.idcode + '|' + $Obj.macro.id + '|' + $Obj.sector.macro.id"/>
             </do_if>
           </actions>
@@ -257,7 +299,7 @@
           </conditions>
           <actions>
             <set_value name="$Obj" exact="event.param"/>
-            <do_if value="@$Obj.isclass.ship and @$Obj.isoperational and @$Obj.sector and not Root.$AllProxies.indexof.{$Obj}">
+            <do_if value="@$Obj.isclass.ship and @$Obj.isoperational and @$Obj.sector and not Root.$AllProxies.indexof.{$Obj} and not @Root.$Adopted.indexof.{$Obj}">
               <raise_lua_event name="'x4coop.world'" param="'D|%s|%s|%s|%s'.[$Obj.idcode, $Obj.macro.id, $Obj.sector.macro.id, $Obj.hullpercentage]"/>
             </do_if>
           </actions>
@@ -292,6 +334,24 @@
           </actions>
         </cue>
 
+        <!-- The partner is hitting a ship: their proxy fires at the same ship here. param3: [idcode, ship_macro, sector_macro] -->
+        <cue name="OnFire" instantiate="true">
+          <conditions>
+            <event_ui_triggered screen="'x4coop'" control="'fire'"/>
+            <check_value value="@Root.$Proxy.pilot.exists"/>
+          </conditions>
+          <actions>
+            <set_value name="$Args" exact="event.param3"/>
+            <include_actions ref="FindWorldShip"/>
+            <do_if value="$Target">
+              <start_script name="'x4coop.proxy.fire'" object="Root.$Proxy.pilot">
+                <param name="target" value="$Target"/>
+                <param name="duration" value="1.2s"/>
+              </start_script>
+            </do_if>
+          </actions>
+        </cue>
+
         <!-- In: $Args = [idcode, ship_macro, sector_macro, ...]. Out: $Target, the matching ship or null. Never the player's ship or a proxy. -->
         <library name="FindWorldShip">
           <actions>
@@ -301,7 +361,7 @@
             <do_if value="$Sector and $Macro">
               <find_ship name="$Candidates" space="$Sector" macro="$Macro" multiple="true"/>
               <do_for_each name="$Candidate" in="$Candidates">
-                <do_if value="not $Target and $Candidate.idcode == $Args.{1} and $Candidate != player.occupiedship and not Root.$AllProxies.indexof.{$Candidate}">
+                <do_if value="not $Target and $Candidate.idcode == $Args.{1} and $Candidate != player.occupiedship and not Root.$AllProxies.indexof.{$Candidate} and not @Root.$Adopted.indexof.{$Candidate}">
                   <set_value name="$Target" exact="$Candidate"/>
                 </do_if>
               </do_for_each>
@@ -311,6 +371,16 @@
 
         <library name="DestroyProxies">
           <actions>
+            <!-- Adopted ships are the partner's real ship in this world: hand them back, never destroy them. -->
+            <do_if value="not Root.$Adopted?">
+              <set_value name="Root.$Adopted" exact="[]"/>
+            </do_if>
+            <do_for_each name="$OldProxy" in="Root.$Adopted">
+              <do_if value="$OldProxy.exists">
+                <set_object_min_hull object="$OldProxy" exact="0"/>
+              </do_if>
+            </do_for_each>
+            <set_value name="Root.$Adopted" exact="[]"/>
             <do_for_each name="$OldProxy" in="Root.$AllProxies">
               <do_if value="$OldProxy.exists">
                 <destroy_object object="$OldProxy" explosion="false"/>

@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<aiscript name="x4coop.proxy.fire" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="aiscripts.xsd" version="1">
+  <!--
+    X4 Co-op: make a proxy (the partner's ship as seen here) fire at the ship the partner is hitting.
+    Lua keeps placing the proxy every frame; this script only pulls the trigger for a moment.
+    Started by md/x4_coop.xml (OnFire) on the proxy's pilot, again for as long as the hits keep coming.
+  -->
+  <params>
+    <param name="target" comment="Ship to shoot at"/>
+    <param name="duration" default="1.2s" comment="How long to keep firing"/>
+  </params>
+  <attention min="unknown">
+    <actions>
+      <do_if value="@$target.isoperational">
+        <shoot_at object="this.ship" target="$target" tolerance="30deg" fixedtarget="true"/>
+        <wait exact="$duration"/>
+        <stop_shooting object="this.ship"/>
+      </do_if>
+    </actions>
+  </attention>
+</aiscript>

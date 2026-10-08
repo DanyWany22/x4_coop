@@ -124,9 +124,19 @@ code). Each player's hits lower the hull of the same ship on the other side ("lo
 so both players' damage adds up). Both sides must be the same world: with different saves, or
 two hosts, nothing syncs and the mod tells you why.
 
-Not yet: the host's NPC positions don't drive the joiner's copies (the same pirate can be in
-slightly different places in each world), your partner's guns don't visibly fire, and the
-joiner's own ship also sits in the host's world as a parked duplicate.
+Your partner's proxy **is their own ship**: in a shared world their ship exists on your side
+too (same ID code), so the mod takes it over, stops its orders and moves it, instead of spawning
+a duplicate. When co-op stops, the ship is left where your partner last was. If you're sitting
+in their ship (the joiner right after loading), a copy is used until you leave it.
+
+**Their guns fire:** when your partner hits a ship, their proxy fires at the same ship in your
+world (AI script `x4coop.proxy.fire`, real damage). In ghost mode your ghost fires at whatever
+you hit, so you can try it alone. Spawned proxies get a drone pilot for this; if that makes
+movement worse, `/x4coop set fire_fx 0` turns it off (then reload or `/x4coop off` and back on).
+Only hits are mirrored for now, not misses.
+
+Not yet: the host's NPC positions don't drive the joiner's copies, so the same pirate can be in
+slightly different places in each world.
 
 ## Two games on one PC
 
@@ -178,9 +188,8 @@ Paste the `[x4coop]` and `x4coop:` log lines back into the conversation that's d
 * Separate saves share only movement and chat. Kills and damage need the shared world (see above).
 * The proxy is player-owned so it shows as friendly, which also means it appears in your
   property list. A dedicated faction would be cleaner.
-* Your partner's guns don't visibly fire yet (planned: `event_player_attacked_object` on their
-  side, the AI action `shoot_at` on the proxy here). NPC positions near the players aren't
-  host-driven yet.
+* Partner firing only mirrors hits (not misses), and needs the target ship to exist in your
+  world. NPC positions near the players aren't host-driven yet.
 * No docking, highway or travel-drive visuals yet. SETA (time acceleration)
   is not synchronised.
 * One partner at a time. With `--password`, packets are authenticated but not encrypted, so
@@ -214,7 +223,8 @@ while manoeuvring. The MD fallback is within ~6 m and ~9°.
 | path | purpose |
 |---|---|
 | `content.xml`, `ui.xml` | extension manifest, Lua registration |
-| `md/x4_coop.xml` | proxy spawn/despawn/warp, MD movement backend, rotation probe, notifications |
+| `md/x4_coop.xml` | proxy spawn/adopt/despawn/warp, MD movement backend, rotation probe, kill/damage/fire sync, notifications |
+| `aiscripts/x4coop.proxy.fire.xml` | makes a proxy fire at a ship for a moment |
 | `ui/x4_coop.lua` | sampling, wire format, buffer/prediction, proxy driver, ghost, pipe client, chat commands |
 | `bridge/x4_coop_bridge.py` | named pipe ⇄ UDP bridge (stdlib only) |
 | `bridge/fake_peer.py` | fake partner for single-PC network tests |
