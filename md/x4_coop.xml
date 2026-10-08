@@ -1075,6 +1075,59 @@
           </actions>
         </cue>
 
+        <!--
+          Ownership (shared faction): a ship that becomes, or stops being, the player's in one world does in the other
+          too: claims, boarding, captures. Reported: appended to player.entity.$x4coop_owners as [idcode, ship macro,
+          sector macro, new owner id], then 'x4coop.owner'. OnOwner (param3: the same) applies the partner's; the
+          report that causes here is skipped. 'owners' (param3: [1 or 0]) turns reporting on.
+        -->
+        <cue name="OnOwnersConfig" instantiate="true">
+          <conditions>
+            <event_ui_triggered screen="'x4coop'" control="'owners'"/>
+          </conditions>
+          <actions>
+            <set_value name="Root.$OwnersOn" exact="event.param3.{1}"/>
+          </actions>
+        </cue>
+
+        <cue name="OnOwnerChanged" instantiate="true">
+          <conditions>
+            <event_contained_object_changed_owner space="player.galaxy"/>
+            <check_value value="@Root.$OwnersOn == 1 and @event.param.isclass.ship and (event.param2 == faction.player or event.param3 == faction.player)"/>
+          </conditions>
+          <actions>
+            <set_value name="$Ship" exact="event.param"/>
+            <do_if value="@Root.$PartnerOwners.indexof.{$Ship}">
+              <remove_from_list name="Root.$PartnerOwners" exact="$Ship"/>
+            </do_if>
+            <do_elseif value="@$Ship.sector and event.param2 and not Root.$AllProxies.indexof.{$Ship} and not @Root.$Adopted.indexof.{$Ship} and not @Root.$Mirrors.indexof.{$Ship}">
+              <do_if value="not player.entity.$x4coop_owners?">
+                <set_value name="player.entity.$x4coop_owners" exact="[]"/>
+              </do_if>
+              <append_to_list name="player.entity.$x4coop_owners" exact="[$Ship.idcode, $Ship.macro.id, $Ship.sector.macro.id, event.param2.id]"/>
+              <raise_lua_event name="'x4coop.owner'"/>
+            </do_elseif>
+          </actions>
+        </cue>
+
+        <cue name="OnOwner" instantiate="true">
+          <conditions>
+            <event_ui_triggered screen="'x4coop'" control="'owner'"/>
+          </conditions>
+          <actions>
+            <set_value name="$Args" exact="event.param3"/>
+            <include_actions ref="FindWorldShip"/>
+            <set_value name="$Faction" exact="@faction.{$Args.{4}}"/>
+            <do_if value="$Target and $Faction and $Target.owner != $Faction">
+              <do_if value="not Root.$PartnerOwners?">
+                <set_value name="Root.$PartnerOwners" exact="[]"/>
+              </do_if>
+              <append_to_list name="Root.$PartnerOwners" exact="$Target"/>
+              <set_owner object="$Target" faction="$Faction" overridenpc="true"/>
+            </do_if>
+          </actions>
+        </cue>
+
         <cue name="OnNpcClear" instantiate="true">
           <conditions>
             <event_ui_triggered screen="'x4coop'" control="'npc_clear'"/>

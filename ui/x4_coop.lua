@@ -100,6 +100,7 @@ local config = {
 	relation_period = 10,     -- s between the host's relation reports
 	unlocks = 1,              -- shared world: research, blueprints and licences either player gains are both players'
 	timewarp_sync = 1,        -- SETA: both games run at the same speed
+	owners = 1,               -- shared world: ships claimed, boarded or captured change owner in both worlds
 	ghost_latency = 0.12,     -- s, simulated one-way latency in ghost mode
 	ghost_jitter = 0.03,      -- s, extra random delay per snapshot
 	ghost_loss = 0.0,         -- 0..1, fraction of snapshots dropped
@@ -344,6 +345,8 @@ local function reset()
 		rel = { joiner_on = false, next_read = 0, pending = {}, applied = {}, named = {}, seq = 0, host = nil, counted = 0 },
 		unlocks = { on = false, pending = {}, seen = {}, seq = 0, sent = 0, received = 0 },
 		warp = { on = false, active = false, factor = 1, want = nil, want_at = 0 },
+		reliable = { out = {}, seen = {}, seq = 0 },
+		owners_on = false,
 		net = { api = nil, status = "idle", reading = false, connected = false, retry_at = 0, last_ping = -1e9, rtt = nil,
 			partner = kept_partner },
 	}
@@ -701,6 +704,7 @@ local trades_receive    -- the joiner's own trades with stations (T), defined wi
 local relations_receive -- faction relations (V), defined with the credits
 local unlocks_receive   -- research, blueprints, licences (U), defined with the credits
 local warp_receive      -- the partner's SETA (Z), defined with the credits
+local owners_receive    -- ownership changes (O), defined with the credits
 local send_link
 
 local function net_send(msg)
@@ -790,6 +794,8 @@ on_pipe_message = function(msg)
 		if config.mode == "net" then unlocks_receive(f, now) end
 	elseif kind == "Z" then
 		if config.mode == "net" then warp_receive(f, now) end
+	elseif kind == "O" then
+		if config.mode == "net" then owners_receive(f, now) end
 	elseif kind == "M" then
 		local text = clean_text(f[3], 200)
 		if text ~= "" then
@@ -2233,6 +2239,90 @@ local function warp_tick(now)
 end
 
 -------------------------------------------------------------------------------
+-- Reliable one-off messages: "<kind>|msg|id|fields..." is sent every TRADE_RETRY seconds until the partner
+-- answers "<kind>|ack|id"; the receiver handles each id once. Used for ownership (O) and new ships (N).
+
+local function reliable_send(kind, fields)
+	local Q = S.reliable
+	Q.seq = Q.seq + 1
+	local now = getElapsedTime()
+	local id = string.format("%06x%04x", math.floor(now * 1000) % 0x1000000, Q.seq % 0x10000)
+	Q.out[id] = { msg = kind .. "|msg|" .. id .. "|" .. table.concat(fields, "|"), first = now, last = -1e9 }
+end
+
+-- f: the split message. handler(f, now) is called once per id, with the fields from f[4] on.
+local function reliable_receive(kind, f, now, handler)
+	local Q = S.reliable
+	local id = f[3]
+	if not (id and #id <= 16 and id:match("^%x+$")) then return end
+	if f[2] == "msg" then
+		local key = kind .. id
+		if not Q.seen[key] then
+			Q.seen[key] = now
+			handler(f, now)
+		end
+		net_send(kind .. "|ack|" .. id)
+	elseif f[2] == "ack" then
+		for oid in pairs(Q.out) do
+			if oid == id and Q.out[oid].msg:sub(1, 1) == kind then Q.out[oid] = nil end
+		end
+	end
+end
+
+local function reliable_tick(now)
+	local Q = S.reliable
+	for id, m in pairs(Q.out) do
+		if now - m.first > TRADE_KEEP then
+			Q.out[id] = nil
+		elseif now - m.last >= TRADE_RETRY and S.net.connected then
+			m.last = now
+			net_send(m.msg)
+		end
+	end
+	for key, at in pairs(Q.seen) do
+		if now - at > TRADE_KEEP then Q.seen[key] = nil end
+	end
+end
+
+-------------------------------------------------------------------------------
+-- Ownership (shared faction): a ship that becomes, or stops being, the player's in one world does in the other
+-- too (md OnOwnerChanged reports; OnOwner applies: claims, boarding, captures).
+
+local function owners_enabled()
+	return config.mode == "net" and S.link.linked and config.owners == 1
+end
+
+local function on_owner()
+	local list = S.player and GetNPCBlackboard(S.player, "$x4coop_owners")
+	if S.player then SetNPCBlackboard(S.player, "$x4coop_owners", nil) end
+	if type(list) ~= "table" or not owners_enabled() then return end
+	for _, v in ipairs(list) do
+		if type(v) == "table" and valid_world_ref(v[1], v[2], v[3]) and type(v[4]) == "string" and v[4]:match("^[%w_]+$") then
+			reliable_send("O", { v[1], v[2], v[3], v[4] })
+			notify("ship %s is now %s's: telling your partner", v[1], v[4])
+		end
+	end
+end
+
+owners_receive = function(f, now)
+	if not owners_enabled() then return end
+	reliable_receive("O", f, now, function(m)
+		if valid_world_ref(m[4], m[5], m[6]) and m[7] and m[7]:match("^[%w_]+$") then
+			request("owner", { m[4], m[5], m[6], m[7] })
+			notify("from your partner: ship %s is now %s's", m[4], m[7])
+		end
+	end)
+end
+
+local function owners_tick()
+	local on = owners_enabled()
+	if on ~= S.owners_on then
+		S.owners_on = on
+		request("owners", { on and 1 or 0 })
+	end
+end
+
+-------------------------------------------------------------------------------
 -- Chat commands
 
 -- The first thing standing in the way of co-op, with what to do about it; "all good" when nothing does.
@@ -2495,6 +2585,8 @@ local function tick(now, dt)
 	relations_tick(now)
 	unlocks_tick(now)
 	warp_tick(now)
+	reliable_tick(now)
+	owners_tick()
 end
 
 local function on_update()
@@ -2528,6 +2620,7 @@ local function init()
 	RegisterEvent("x4coop.relation_applied", on_relation_applied)
 	RegisterEvent("x4coop.unlock", on_unlock)
 	RegisterEvent("x4coop.timewarp", on_timewarp)
+	RegisterEvent("x4coop.owner", on_owner)
 	RegisterEvent("x4coop.empire_trade", on_empire_trade)
 	RegisterEvent("x4coop.npc_mirror", on_npc_mirror)
 

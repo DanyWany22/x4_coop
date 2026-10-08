@@ -43,6 +43,8 @@ local SC = {
 	                 role = "join", own_world = "abc123", partner_world = "abc123", unlock_test = true },
 	timewarp     = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
 	                 role = "join", own_world = "abc123", partner_world = "abc123", warp_test = true },
+	owners       = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
+	                 role = "join", own_world = "abc123", partner_world = "abc123", owner_test = true },
 	credits      = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
 	                 role = "join", own_world = "abc123", partner_world = "abc123", credits_test = true },
 	npc_apart_join = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
@@ -279,6 +281,7 @@ our_relations = sc.rel_test == "join" and { argon = 0.1, teladi = -0.2, xenon = 
 rel_actions, rel_reads, rel_changes_seen, rel_named = {}, 0, {}, {}
 unlock_requests, unlock_switch, unlock_sends = {}, {}, {}
 sim_warp, warp_requests = { active = false, factor = 1, blocked = false }, {}
+owner_requests, owner_switch = {}, {}
 function GetPlayerMoney() return player_money end
 function SetNPCBlackboard(_, key, v) blackboard[key] = v end
 function ExecuteDebugCommand(cmd, param) say("  ego command /%s %s", cmd, tostring(param)) end
@@ -390,6 +393,10 @@ function AddUITriggeredEvent(screen, control, args)
 			rel_actions[#rel_actions + 1] = string.format("add:%s%+.4f", id, change)
 		end
 		queue("x4coop.relation_applied", tag)
+	elseif control == "owners" then
+		owner_switch[#owner_switch + 1] = tostring(args[1])
+	elseif control == "owner" then
+		owner_requests[#owner_requests + 1] = table.concat(args, ":")
 	elseif control == "timewarp_sync" then
 		warp_report(1)
 	elseif control == "timewarp" then
@@ -501,6 +508,8 @@ if sc.pipes then
 					partner_queue[#partner_queue + 1] = { at = clock + 2 * ONE_WAY, msg = reply }
 				elseif f[1] == "M" then
 					partner_queue[#partner_queue + 1] = { at = clock + 2 * ONE_WAY, msg = "M|Echo|you said: " .. tostring(f[3]) }
+				elseif f[1] == "O" and f[2] == "msg" then
+					partner_queue[#partner_queue + 1] = { at = clock + 2 * ONE_WAY, msg = "O|ack|" .. f[3] }
 				elseif f[1] == "U" and f[2] == "add" then
 					unlock_sends[#unlock_sends + 1] = f[3] .. ":" .. f[4] .. ":" .. f[5]
 					partner_queue[#partner_queue + 1] = { at = clock + 2 * ONE_WAY, msg = "U|ack|" .. f[3] }
@@ -685,6 +694,19 @@ local function warp_script()
 	while warp_steps[1] and clock >= warp_steps[1][1] do table.remove(warp_steps, 1)[2]() end
 end
 
+local owner_steps = {
+	{ 10, function()  -- we claim an abandoned ship here
+		blackboard["$x4coop_owners"] = { { "ABC-123", SHIP_MACRO, SECTORS[500], "player" } }
+		queue("x4coop.owner")
+	end },
+	{ 11, function() pipe_reader("O|msg|00ee|NPC-1|" .. SHIP_MACRO .. "|" .. SECTORS[500] .. "|player") end },
+	{ 13, function() pipe_reader("O|msg|00ee|NPC-1|" .. SHIP_MACRO .. "|" .. SECTORS[500] .. "|player") end },  -- again: once
+}
+local function owner_script()
+	if not sc.owner_test or not pipe_reader then return end
+	while owner_steps[1] and clock >= owner_steps[1][1] do table.remove(owner_steps, 1)[2]() end
+end
+
 local function credit_script()
 	if not sc.credits_test or not pipe_reader then return end
 	while credit_steps[1] and clock >= credit_steps[1][1] do
@@ -810,6 +832,7 @@ while clock < sc.duration do
 	relations_script()
 	unlock_script()
 	warp_script()
+	owner_script()
 	if sc.partner_restart_at and clock >= sc.partner_restart_at and partner_clock_offset == 1000 then
 		partner_clock_offset = -500
 		say("t=%.1f partner restarted their game (clock jumped back)", clock)
@@ -1276,6 +1299,17 @@ if sc.warp_test then
 		and said:find("can't follow here", 1, true) ~= nil
 		and said:find("your partner can't use SETA right now", 1, true) ~= nil
 		and sim_warp.active == false                                  -- off again after the partner refused
+end
+if sc.owner_test then
+	local ours, acks = 0, 0
+	for _, w in ipairs(pipe_writes) do
+		if w:match("^O|msg|%x+|ABC%-123|") then ours = ours + 1 end
+		if w == "O|ack|00ee" then acks = acks + 1 end
+	end
+	say("owners: our claim sent %d time(s); md owner changes: %s; acks for the partner's: %d", ours,
+		table.concat(owner_requests, ", "), acks)
+	ok = ok and ours == 1 and table.concat(owner_requests, ", ") == "NPC-1:" .. SHIP_MACRO .. ":" .. SECTORS[500] .. ":player"
+		and acks == 2 and owner_switch[1] == "1"
 end
 if sc.credits_test then
 	local acks = 0

@@ -223,6 +223,9 @@ the joiner causes are sent to the host and counted there:
 
 `/x4coop set relations 0` turns it off.
 
+**Ships changing owner:** a ship that one of you claims, boards or captures becomes the player's in the
+other world too (and one the player loses is lost in both). `/x4coop set owners 0` turns it off.
+
 **Research, blueprints and licences:** whatever either of you unlocks, the other gets too. Each game
 shows the ones that arrive from the partner. `/x4coop set unlocks 0` turns it off.
 
@@ -340,7 +343,8 @@ change a value that already exists; it can't create anything.
 | research, blueprints, licences | `add_research`, `add_blueprints`, `add_licence` | yes |
 | time acceleration (SETA) | `set_timewarp_factor`, `toggle_timewarp` | yes |
 | inventory items | `add_inventory` | not yet |
-| ownership, orders, missions | `set_owner`, `create_order`, `create_mission` | not yet |
+| ownership (claims, boarding, captures) | `set_owner` | yes |
+| orders, missions | `create_order`, `create_mission` | not yet |
 
 All of these, except `SetObjectSectorPos` and `shoot_at`, are Mission Director commands from the
 game's own schema (`libraries/md.xsd`, `libraries/common.xsd`).
@@ -399,7 +403,7 @@ game's own schema (`libraries/md.xsd`, `libraries/common.xsd`).
 
 Messages (one text line each): `S` snapshot (position, rotation, velocity, ship, hull, shield),
 `P`/`Q` ping, `M` chat, `L` world link, `K` kill, `D` hit, `F` firing at, `B` nearby ships (both
-ways), `E` station stock (host to joiner), `T` a joiner's trade, `V` relations, `U` research/blueprints/licences, `Z` SETA, `C` credits given; `R`/`W`/`N`/`X` are between a game and
+ways), `E` station stock (host to joiner), `T` a joiner's trade, `V` relations, `U` research/blueprints/licences, `Z` SETA, `O` ownership, `C` credits given; `R`/`W`/`N`/`X` are between a game and
 its own bridge.
 
 Self-calibration: on first contact the proxy is nudged and read back (does `SetObjectSectorPos`
@@ -436,7 +440,8 @@ python extensions/x4_coop/dev/run_tests.py [--quick]
   deaths near either player reported from any sector (only by the game that rules that area),
   relations both ways (the host's followed; a joiner's change counted once and never undone in flight),
   research, blueprints and licences both ways (sent until confirmed, added once), SETA both ways
-  (followed; turned off for both when one side can't follow),
+  (followed; turned off for both when one side can't follow), ownership changes both ways (sent
+  until confirmed, applied once),
   hostile messages, guest ship, save handoff commands. Errors are measured against ground truth:
   the partner within ~2–3 m and ~2° (95th percentile) at 220–300 m/s; NPC copies within ~3.5 m.
 * Bridge: password codec (encryption, replay, tamper, stale, other versions), reconnects, chat, wrong password, partner
