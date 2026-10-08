@@ -6,10 +6,12 @@ Run a Lua file inside X4's own LuaJIT (lua51_64.dll in the game folder), with st
 Used by run_tests.py to fly ui/x4_coop.lua through sim.lua without starting the game.
 """
 import ctypes
+import os
 import sys
 from pathlib import Path
 
-GAME_DIR = Path(__file__).resolve().parents[3]
+# The game folder: X4_GAME_DIR if set (for checkouts outside the game), else three levels up.
+GAME_DIR = Path(os.environ.get("X4_GAME_DIR") or Path(__file__).resolve().parents[3])
 LUA_GLOBALSINDEX = -10002
 _lua = None
 

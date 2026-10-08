@@ -14,7 +14,9 @@ Per frame this file:
      commands to md/x4_coop.xml ("md" backend). "auto" self-tests "lua" and falls back.
 
 Chat window commands (type them in the chat window, they never leave your PC):
-  /x4coop status            print mode, link and proxy state
+  /x4coop status            print mode, link, proxy state and where your partner is
+  /x4coop join              warp your ship beside your partner (pilot seat, undocked)
+  /x4coop say <text>        send a chat line to your partner
   /x4coop ghost | net | off switch mode (remembered in the savegame)
   /x4coop backend lua|md|auto
   /x4coop probe             re-run the rotation-convention probe
@@ -23,6 +25,7 @@ Chat window commands (type them in the chat window, they never leave your PC):
 Wire format (one message per pipe write, '|' separated, also used by the Python tools):
   S|seq|t|sector_macro|ship_macro|x|y|z|yaw|pitch|roll|vx|vy|vz|name   snapshot (sender clock t in s)
   P|t / Q|t                                                            ping / pong (RTT)
+  M|name|text                                                          chat line
   W|text, N|text                                                       bridge welcome / notice
 ]]
 
@@ -65,9 +68,9 @@ local config = {
 	ghost_latency = 0.12,     -- s, simulated one-way latency in ghost mode
 	ghost_jitter = 0.03,      -- s, extra random delay per snapshot
 	ghost_loss = 0.0,         -- 0..1, fraction of snapshots dropped
-	ghost_right = 100,        -- m, ghost offset in your ship's frame (raise it for L/XL ships)
-	ghost_up = 0,
-	ghost_forward = 0,
+	ghost_right = 60,         -- m, ghost offset in your ship's frame: ahead and to the right, so it is
+	ghost_up = 0,             --    in view from the cockpit (raise these for L/XL ships)
+	ghost_forward = 120,
 	pipe = "x4_coop",
 }
 
@@ -350,10 +353,16 @@ end
 -------------------------------------------------------------------------------
 -- Wire format
 
+-- Text that is safe to put in a message field and to show: no separators or control characters.
+local function clean_text(text, max_len)
+	text = tostring(text or ""):gsub("[|%c]", " "):gsub("%s+", " "):gsub("^ ", ""):gsub(" $", "")
+	return text:sub(1, max_len)
+end
+
 local function encode_snapshot(s)
 	return string.format("S|%d|%.4f|%s|%s|%.2f|%.2f|%.2f|%.5f|%.5f|%.5f|%.2f|%.2f|%.2f|%s",
 		s.seq, s.t, s.sector_macro, s.ship_macro, s.x, s.y, s.z, s.yaw, s.pitch, s.roll, s.vx, s.vy, s.vz,
-		(tostring(s.name):gsub("|", "/")))
+		clean_text(s.name, 32))
 end
 
 local function split(msg)
@@ -364,15 +373,24 @@ local function split(msg)
 	return f
 end
 
+-- Snapshots come from another machine: accept only sane values, since they end up in md lookups and ship placement.
+local SNAPSHOT_LIMITS = { x = 1e7, y = 1e7, z = 1e7, yaw = 10, pitch = 10, roll = 10, vx = 1e5, vy = 1e5, vz = 1e5 }
+
 local function decode_snapshot(f)
 	if #f < 15 then return nil end
-	local s = { seq = tonumber(f[2]), t = tonumber(f[3]), sector_macro = f[4], ship_macro = f[5], name = f[15] }
+	local s = { seq = tonumber(f[2]), t = tonumber(f[3]), sector_macro = f[4], ship_macro = f[5] }
+	for _, macro in ipairs({ s.sector_macro, s.ship_macro }) do
+		if #macro > 80 or not macro:match("^[%w_]+$") then return nil end
+	end
+	if not s.t or s.t ~= s.t or math.abs(s.t) > 1e9 then return nil end
 	local keys = { "x", "y", "z", "yaw", "pitch", "roll", "vx", "vy", "vz" }
 	for i, k in ipairs(keys) do
-		s[k] = tonumber(f[5 + i])
-		if not s[k] then return nil end
+		local v = tonumber(f[5 + i])
+		if not v or v ~= v or math.abs(v) > SNAPSHOT_LIMITS[k] then return nil end
+		s[k] = v
 	end
-	if not s.t or s.sector_macro == "" then return nil end
+	s.name = clean_text(f[15], 32)
+	if s.name == "" then s.name = "Partner" end
 	return s
 end
 
@@ -409,6 +427,7 @@ local function on_snapshot(s, now)
 		R.lag = R.lag + (lag - R.lag) * 0.01
 	end
 	R.last_recv, R.name = now, s.name
+	R.count = (R.count or 0) + 1
 end
 
 local function latency_estimate()
@@ -550,7 +569,7 @@ on_pipe_message = function(msg)
 			notify("bridge disconnected")
 		end
 		N.reading, N.connected, N.retry_at = false, false, now + 3
-		N.status = "bridge not running (start X4_Python_Pipe_Server)"
+		N.status = "bridge not running (start bridge/x4_coop_bridge.py)"
 		return
 	end
 	if not N.connected then
@@ -565,15 +584,22 @@ on_pipe_message = function(msg)
 			on_snapshot(s, now)
 		end
 	elseif kind == "P" then
-		net_send("Q|" .. tostring(f[2]))
+		if tonumber(f[2]) then
+			net_send("Q|" .. f[2])
+		end
 	elseif kind == "Q" then
 		local t = tonumber(f[2])
-		if t then
+		if t and now - t >= 0 and now - t < 10 then
 			local rtt = now - t
 			N.rtt = N.rtt and (N.rtt * 0.8 + rtt * 0.2) or rtt
 		end
+	elseif kind == "M" then
+		local text = clean_text(f[3], 200)
+		if text ~= "" then
+			notify("%s: %s", clean_text(f[2], 32), text)
+		end
 	elseif kind == "N" or kind == "W" then
-		notify("%s", tostring(f[2]))
+		notify("%s", clean_text(f[2], 200))
 	end
 end
 
@@ -652,7 +678,40 @@ local function drive_lua(now, dt, target)
 		D.q = slerp(D.q, target.q, k)
 	end
 	P.shown = D
+	if P.last_cmd then
+		local cur = C.GetObjectPositionInSector(P.id)
+		local dev = math.sqrt((cur.x - P.last_cmd[1]) ^ 2 + (cur.y - P.last_cmd[2]) ^ 2 + (cur.z - P.last_cmd[3]) ^ 2)
+		P.max_dev = math.max(P.max_dev or 0, dev)
+	end
 	C.SetObjectSectorPos(P.id, P.sector, make_posrot(D.x, D.y, D.z, D.q))
+	P.last_cmd = { D.x, D.y, D.z }
+end
+
+-- "in <sector>, 1.2 km away" for the partner's proxy, or nil while there is none.
+local function partner_whereabouts()
+	local P = S.proxy
+	if P.state ~= "live" or P.sector == 0 then return nil end
+	local text = "in " .. tostring(GetComponentData(to64(P.sector), "name") or P.sector_macro)
+	local ship = C.GetPlayerOccupiedShipID()
+	if ship ~= 0 and C.GetContextByClass(ship, "sector", false) == P.sector then
+		local a, b = C.GetObjectPositionInSector(ship), C.GetObjectPositionInSector(P.id)
+		local d = math.sqrt((a.x - b.x) ^ 2 + (a.y - b.y) ^ 2 + (a.z - b.z) ^ 2)
+		text = text .. (d < 1000 and string.format(", %.0f m away", d) or string.format(", %.1f km away", d / 1000))
+	end
+	return text
+end
+
+-- Every 15 s while the proxy is live, one log line with what is needed to debug "I can't see it".
+local function health_report(now, backend)
+	local P, R = S.proxy, S.rem
+	if now < (P.report_at or 0) then return end
+	local span = now - (P.report_from or now)
+	if span > 0 then
+		log("health: proxy %s via %s backend, partner %s | %.1f snapshots/s | engine kept it within %s of where it was put",
+			P.state, backend, partner_whereabouts() or "?", ((R.count or 0) - (P.report_count or 0)) / span,
+			P.max_dev and string.format("%.1f m", P.max_dev) or "n/a")
+	end
+	P.report_at, P.report_from, P.report_count, P.max_dev = now + 15, now, R.count or 0, nil
 end
 
 local function drive_md(now, target)
@@ -733,6 +792,7 @@ local function proxy_tick(now, dt)
 	else
 		drive_md(now, target)
 	end
+	health_report(now, backend)
 end
 
 -------------------------------------------------------------------------------
@@ -753,15 +813,17 @@ local function on_proxy_spawned(_, ship)
 	local P = S.proxy
 	P.id = to64(ship)
 	P.sector = C.GetContextByClass(P.id, "sector", false)
-	P.shown, P.test = nil, nil
+	P.shown, P.test, P.last_cmd, P.report_at = nil, nil, nil, nil
 	set_proxy_state("live", getElapsedTime())
 	log("proxy live")
+	notify("%s is %s", S.rem.name or "partner", partner_whereabouts() or "here")
 end
 
 local function on_warped(_, ship)
 	local P = S.proxy
-	P.sector, P.shown = C.GetContextByClass(P.id, "sector", false), nil
+	P.sector, P.shown, P.last_cmd = C.GetContextByClass(P.id, "sector", false), nil, nil
 	set_proxy_state("live", getElapsedTime())
+	notify("%s moved %s", S.rem.name or "partner", partner_whereabouts() or "")
 end
 
 local function on_spawn_failed(_, reason)
@@ -787,6 +849,11 @@ local function on_probe_result()
 		P.done = P.skipped >= 10
 		return
 	end
+	-- Only new attitudes tell conventions apart; sitting still would just repeat one sample.
+	local q_new = quat_from_euler(p[1], p[2], p[3])
+	for _, old in ipairs(P.samples) do
+		if quat_angle(quat_from_euler(old[1], old[2], old[3]), q_new) < 0.15 then return end
+	end
 	P.samples[#P.samples + 1] = p
 	local conv, err, runner_up = calibrate(P.samples)
 	if err > 0.05 then
@@ -808,8 +875,11 @@ local function on_probe_result()
 			conv_name(conv), err, runner_up, #P.samples)
 	elseif #P.samples >= 40 then
 		P.done = true
-		log("probe: still ambiguous after %d samples (best %s); keeping %s. Pitch and roll a little, then /x4coop probe",
-			#P.samples, conv_name(conv), conv_name(S.conv))
+		log("probe: still ambiguous after %d different attitudes (best %s); keeping %s. raw: %s",
+			#P.samples, conv_name(conv), conv_name(S.conv), table.concat(p, ", "))
+	elseif #P.samples % 5 == 0 then
+		log("probe: %d attitudes so far, best %s (error %.3f, next best %.3f); keep pitching and rolling",
+			#P.samples, conv_name(conv), err, runner_up)
 	end
 end
 
@@ -820,9 +890,25 @@ local function status_text()
 	local P, R, N = S.proxy, S.rem, S.net
 	local age = R.last_recv > 0 and string.format("%.1fs ago", getElapsedTime() - R.last_recv) or "never"
 	local link = config.mode == "net" and (N.status .. (N.rtt and string.format(", rtt %.0f ms", N.rtt * 1000) or "")) or "-"
-	return string.format("mode %s | backend %s (%s) | proxy %s | partner %s, last snapshot %s | link %s | rotation %s %s | you: %s",
-		config.mode, config.backend, S.backend or "untested", P.state, R.name or "-", age, link, conv_name(S.conv),
-		S.probe.measured and "measured" or "assumed", S.loc.sector_macro or "not in a ship")
+	return string.format("mode %s | backend %s (%s) | proxy %s | partner %s %s, last snapshot %s | link %s | rotation %s %s",
+		config.mode, config.backend, S.backend or "untested", P.state, R.name or "-", partner_whereabouts() or "", age, link,
+		conv_name(S.conv), S.probe.measured and "measured" or "assumed")
+end
+
+local USAGE = "usage: /x4coop status | join | say <text> | ghost | net | off | backend lua|md|auto | probe | set <key> <number>"
+
+local function say(text)
+	text = clean_text(text, 200)
+	if text == "" then
+		notify("usage: /x4coop say <text>")
+	elseif config.mode == "ghost" then
+		notify("Ghost: %s", text)  -- the ghost repeats you, so this tests the display path
+	elseif config.mode == "net" and S.net.connected then
+		net_send("M|" .. clean_text(S.loc.name, 32) .. "|" .. text)
+		notify("you: %s", text)
+	else
+		notify("not connected to the bridge; message not sent")
+	end
 end
 
 local function command(param)
@@ -848,8 +934,12 @@ local function command(param)
 		notify("%s = %s", args[2], args[3])
 	elseif cmd == "status" then
 		notify("%s", status_text())
+	elseif cmd == "join" then
+		request("join", {})
+	elseif cmd == "say" then
+		say(tostring(param):match("^%s*say%s+(.*)$"))
 	else
-		notify("usage: /x4coop status | ghost | net | off | backend lua|md|auto | probe | set <key> <number>")
+		notify("%s", USAGE)
 	end
 end
 
@@ -862,10 +952,19 @@ local function tick(now, dt)
 		if S.player then reset() end
 		return
 	end
+	-- A new game swaps the player character during setup, so follow the id and only touch the
+	-- player's blackboard once md reports the game is up.
+	local player64 = to64(player)
+	if S.player and S.player ~= player64 then
+		reset()
+	end
 	if not S.player then
-		S.player = to64(player)
+		S.player = player64
 		local name = C.GetPlayerName()
 		S.loc.name = name ~= nil and ffi.string(name) or "Pilot"
+	end
+	if S.md_ready and not S.settings_loaded then
+		S.settings_loaded = true
 		load_settings()
 	end
 	if not S.md_ready then

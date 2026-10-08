@@ -13,7 +13,8 @@
 
   Safeguards: every proxy we create is tracked in Root.$AllProxies and destroyed on game start/load,
   when Lua (re)starts, and before every new spawn, so a proxy cannot outlive the session that owns it.
-  Units: Lua sends plain numbers, which MD reads as metres, radians and metres per second.
+  Units: Lua sends plain numbers. MD takes them as metres and metres per second directly, but angles
+  must be typed, so radians are multiplied by 57.29577951308232deg (one radian as an angle).
 -->
 <mdscript name="X4_Coop" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="md.xsd">
   <cues>
@@ -77,7 +78,7 @@
                   <level exact="0.5"/>
                 </loadout>
                 <position x="$Args.{3}" y="$Args.{4}" z="$Args.{5}"/>
-                <rotation yaw="$Args.{6}" pitch="$Args.{7}" roll="$Args.{8}"/>
+                <rotation yaw="$Args.{6} * 57.29577951308232deg" pitch="$Args.{7} * 57.29577951308232deg" roll="$Args.{8} * 57.29577951308232deg"/>
               </create_ship>
               <do_if value="@$Ship.isoperational">
                 <append_to_list name="Root.$AllProxies" exact="$Ship"/>
@@ -123,7 +124,7 @@
             <do_else>
               <warp object="Root.$Proxy" sector="$Sector">
                 <position x="$Args.{2}" y="$Args.{3}" z="$Args.{4}"/>
-                <rotation yaw="$Args.{5}" pitch="$Args.{6}" roll="$Args.{7}"/>
+                <rotation yaw="$Args.{5} * 57.29577951308232deg" pitch="$Args.{6} * 57.29577951308232deg" roll="$Args.{7} * 57.29577951308232deg"/>
               </warp>
               <raise_lua_event name="'x4coop.warped'" param="Root.$Proxy"/>
             </do_else>
@@ -145,7 +146,7 @@
             <do_if value="$Args.{10} == 1">
               <warp object="Root.$Proxy" sector="Root.$Proxy.sector">
                 <position x="$Args.{1}" y="$Args.{2}" z="$Args.{3}"/>
-                <rotation yaw="$Args.{4}" pitch="$Args.{5}" roll="$Args.{6}"/>
+                <rotation yaw="$Args.{4} * 57.29577951308232deg" pitch="$Args.{5} * 57.29577951308232deg" roll="$Args.{6} * 57.29577951308232deg"/>
               </warp>
             </do_if>
             <set_object_velocity object="Root.$Proxy" constantvel="true">
@@ -174,6 +175,35 @@
                 $Rot.up.x, $Rot.up.y, $Rot.up.z]"/>
               <raise_lua_event name="'x4coop.probe_result'"/>
             </do_if>
+          </actions>
+        </cue>
+
+        <!--
+          /x4coop join: warp the player's ship beside the partner's proxy, facing the same way.
+          Only from the pilot seat, undocked, in normal space. Answers with a notification either way.
+        -->
+        <cue name="OnJoinPartner" instantiate="true">
+          <conditions>
+            <event_ui_triggered screen="'x4coop'" control="'join'"/>
+          </conditions>
+          <actions>
+            <set_value name="$Ship" exact="player.occupiedship"/>
+            <do_if value="not @Root.$Proxy.isoperational">
+              <show_notification text="'Co-op: your partner is not visible yet'" timeout="6s"/>
+            </do_if>
+            <do_elseif value="not @$Ship.isoperational or @$Ship.dock or not @$Ship.parent.isclass.space">
+              <show_notification text="'Co-op: sit in the pilot seat of an undocked ship to join your partner'" timeout="6s"/>
+            </do_elseif>
+            <do_else>
+              <set_value name="$Gap" exact="Root.$Proxy.size + $Ship.size"/>
+              <create_position name="$Pos" object="Root.$Proxy" x="$Gap" space="Root.$Proxy.sector"/>
+              <warp object="$Ship" sector="Root.$Proxy.sector">
+                <safepos value="$Pos"/>
+                <rotation value="Root.$Proxy.relativerotation.{Root.$Proxy.sector}"/>
+              </warp>
+              <debug_text text="'x4coop: joined partner in %s'.[Root.$Proxy.sector.knownname]" chance="$DebugChance"/>
+              <show_notification text="'Co-op: joined your partner in ' + Root.$Proxy.sector.knownname" timeout="6s"/>
+            </do_else>
           </actions>
         </cue>
 

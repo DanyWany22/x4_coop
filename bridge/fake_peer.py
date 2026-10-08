@@ -12,16 +12,19 @@ Modes:
                    If the ship flies sideways or backwards, try --yaw-sign -1 (the in-game
                    probe in the debug log reports the engine's convention).
 
-It speaks the same protocol as the bridge and answers pings, so /x4coop status shows an RTT.
+It speaks the same protocol as the bridge (including --password), answers pings so /x4coop status
+shows an RTT, and replies to /x4coop say messages.
 """
 import argparse
 import collections
 import math
+import os
 import socket
 import sys
 import time
 
-MAGIC = b"X4C1 "
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from x4_coop_bridge import Codec  # noqa: E402  (same datagram framing and password check as the real bridge)
 
 
 def parse_address(text, default_port):
@@ -58,7 +61,9 @@ def main(argv=None):
     p.add_argument("--speed", type=float, default=150.0, help="orbit speed in m/s")
     p.add_argument("--yaw-sign", type=float, default=1.0, help="orbit heading sign (+1 or -1)")
     p.add_argument("--name", default="Fake Partner")
+    p.add_argument("--password", default=os.environ.get("X4COOP_PASSWORD", ""), help="must match the bridge's --password")
     args = p.parse_args(argv)
+    codec = Codec(args.password)
 
     bridge = parse_address(args.join, 47810)
     offset = [float(v) for v in args.offset.split(",")]
@@ -79,7 +84,7 @@ def main(argv=None):
     print(f"fake partner ({args.mode}) talking to bridge {bridge[0]}:{bridge[1]}; Ctrl+C to stop", flush=True)
 
     def send(msg, now):
-        outbox.append((now + args.delay, MAGIC + msg.encode("utf-8")))
+        outbox.append((now + args.delay, codec.seal(msg)))
 
     try:
         while True:
@@ -89,11 +94,16 @@ def main(argv=None):
                     data, _ = sock.recvfrom(65535)
                 except (BlockingIOError, ConnectionResetError):
                     break
-                if not data.startswith(MAGIC):
+                msg = codec.open(data)
+                if msg is None:
                     continue
-                msg = data[len(MAGIC):].decode("utf-8", "replace")
                 if msg.startswith("P|"):
                     send("Q|" + msg[2:], now)
+                    continue
+                if msg.startswith("M|"):
+                    said = msg.split("|", 2)[2] if msg.count("|") >= 2 else ""
+                    print(f"chat from player: {said}", flush=True)
+                    send(f"M|{args.name}|you said: {said}", now)
                     continue
                 s = parse_snapshot(msg)
                 if s:
@@ -104,7 +114,7 @@ def main(argv=None):
 
             if now >= next_keepalive:
                 next_keepalive = now + 1.0
-                outbox.append((now, MAGIC + b"H"))
+                outbox.append((now, codec.seal("H")))
 
             if now >= next_send and latest and now - latest_at < 2.0:
                 next_send = now + 1.0 / args.rate

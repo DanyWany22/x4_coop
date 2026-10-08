@@ -19,10 +19,10 @@ from pathlib import Path
 
 DEV = Path(__file__).resolve().parent
 MOD = DEV.parent
-GAME = MOD.parents[1]
 sys.path.insert(0, str(DEV))
 import catx  # noqa: E402
 import run_lua  # noqa: E402
+GAME = run_lua.GAME_DIR  # set X4_GAME_DIR when running from a checkout outside the game folder
 
 results = []
 
@@ -71,28 +71,52 @@ def free_udp_port():
         return s.getsockname()[1]
 
 
-def test_bridge():
+PY = [sys.executable, "-I"]
+
+
+def bridge_session(bridge_args, peers, runs):
+    """Start a bridge and fake peers (each started after the previous one has connected), then
+    run game_sim once per (name, extra args, check) in runs. Returns the bridge log."""
     port, pipe = free_udp_port(), "x4_coop_selftest"
-    py = [sys.executable, "-I"]
-    bridge = subprocess.Popen(py + [str(MOD / "bridge" / "x4_coop_bridge.py"), "--host", "--port", str(port), "--pipe", pipe],
-                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-    peer = subprocess.Popen(py + [str(MOD / "bridge" / "fake_peer.py"), "--join", f"127.0.0.1:{port}", "--delay", "0.02"],
-                            stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
+    procs = [subprocess.Popen(PY + [str(MOD / "bridge" / "x4_coop_bridge.py"), "--host", "--port", str(port), "--pipe", pipe] + bridge_args,
+                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)]
+    ok_before = len(results)
     try:
+        for peer_args in peers:
+            time.sleep(0.6)
+            procs.append(subprocess.Popen(PY + [str(MOD / "bridge" / "fake_peer.py"), "--join", f"127.0.0.1:{port}"] + peer_args,
+                                          stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT))
         time.sleep(1.0)
-        runs = [("bridge: game connects, gets echo + pong", []),
-                ("bridge: reconnect after game releases pipe", ["--gc"]),
-                ("bridge: reconnect again", [])]
-        for name, extra in runs:
-            r = subprocess.run(py + [str(DEV / "game_sim.py"), pipe, "3"] + extra, capture_output=True, text=True, timeout=30)
-            summary = " ".join(l for l in r.stdout.splitlines() if l.startswith(("counts", "rtt")))
-            check(name, r.returncode == 0, summary)
+        for name, extra, extra_check in runs:
+            r = subprocess.run(PY + [str(DEV / "game_sim.py"), pipe, "3"] + extra, capture_output=True, text=True, timeout=30)
+            summary = " ".join(l for l in r.stdout.splitlines() if l.startswith(("counts", "rtt", "partners")))
+            check(name, r.returncode == 0 and extra_check(r.stdout), summary)
     finally:
-        for p in (peer, bridge):
+        for p in reversed(procs):
             p.terminate()
-        log = bridge.communicate(timeout=5)[0]
-    if not all(results[-3:]):
+        log = procs[0].communicate(timeout=5)[0]
+    if not all(results[ok_before:]):
         print("      bridge log:\n      " + "\n      ".join(log.splitlines()))
+    return log
+
+
+def test_bridge():
+    anything = lambda out: True  # noqa: E731
+    bridge_session([], [["--delay", "0.02"]], [
+        ("bridge: game connects, gets echo, pong and chat reply", [], anything),
+        ("bridge: reconnect after game releases pipe", ["--gc"], anything),
+        ("bridge: reconnect again", [], anything),
+    ])
+    bridge_session(["--password", "s3cret"], [["--password", "s3cret"]], [
+        ("bridge: matching password", [], anything),
+    ])
+    log = bridge_session(["--password", "s3cret"], [["--password", "wrong"]], [
+        ("bridge: wrong password delivers nothing", ["--expect-nothing"], anything),
+    ])
+    check("bridge: wrong password is logged", "rejected packets" in log)
+    bridge_session([], [["--name", "First"], ["--name", "Intruder"]], [
+        ("bridge: host ignores a second partner", [], lambda out: "partners heard: First" in out),
+    ])
 
 
 def main():

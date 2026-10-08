@@ -75,6 +75,7 @@ local objects = {}
 local PLAYER = 100
 objects[PLAYER] = { sector = 500, x = 1000, y = 0, z = -2000, yaw = 0, pitch = 0, roll = 0, macro = SHIP_MACRO }
 local next_id, spawns, warps, moves, md_events, lua_errors = 200, 0, 0, 0, {}, 0
+local spawn_sectors = {}
 local proxy_id = nil
 local history = {}   -- player pose history for ground truth
 
@@ -146,6 +147,7 @@ function SetScript(kind, fn) if kind == "onUpdate" then on_update = fn end end
 function ConvertStringTo64Bit(s) return tonumber((tostring(s):gsub("ULL$", ""))) end
 function GetComponentData(id, key)
 	if key == "macro" then return SECTORS[id] or (objects[id] and objects[id].macro) end
+	if key == "name" and SECTORS[id] then return "Sector " .. id end
 end
 function GetNPCBlackboard(_, key) return blackboard[key] end
 function SetNPCBlackboard(_, key, v) blackboard[key] = v end
@@ -170,6 +172,7 @@ function AddUITriggeredEvent(screen, control, args)
 		destroy_proxies()
 		local sector = sector_by_macro(args[1])
 		if not sector then queue("x4coop.spawn_failed", "unknown sector " .. tostring(args[1])); return end
+		spawn_sectors[#spawn_sectors + 1] = tostring(args[1])
 		proxy_id, next_id = next_id, next_id + 1
 		objects[proxy_id] = { sector = sector, x = args[3], y = args[4], z = args[5], yaw = args[6], pitch = args[7], roll = args[8], macro = args[2], vel = { 0, 0, 0 } }
 		spawns = spawns + 1
@@ -197,6 +200,13 @@ function AddUITriggeredEvent(screen, control, args)
 		local r, u, f = col(m, 1), col(m, 2), col(m, 3)
 		blackboard["$x4coop_probe"] = { o.yaw, o.pitch, o.roll, f[1], f[2], f[3], r[1], r[2], r[3], u[1], u[2], u[3] }
 		queue("x4coop.probe_result")
+	elseif control == "join" then
+		local o = proxy_id and objects[proxy_id]
+		if o then
+			local pl = objects[PLAYER]
+			pl.sector, pl.x, pl.y, pl.z = o.sector, o.x + 80, o.y, o.z
+			say("  md join: player warped beside the proxy")
+		end
 	elseif control == "notify" then
 		say("  notify %6.2f %s", clock, tostring(args))
 		notifications[#notifications + 1] = tostring(args)
@@ -219,7 +229,9 @@ if sc.pipes then
 			Schedule_Write = function(name, cb, msg)
 				local f = {}
 				for part in (msg .. "|"):gmatch("([^|]*)|") do f[#f + 1] = part end
-				if f[1] == "P" then
+				if f[1] == "M" then
+					partner_queue[#partner_queue + 1] = { at = clock + 2 * ONE_WAY, msg = "M|Echo|you said: " .. tostring(f[3]) }
+				elseif f[1] == "P" then
 					partner_queue[#partner_queue + 1] = { at = clock + 2 * ONE_WAY, msg = "Q|" .. f[2] }
 				elseif f[1] == "S" then
 					f[2] = tostring(tonumber(f[2]))
@@ -284,7 +296,21 @@ end
 if sc.mode ~= "ghost" or sc.backend then
 	clock = 0.1
 end
-local commanded = false
+local commanded, chatted, hostile_sent = false, false, false
+-- Malformed or malicious partner messages: all must be dropped without errors or odd spawns.
+local HOSTILE = {
+	"S|1|nan|cluster_01_sector001_macro|ship_arg_s_fighter_01_a_macro|0|0|0|0|0|0|0|0|0|evil",
+	"S|1|5|evil sector;|ship_arg_s_fighter_01_a_macro|0|0|0|0|0|0|0|0|0|evil",
+	"S|1|5|cluster_01_sector001_macro|ship_arg_s_fighter_01_a_macro|1e12|0|0|0|0|0|0|0|0|evil",
+	"S|1|5|cluster_01_sector001_macro|ship_arg_s_fighter_01_a_macro|0|0|0|inf|0|0|0|0|0|evil",
+	"S|1|5|cluster_01_sector001_macro|ship|0|0",
+	"S|",
+	"Q|not a number",
+	"P|evil|stuff",
+	"M|evil" .. string.char(10) .. "name|line1" .. string.char(13, 10) .. "line2",
+	"",
+	"|||||",
+}
 local pos_errs, rot_errs = {}, {}
 local first_live_at, calibrated_at
 local max_proxies = 0
@@ -312,6 +338,15 @@ while clock < sc.duration do
 		if sc.backend then ExecuteDebugCommand("x4coop", "backend " .. sc.backend) end
 		ExecuteDebugCommand("refreshmd", "")   -- must pass through to the game
 	end
+	if sc.mode == "net" and sc.pipes and pipe_reader and not hostile_sent and clock > 5 then
+		hostile_sent = true
+		for _, msg in ipairs(HOSTILE) do pipe_reader(msg) end
+	end
+	if not chatted and clock > sc.duration - 2 then
+		chatted = true
+		ExecuteDebugCommand("x4coop", "say hello   there")
+		ExecuteDebugCommand("x4coop", "join")
+	end
 	on_update()
 
 	local S = api.state()
@@ -328,10 +363,12 @@ while clock < sc.duration do
 			truth = { sector = h.sector, x = h.x + ECHO_OFFSET[1], y = h.y, z = h.z, m = h.m }
 		else
 			local h = history[#history]
-			local r = col(h.m, 1)
-			truth = { sector = h.sector, x = h.x + r[1] * 100, y = h.y + r[2] * 100, z = h.z + r[3] * 100, m = h.m }
+			local cfg = api.config
+			local r, u, f = col(h.m, 1), col(h.m, 2), col(h.m, 3)
+			local function off(i) return r[i] * cfg.ghost_right + u[i] * cfg.ghost_up + f[i] * cfg.ghost_forward end
+			truth = { sector = h.sector, x = h.x + off(1), y = h.y + off(2), z = h.z + off(3), m = h.m }
 		end
-		if clock > math.max(10, (calibrated_at or 1e9) + 1) and o.sector == truth.sector and (not sc.jump_at or math.abs(clock - sc.jump_at) > 2) and (not sc.partner_restart_at or math.abs(clock - sc.partner_restart_at) > 2) then
+		if not chatted and clock > math.max(10, (calibrated_at or 1e9) + 1) and o.sector == truth.sector and (not sc.jump_at or math.abs(clock - sc.jump_at) > 2) and (not sc.partner_restart_at or math.abs(clock - sc.partner_restart_at) > 2) then
 			pos_errs[#pos_errs + 1] = math.sqrt((o.x - truth.x) ^ 2 + (o.y - truth.y) ^ 2 + (o.z - truth.z) ^ 2)
 			rot_errs[#rot_errs + 1] = mat_angle(engine_mat(o.yaw, o.pitch, o.roll), truth.m)
 		end
@@ -369,9 +406,22 @@ say("position error (m): %s   [%d frames]", ps, #pos_errs)
 say("rotation error (rad): %s", rs)
 say("lua errors logged: %d", lua_errors)
 
+local said = table.concat(notifications, " / ")
 local ok = lua_errors == 0 and proxy_id == nil and max_proxies <= 1
+for _, sector in ipairs(spawn_sectors) do
+	if not SECTORS[500] or (sector ~= SECTORS[500] and sector ~= SECTORS[501]) then
+		say("FAIL: proxy spawned from a bad snapshot (sector %s)", sector)
+		ok = false
+	end
+end
+if not sc.expect_no_proxy then
+	local want_chat = sc.mode == "ghost" and "Ghost: hello there" or "Echo: you said: hello there"
+	local chat_ok = said:find(want_chat, 1, true) ~= nil
+	local where_ok = said:find("in Sector 50", 1, true) ~= nil
+	say("chat reply seen: %s, partner location reported: %s, join requests: %d", tostring(chat_ok), tostring(where_ok), md_events.join or 0)
+	ok = ok and chat_ok and where_ok and (md_events.join or 0) == 1
+end
 if sc.expect_no_proxy then
-	local said = table.concat(notifications, " / ")
 	ok = ok and spawns == 0 and said:find("Mod Support APIs not installed", 1, true) ~= nil
 else
 	local max_pos, max_rot = sc.max_pos_err or 15, sc.max_rot_err or 0.08

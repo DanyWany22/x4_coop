@@ -10,14 +10,19 @@ it waits for the game and reconnects after reloads):
     python x4_coop_bridge.py --peer 100.64.0.2:47810  # both name each other (LAN / VPN)
 
 Only the host needs to be reachable (UDP port forwarded, or both on a VPN such as
-Tailscale/ZeroTier). Standard library only: Windows, Python 3.8+.
+Tailscale/ZeroTier). Add the same --password on both sides to ignore anyone else's packets.
+Standard library only: Windows, Python 3.8+.
 
 X4 reaches this pipe through SirNukes' Mod Support APIs (Protected UI Mode must be off).
-Datagrams are b"X4C1 " + one pipe message; the message format is documented in
-ui/x4_coop.lua. "H" keepalives are handled here and never reach the game.
+Datagrams are b"X4C1 " [+ HMAC tag] + one pipe message (see Codec); the message format is
+documented in ui/x4_coop.lua. "H" keepalives are handled here and never reach the game.
+A host serves one partner at a time and takes a new one only after the current one goes silent.
 """
 import argparse
 import ctypes
+import hashlib
+import hmac
+import os
 import socket
 import sys
 import time
@@ -29,6 +34,7 @@ BUFFER_SIZE = 64 * 1024
 KEEPALIVE_S = 1.0
 PARTNER_TIMEOUT_S = 10.0
 STATS_EVERY_S = 30.0
+MAX_PACKETS_PER_S = 200  # a partner sends ~22/s; anything far above that is dropped
 
 # Win32 named pipe API through ctypes, mirroring the parameters SirNukes' own server uses.
 PIPE_ACCESS_DUPLEX = 0x3
@@ -135,6 +141,48 @@ def log(text):
     print(time.strftime("%H:%M:%S ") + text, flush=True)
 
 
+class Codec:
+    """Frames one pipe message per datagram: MAGIC, then (with a password) a 16-hex HMAC tag and a space."""
+
+    def __init__(self, password=""):
+        self.key = hashlib.sha256(password.encode("utf-8")).digest() if password else None
+
+    def _tag(self, data):
+        return hmac.new(self.key, data, hashlib.sha256).hexdigest()[:16].encode()
+
+    def seal(self, msg):
+        data = msg.encode("utf-8")
+        if self.key:
+            data = self._tag(data) + b" " + data
+        return MAGIC + data
+
+    def open(self, datagram):
+        """The message text, or None for foreign traffic or a wrong/missing password."""
+        if not datagram.startswith(MAGIC):
+            return None
+        data = datagram[len(MAGIC):]
+        if self.key:
+            tag, sep, data = data.partition(b" ")
+            if not sep or not hmac.compare_digest(tag, self._tag(data)):
+                return None
+        return data.decode("utf-8", "replace")
+
+
+class RateLimit:
+    """Token bucket: allow() is False once more than `rate` per second (plus `burst`) arrive."""
+
+    def __init__(self, rate, burst):
+        self.rate, self.burst, self.tokens, self.at = rate, burst, burst, time.monotonic()
+
+    def allow(self, now):
+        self.tokens = min(self.burst, self.tokens + (now - self.at) * self.rate)
+        self.at = now
+        if self.tokens < 1:
+            return False
+        self.tokens -= 1
+        return True
+
+
 def run(args):
     if args.join:
         peer, port = parse_address(args.join, DEFAULT_PORT), args.port or 0
@@ -142,7 +190,9 @@ def run(args):
         peer, port = parse_address(args.peer, DEFAULT_PORT), args.port or DEFAULT_PORT
     else:
         peer, port = None, args.port or DEFAULT_PORT
-    learn_peer = peer is None  # host mode: answer whoever talks to us
+    hosting = peer is None  # host mode: adopt the first partner that talks to us
+    codec = Codec(args.password)
+    limit = RateLimit(MAX_PACKETS_PER_S, MAX_PACKETS_PER_S * 2)
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     if hasattr(socket, "SIO_UDP_CONNRESET"):
@@ -152,14 +202,24 @@ def run(args):
     port = sock.getsockname()[1]
 
     game = GamePipe(args.pipe)
-    log(f"UDP port {port}; " + (f"partner {peer[0]}:{peer[1]}" if peer else "waiting for a partner to join"))
+    log(f"UDP port {port}; " + (f"partner {peer[0]}:{peer[1]}" if peer else "waiting for a partner to join")
+        + ("; password required" if args.password else ""))
     log(f"waiting for X4 on {game.path}")
 
-    stats = {"to_peer": 0, "from_peer": 0, "to_game": 0, "dropped": 0}
+    stats = {"to_peer": 0, "from_peer": 0, "to_game": 0, "dropped": 0, "rejected": 0, "ignored": 0, "flooded": 0}
     last_heard = 0.0
     partner_present = False
     last_keepalive = 0.0
     last_stats = time.monotonic()
+    last_reject_note = 0.0
+
+    def send(msg):
+        try:
+            sock.sendto(codec.seal(msg), peer)
+            return True
+        except OSError as e:  # e.g. network unreachable; the keepalive retries every second
+            log(f"send failed: {e}")
+            return False
 
     def tell_game(msg):
         if not game.connected:
@@ -191,8 +251,7 @@ def run(args):
                     if msg is None:
                         break
                     busy = True
-                    if peer:
-                        sock.sendto(MAGIC + msg.encode("utf-8"), peer)
+                    if peer and send(msg):
                         stats["to_peer"] += 1
             except PipeClosed as e:
                 log(f"X4 disconnected ({e}); waiting for it to reconnect")
@@ -203,18 +262,32 @@ def run(args):
                 data, addr = sock.recvfrom(65535)
             except (BlockingIOError, ConnectionResetError):
                 break
-            if not data.startswith(MAGIC):
-                continue
             busy = True
+            msg = codec.open(data)
+            if msg is None:
+                if data.startswith(MAGIC):
+                    stats["rejected"] += 1
+                    if now - last_reject_note > 10:
+                        last_reject_note = now
+                        log(f"rejected packets from {addr[0]}:{addr[1]}: wrong or missing --password?")
+                continue
+            # One partner at a time: a host keeps its partner's exact address until they go silent;
+            # a joiner only listens to its host's IP (its NAT may change the port).
+            foreign = (addr != peer) if hosting else (addr[0] != peer[0])
+            if peer and foreign and (partner_present or not hosting):
+                stats["ignored"] += 1
+                continue
+            if not limit.allow(now):
+                stats["flooded"] += 1
+                continue
             last_heard = now
-            if learn_peer and addr != peer:
+            if hosting and addr != peer:
                 peer = addr
                 log(f"partner is {addr[0]}:{addr[1]}")
             if not partner_present:
                 partner_present = True
                 log("partner connected")
                 tell_game("N|partner connected")
-            msg = data[len(MAGIC):].decode("utf-8", "replace")
             if msg == "H":
                 continue
             stats["from_peer"] += 1
@@ -226,7 +299,7 @@ def run(args):
             tell_game("N|partner silent")
         if peer and now - last_keepalive > KEEPALIVE_S:
             last_keepalive = now
-            sock.sendto(MAGIC + b"H", peer)  # keeps NAT mappings open and lets a host find us
+            send("H")  # keeps NAT mappings open and lets a host find us
         if now - last_stats > STATS_EVERY_S:
             last_stats = now
             log("stats: " + ", ".join(f"{k} {v}" for k, v in stats.items()))
@@ -242,6 +315,8 @@ def main(argv=None):
     mode.add_argument("--peer", metavar="ADDR[:PORT]", help="fixed partner address; both sides use it")
     p.add_argument("--port", type=int, default=None, help=f"local UDP port (default {DEFAULT_PORT}; random when joining)")
     p.add_argument("--pipe", default="x4_coop", help="pipe name, must match config.pipe in ui/x4_coop.lua")
+    p.add_argument("--password", default=os.environ.get("X4COOP_PASSWORD", ""),
+                   help="shared secret; both bridges must use the same one (or set X4COOP_PASSWORD)")
     args = p.parse_args(argv)
     try:
         run(args)

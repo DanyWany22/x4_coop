@@ -5,9 +5,10 @@ other player appears as a **proxy ship** that copies their ship's position and r
 20 times a second. NPCs, combat, trading and missions are **not** shared yet. This is the
 movement foundation everything else would build on.
 
-Status (2026-10-08): the code is complete and passes offline tests in X4's own Lua runtime (see
-[Developer tests](#developer-tests)). **Nothing has been run inside the game yet.** The first
-in-game session answers the open questions listed under [What to check first](#what-to-check-first).
+Status (2026-10-08): **ghost mode works in-game.** In the first session (Terran start, v9.00) the
+ghost spawned and flew in formation. The self-test found that `SetObjectSectorPos` takes
+**degrees**, and the mod adapts automatically. Networking between two real players is not tested
+yet. Offline tests: see [Developer tests](#developer-tests).
 
 ## How it works
 
@@ -59,12 +60,15 @@ and `x4coop:`.
 
 ## Chat commands
 
-Open the chat window (the **Toggle Chat Window** control under Settings → Controls; bind a key
-if it has none) and type:
+Commands go in X4's chat window, which has no key by default. To bind one: **Settings → Controls →
+General Controls**, then scroll to the bottom section **"Expert Settings - Use with Caution!"** →
+**Toggle Chat Window**. Press that key in flight and type:
 
 | command | effect |
 |---|---|
-| `/x4coop status` | mode, backend, proxy state, partner, link/RTT, rotation convention |
+| `/x4coop status` | mode, backend, proxy state, where your partner is and how far, link/RTT, rotation convention |
+| `/x4coop join` | warp your ship beside your partner (pilot seat, undocked) |
+| `/x4coop say <text>` | send a chat line to your partner (in ghost mode the ghost repeats it) |
 | `/x4coop ghost` / `net` / `off` | switch mode (remembered in the savegame) |
 | `/x4coop backend auto` / `lua` / `md` | movement backend (auto = self-test, then pick) |
 | `/x4coop probe` | redo the rotation calibration |
@@ -76,15 +80,18 @@ don't work for you, edit them there and reload your save (or type `/reloadui`).
 ## Test 1: ghost (single player, no dependencies)
 
 The default mode is `ghost`. Your own snapshots go through a simulated network (120 ms latency,
-30 ms jitter) and come back as a copy of your ship, **100 m to your right**.
+30 ms jitter) and come back as a copy of your ship, **120 m ahead and 60 m to the right**, so
+it's in view from the cockpit.
 
 1. Load any save and sit in the pilot seat of a ship.
-2. Within a second, "[Co-op] Ghost" should appear beside you and copy your manoeuvres.
-3. Fly straight, turn, roll and boost. It should stay at your right wingtip.
-4. `/x4coop status`, then check the log for the self-test and probe lines.
+2. Within a second, "[Co-op] Ghost" should appear ahead of you and copy your manoeuvres.
+3. Fly straight, turn, roll and boost. It should hold its spot relative to you.
+4. `/x4coop status`, then check the log for the self-test, probe and `health:` lines.
 
-For L/XL ships, raise the offset first (`/x4coop set ghost_right 600`), or the ghost will
-collide with you.
+Move it with `/x4coop set ghost_forward 200`, `ghost_right`, `ghost_up` (metres). For L/XL
+ships, use a few hundred metres or the ghost will collide with you. The rotation probe needs
+a few seconds of real flying with some pitch and roll; level flight or sitting still can't
+tell the conventions apart.
 
 ## Test 2: networking on one PC
 
@@ -100,23 +107,30 @@ collide with you.
 
 * Both need the same galaxy: same DLCs and a sector your partner has too. The proxy is placed
   by sector macro name; if you don't have the sector, you get a "could not place partner" notice.
-* One player hosts: `python x4_coop_bridge.py --host`. The host must be reachable on **UDP
-  47810**: either forward that port on the router, or both join a VPN like Tailscale or ZeroTier,
-  which is easier and private.
-* The other joins: `python x4_coop_bridge.py --join <host address>`
-* Both type `/x4coop net` and fly into the same sector.
+* One player hosts: `python x4_coop_bridge.py --host --password <something>`. The host must be
+  reachable on **UDP 47810**: either forward that port on the router, or both join a VPN like
+  Tailscale or ZeroTier, which is easier and private.
+* The other joins: `python x4_coop_bridge.py --join <host address> --password <something>`
+* Both type `/x4coop net`. Then one of you types `/x4coop join` to warp beside the other,
+  or you both fly into the same sector.
+* The password is optional but recommended. Packets are signed with it (HMAC), and packets
+  without it are dropped and logged. A host serves one partner and ignores others until that
+  partner has been silent for 10 s.
 
 ## What to check first
 
 The offline tests can't answer these; one in-game session can:
 
-1. **Does the proxy spawn?** Look for `proxy live` in the log, and check the ship appears.
-2. **Backend self-test line**: `SetObjectSectorPos works … radians/degrees`, or a fallback notice.
-3. **Probe line**: `engine rotation convention is …`, or `not adopted` / `no convention fits`
-   with raw numbers.
-4. **Smoothness and FPS** of the ghost at speed, in both backends (`/x4coop backend md` to compare).
-5. Anything odd: proxy fighting the physics, engine trails missing, collisions, warnings about
-   a ship without a pilot.
+Confirmed in the first session: the proxy spawns, the self-test passes (angles in degrees), and
+the ghost follows you. Still open:
+
+1. **Probe line**: `engine rotation convention is …`. If it says ambiguous, fly with more
+   pitch and roll. If it says `no convention fits`, send the raw numbers.
+2. **`health:` lines** (every 15 s while a proxy exists): distance to you, snapshots/s, and how
+   far the engine moved the proxy away from where the mod put it. A large number there means
+   the physics is fighting the mover.
+3. **Smoothness and FPS** of the ghost at speed, in both backends (`/x4coop backend md` to compare).
+4. Anything odd: engine trails missing, collisions, warnings about a ship without a pilot.
 
 Paste the `[x4coop]` and `x4coop:` log lines back into the conversation that's developing this.
 
@@ -127,8 +141,8 @@ Paste the `[x4coop]` and `x4coop:` log lines back into the conversation that's d
   property list. A dedicated faction would be cleaner.
 * No damage, weapons, docking, highway or travel-drive visuals yet. SETA (time acceleration)
   is not synchronised.
-* One partner at a time; no authentication or encryption on the UDP link. Use a VPN rather
-  than leaving a port open.
+* One partner at a time. With `--password`, packets are authenticated but not encrypted, so
+  positions are visible to anyone on the path. A VPN is still the better option.
 * The proxy is saved into savegames and destroyed on load. Before uninstalling the mod,
   type `/x4coop off` and save, so no proxy is left behind.
 
@@ -138,14 +152,17 @@ Paste the `[x4coop]` and `x4coop:` log lines back into the conversation that's d
 python extensions/x4_coop/dev/run_tests.py
 ```
 
+From a checkout outside the game folder, set `X4_GAME_DIR` to the X4 install first.
+
 * Validates `md/*.xml` against the game's own `md.xsd`, extracted from the `.cat` archives.
   This needs `lxml`, and is skipped without it.
 * Loads `ui/x4_coop.lua` into **X4's own LuaJIT** (`lua51_64.dll`) with stubbed engine
   functions (`dev/sim.lua`), and flies it through 10 scenarios with ground-truth error
-  measurement. These cover: unusual engine rotation conventions, degree angles, an ignored
+  measurement, plus chat, `join` and hostile or malformed partner messages. These cover: unusual engine rotation conventions, degree angles, an ignored
   `SetObjectSectorPos`, the MD backend, the network path with RTT, a partner restarting their
   game, a sector jump, near-vertical flight, and missing Mod Support APIs.
-* Runs the real bridge + `fake_peer.py` with `dev/game_sim.py` standing in for X4's pipe client.
+* Runs the real bridge + `fake_peer.py` with `dev/game_sim.py` standing in for X4's pipe client:
+  reconnects, chat, matching and wrong passwords, and a second partner trying to barge in.
 
 Typical results: proxy within ~2–3 m (95th percentile) and ~2° of the truth, at 220–300 m/s
 while manoeuvring. The MD fallback is within ~6 m and ~9°.
