@@ -183,6 +183,9 @@ def main():
                        timeout=120)
     check("pipe: the mod's own pipe client, in X4's LuaJIT, through a real bridge", r.returncode == 0,
           " ".join(l.strip() for l in r.stdout.splitlines() if l.startswith("FAIL")) or "")
+    r = subprocess.run(PY + [str(DEV / "memdemo_test.py")], capture_output=True, text=True, timeout=120)
+    check("memory demo: finds, reads and writes a value in another process (stand-in, not X4)", r.returncode == 0,
+          " ".join(l.strip() for l in r.stdout.splitlines() if l.startswith("FAIL")) or "")
     r = subprocess.run(PY + [str(DEV / "trace_test.py"), str(free_udp_port())], capture_output=True, text=True,
                        timeout=120, cwd=DEV)
     check("telemetry: two bridges' traces match packet for packet (report, HTML)", r.returncode == 0,

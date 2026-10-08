@@ -31,6 +31,7 @@ nothing is downloaded at runtime.
 * `bridge/`: the network program each player runs next to the game (Python, standard library
   only), its launchers and the telemetry tools.
 * `dev/`: offline tests and the test doubles they use.
+* `demo/`: a separate demo of reading and writing X4's memory. It isn't part of the mod.
 
 ### How a script mod can network
 
@@ -54,8 +55,10 @@ X4 (ui/x4_coop.lua) <-> named pipe <-> bridge (Python: UDP/TCP sockets) <-> netw
 
 ### Native code and memory addresses
 
-The mod has **no DLLs, no hooks, no injection, and reads or writes no memory addresses**. The Lua
-calls functions by name through FFI:
+The mod has **no DLLs, no hooks, no injection, and reads or writes no memory addresses**.
+[`demo/x4_memory_demo.py`](demo/x4_memory_demo.py) is a separate tool that shows reading and
+writing X4's memory is possible, on your credits; the mod never loads or calls it (see
+[Memory demo](#memory-demo-not-part-of-the-mod)). The Lua calls functions by name through FFI:
 
 * **6 Windows functions** for the pipe (listed above).
 * **15 game functions.** Egosoft's own UI scripts call every one of them; one example file each, from
@@ -246,6 +249,25 @@ effects), `fire_fx` (proxy fires; gives spawned proxies a pilot), `npc_sync`, `n
   and UDP headers come from Windows, not from the mod. Each payload's first bytes and HMAC tag match
   a datagram in the bridge's trace.
 
+## Memory demo (not part of the mod)
+
+`demo/memory_demo.bat` (or `python demo/x4_memory_demo.py`) shows that X4's memory can be read and
+written directly, using your credits. The co-op mod doesn't work this way and never runs this tool.
+
+1. Load a **throwaway save**. A write in the wrong place can crash the game, so don't save afterwards.
+2. Type the credits the game shows. The tool scans X4's writable memory for that number, as whole
+   credits and as hundredths, using Windows' `ReadProcessMemory`.
+3. If it finds many places, change your credits in game (buy or sell anything) and type the new
+   amount. Only the places that changed to it are kept. Repeat until one or two are left.
+4. **Read:** it shows each address, its 8 bytes and the value they hold.
+5. **Write:** type an amount and confirm. The tool writes it with `WriteProcessMemory`, but only where
+   the current amount still is, then reads it back. The credits display in the game changes. Press
+   Enter to put the old amount back.
+
+The addresses change every time the game starts, which is why the tool scans for them each time.
+No administrator rights are needed. `dev/memdemo_test.py` checks the tool against a stand-in
+process, not X4.
+
 ## Troubleshooting
 
 * `/x4coop check` first.
@@ -347,5 +369,6 @@ files only, no test kit) to your Desktop. Unzip it into `X4 Foundations/extensio
 | `bridge/x4_coop_overlay.py` | live telemetry window over the game |
 | `bridge/x4_coop_trace_report.py`, `report.bat` | lines up two machines' traces; text and HTML report |
 | `bridge/capture.bat` | Windows Packet Monitor capture of port 47810 (pcapng for Wireshark) |
+| `demo/x4_memory_demo.py`, `memory_demo.bat` | separate demo: read and write your credits in X4's memory (not used by the mod) |
 | `dev/fake_peer.py` | test double: a fake partner, for testing one bridge on one PC |
-| `dev/` | offline tests (`run_tests.py`, `sim.lua`, `run_lua.py`, `game_sim.py`, `pipe_test.py`, `share_test.py`, `trace_test.py`, `catx.py`) |
+| `dev/` | offline tests (`run_tests.py`, `sim.lua`, `run_lua.py`, `game_sim.py`, `pipe_test.py`, `share_test.py`, `trace_test.py`, `memdemo_test.py`, `catx.py`) |
