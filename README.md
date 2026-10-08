@@ -139,11 +139,15 @@ too (same ID code), so the mod takes it over, stops its orders and moves it, ins
 a duplicate. When co-op stops, the ship is left where your partner last was. If you're sitting
 in their ship (the joiner right after loading), a copy is used until you leave it.
 
+**Their condition:** your partner's proxy shows their real hull and shields (target them to
+see), and you get a message if their ship is destroyed. Fire in your world can't take the proxy
+below their real hull.
+
 **Their guns fire:** when your partner hits a ship, their proxy fires at the same ship in your
 world (AI script `x4coop.proxy.fire`, real damage). In ghost mode your ghost fires at whatever
 you hit, so you can try it alone. Spawned proxies get a drone pilot for this; if that makes
 movement worse, `/x4coop set fire_fx 0` turns it off (then reload or `/x4coop off` and back on).
-Only hits are mirrored for now, not misses.
+Shots at their target count too, not only hits.
 
 **Same NPCs in the same places:** both games list the ships within 6 km of their player every
 second. The host sends their positions 10 times a second, and the joiner's copies of those ships

@@ -93,7 +93,8 @@ local function npc_truth(i, t, h)
 	return h.x + 300 * math.cos(ang), h.y + 50 * i, h.z + 300 * math.sin(ang)
 end
 
-objects[PLAYER] = { sector = 500, x = 1000, y = 0, z = -2000, yaw = 0, pitch = 0, roll = 0, macro = SHIP_MACRO }
+objects[PLAYER] = { sector = 500, x = 1000, y = 0, z = -2000, yaw = 0, pitch = 0, roll = 0, macro = SHIP_MACRO, hull = 63, shield = 40 }
+local player_ship_lost = false
 if sc.npc_test then
 	for i = 1, NPC_COUNT do
 		local x, y, z = npc_truth(i, 0, objects[PLAYER])
@@ -115,6 +116,7 @@ if sc.partner_ship then
 end
 local next_id, spawns, warps, moves, md_events, lua_errors = 200, 0, 0, 0, {}, 0
 local teleports, game_saves, game_loads = {}, {}, {}
+local last_status = nil
 local spawn_sectors, world_requests, adoptions = {}, {}, 0
 local bubble_radius = 0
 local mirror_of_code, obj_actions, found_own = {}, {}, {}
@@ -156,7 +158,7 @@ local md_loaded_at = 0.5
 C = {
 	GetPlayerID = function() return 1 end,
 	GetPlayerName = function() return "Tester" end,
-	GetPlayerOccupiedShipID = function() return PLAYER end,
+	GetPlayerOccupiedShipID = function() return player_ship_lost and 0 or PLAYER end,
 	GetContextByClass = function(id, cls) local o = objects[id]; return o and o.sector or 0 end,
 	GetObjectIDCode = function(id)
 		local o = objects[id]
@@ -178,7 +180,7 @@ C = {
 	CanTeleportPlayerTo = function(id) return objects[id] and "granted" or "no such ship" end,
 	GetSaveFolderPath = function() return "C:/fake/Egosoft/X4/1/save" end,
 	TeleportPlayerTo = function(id) teleports[#teleports + 1] = id; return true end,
-	IsComponentOperational = function(id) return objects[id] ~= nil end,
+	IsComponentOperational = function(id) return objects[id] ~= nil and not (id == PLAYER and player_ship_lost) end,
 }
 package.loaded.ffi = {
 	cdef = function() end,
@@ -201,6 +203,7 @@ function GetComponentData(id, key)
 	local o = objects[id]
 	if key == "owner" then return o and o.owner or "pirate" end
 	if key == "hullpercent" then return o and o.hull or 100 end
+	if key == "shieldpercent" then return o and o.shield or 100 end
 	if key == "isplayerowned" then return o and o.playerowned or false end
 end
 function GetNPCBlackboard(_, key) return blackboard[key] end
@@ -301,6 +304,8 @@ function AddUITriggeredEvent(screen, control, args)
 		elseif o and control == "obj_hull" then
 			o.hull = args[2]
 		end
+	elseif control == "proxy_status" then
+		last_status = table.concat(args, ",")
 	elseif control == "guestship" then
 		local pl = objects[PLAYER]
 		local id = next_id
@@ -573,6 +578,9 @@ while clock < sc.duration do
 		ExecuteDebugCommand("x4coop", "ghost")
 		pipe_reader("K|XYZ-777|" .. SHIP_MACRO .. "|" .. SECTORS[500])
 	end
+	if sc.mode == "net" and sc.pipes and not sc.world_test and not player_ship_lost and clock > sc.duration - 0.5 then
+		player_ship_lost = true  -- our ship is destroyed: the partner should hear about it
+	end
 	if not checked and clock > sc.duration - 1.5 then
 		checked = true
 		ExecuteDebugCommand("x4coop", "check")
@@ -645,6 +653,7 @@ for _ = 1, 5 do
 	on_update()
 end
 
+local ok_status = true
 local function stats(t)
 	if #t == 0 then return "n/a", 0, 0 end
 	table.sort(t)
@@ -667,11 +676,20 @@ for _, line in ipairs(report) do
 end
 
 local said = table.concat(notifications, " / ")
+if not sc.expect_no_proxy then
+	say("partner status shown on the proxy: %s", tostring(last_status))
+	ok_status = last_status == "63,40"
+end
+if sc.mode == "net" and sc.pipes and not sc.world_test then
+	local told = table.concat(pipe_writes, string.char(10)):find("M|Tester|my ship was destroyed", 1, true) ~= nil
+	say("partner told our ship was destroyed: %s", tostring(told))
+	ok_status = ok_status and told
+end
 local check_line = said:match("check: ([^/]*)") or "(none)"
 say("check said: %s", check_line)
 local want_check = sc.expect_no_proxy and "Mod Support APIs" or (sc.mode == "ghost" and "mode is ghost")
 	or (sc.world_test == "linked" and "all good") or (sc.world_test == "mismatch" and "different worlds") or nil
-local ok = (not want_check or check_line:find(want_check, 1, true) ~= nil) and lua_errors == 0 and proxy_id == nil and max_proxies <= 1
+local ok = (not want_check or check_line:find(want_check, 1, true) ~= nil) and lua_errors == 0 and ok_status and proxy_id == nil and max_proxies <= 1
 for _, sector in ipairs(spawn_sectors) do
 	if not SECTORS[500] or (sector ~= SECTORS[500] and sector ~= SECTORS[501]) then
 		say("FAIL: proxy spawned from a bad snapshot (sector %s)", sector)

@@ -142,6 +142,23 @@
           </actions>
         </cue>
 
+        <!--
+          The partner's real hull and shields, shown on their proxy here. Its minimum hull is their hull, so fire
+          in this world can't take it lower (or kill it), and it follows their repairs. param3: [hull %, shield %]
+        -->
+        <cue name="OnProxyStatus" instantiate="true">
+          <conditions>
+            <event_ui_triggered screen="'x4coop'" control="'proxy_status'"/>
+            <check_value value="@Root.$Proxy.isoperational"/>
+          </conditions>
+          <actions>
+            <set_value name="$Hull" exact="[event.param3.{1}, 1].max"/>
+            <set_object_min_hull object="Root.$Proxy" exact="$Hull"/>
+            <set_object_hull object="Root.$Proxy" exact="$Hull"/>
+            <set_object_shield object="Root.$Proxy" exact="event.param3.{2}"/>
+          </actions>
+        </cue>
+
         <cue name="OnDespawn" instantiate="true">
           <conditions>
             <event_ui_triggered screen="'x4coop'" control="'despawn'"/>

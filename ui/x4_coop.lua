@@ -29,7 +29,7 @@ Chat window commands (type them in the chat window, they never leave your PC):
   /x4coop set <key> <value> tweak a numeric setting, e.g. /x4coop set interp_delay 0.15
 
 Wire format (one message per pipe write, '|' separated, also used by the Python tools):
-  S|seq|t|sector_macro|ship_macro|x|y|z|yaw|pitch|roll|vx|vy|vz|name[|idcode]   snapshot (sender clock t in s)
+  S|seq|t|sector_macro|ship_macro|x|y|z|yaw|pitch|roll|vx|vy|vz|name[|idcode|hull|shield]   snapshot (sender clock t in s)
   P|t / Q|t                                                            ping / pong (RTT)
   M|name|text                                                          chat line
   R|role, L|world|role|ship, K|ship, D|ship|hull, F|ship                shared world (see that section)
@@ -346,6 +346,9 @@ local function local_tick(now)
 	local L = S.loc
 	local ship = C.GetPlayerOccupiedShipID()
 	if ship == 0 then
+		if L.ship ~= 0 and not C.IsComponentOperational(L.ship) then
+			L.lost_ship = true  -- destroyed under us; tick() tells the partner
+		end
 		L.ship, L.prev = 0, nil
 		return nil
 	end
@@ -363,6 +366,11 @@ local function local_tick(now)
 		L.sector, L.prev = sector, nil
 		L.sector_macro = GetComponentData(to64(sector), "macro")
 	end
+	if now - (L.status_at or -1e9) >= 1 then
+		L.status_at = now
+		L.hull = tonumber(GetComponentData(to64(ship), "hullpercent"))
+		L.shield = tonumber(GetComponentData(to64(ship), "shieldpercent"))
+	end
 	if not L.sector_macro or not L.ship_macro or now - L.last_send < 1 / config.send_rate - 0.004 then
 		return nil
 	end
@@ -370,6 +378,7 @@ local function local_tick(now)
 	L.seq = L.seq + 1
 	local s = {
 		seq = L.seq, t = now, sector_macro = L.sector_macro, ship_macro = L.ship_macro, name = L.name, idcode = L.idcode,
+		hull = L.hull, shield = L.shield,
 		x = p.x, y = p.y, z = p.z, yaw = p.yaw, pitch = p.pitch, roll = p.roll, vx = 0, vy = 0, vz = 0,
 	}
 	local prev = L.prev
@@ -391,9 +400,10 @@ local function clean_text(text, max_len)
 end
 
 local function encode_snapshot(s)
-	return string.format("S|%d|%.4f|%s|%s|%.2f|%.2f|%.2f|%.5f|%.5f|%.5f|%.2f|%.2f|%.2f|%s|%s",
+	return string.format("S|%d|%.4f|%s|%s|%.2f|%.2f|%.2f|%.5f|%.5f|%.5f|%.2f|%.2f|%.2f|%s|%s|%s|%s",
 		s.seq, s.t, s.sector_macro, s.ship_macro, s.x, s.y, s.z, s.yaw, s.pitch, s.roll, s.vx, s.vy, s.vz,
-		clean_text(s.name, 32), s.idcode or "")
+		clean_text(s.name, 32), s.idcode or "", s.hull and string.format("%.0f", s.hull) or "",
+		s.shield and string.format("%.0f", s.shield) or "")
 end
 
 local function split(msg)
@@ -425,6 +435,9 @@ local function decode_snapshot(f)
 	if f[16] and #f[16] <= 16 and f[16]:match("^[%w%-]+$") then
 		s.idcode = f[16]  -- their ship's ID code: in a shared world that ship exists here too
 	end
+	local hull, shield = tonumber(f[17] or ""), tonumber(f[18] or "")
+	if hull and hull >= 0 and hull <= 100 then s.hull = hull end
+	if shield and shield >= 0 and shield <= 100 then s.shield = shield end
 	return s
 end
 
@@ -907,6 +920,14 @@ local function proxy_tick(now, dt)
 		drive_md(now, target)
 	end
 	health_report(now, backend)
+	if newest.hull and now - (P.status_at or 0) >= 1 then
+		P.status_at = now
+		local key = string.format("%.0f/%.0f", newest.hull, newest.shield or 100)
+		if key ~= P.status_key then
+			P.status_key = key
+			request("proxy_status", { newest.hull, newest.shield or 100 })
+		end
+	end
 end
 
 -------------------------------------------------------------------------------
@@ -1308,7 +1329,7 @@ local function on_proxy_spawned(_, ship)
 	local P = S.proxy
 	P.id = to64(ship)
 	P.sector = C.GetContextByClass(P.id, "sector", false)
-	P.shown, P.test, P.last_cmd, P.report_at = nil, nil, nil, nil
+	P.shown, P.test, P.last_cmd, P.report_at, P.status_key = nil, nil, nil, nil, nil
 	set_proxy_state("live", getElapsedTime())
 	log("proxy live")
 	notify("%s is %s", S.rem.name or "partner", partner_whereabouts() or "here")
@@ -1596,6 +1617,10 @@ local function tick(now, dt)
 	end
 
 	local s = local_tick(now)
+	if S.loc.lost_ship then
+		S.loc.lost_ship = false
+		if config.mode == "net" then net_send("M|" .. clean_text(S.loc.name, 32) .. "|my ship was destroyed") end
+	end
 	if config.mode == "ghost" then
 		if s then ghost_send(s, now) end
 		ghost_deliver(now)
