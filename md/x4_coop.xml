@@ -481,6 +481,25 @@
             </do_for_each>
             <set_value name="player.entity.$x4coop_bubble" exact="$Bubble"/>
             <set_value name="player.entity.$x4coop_bubble_complete" exact="$Complete"/>
+            <!-- The same around the partner's ship, wherever it is: our copies there follow the partner's reports. -->
+            <set_value name="$Near" exact="[]"/>
+            <set_value name="$NearComplete" exact="0"/>
+            <do_if value="@Root.$Proxy.isoperational and @Root.$Proxy.sector">
+              <set_value name="$NearComplete" exact="1"/>
+              <find_ship name="$Found" space="Root.$Proxy.sector" masstraffic="false" multiple="true" sortbydistanceto="Root.$Proxy">
+                <match_distance object="Root.$Proxy" max="Root.$BubbleRadius"/>
+              </find_ship>
+              <do_for_each name="$Candidate" in="$Found">
+                <do_if value="$Near.count ge 40">
+                  <set_value name="$NearComplete" exact="0"/>
+                </do_if>
+                <do_elseif value="$Candidate != player.occupiedship and $Candidate.isoperational and not $Candidate.ismasstraffic and not $Candidate.isunit and not @$Candidate.dock and $Candidate.parent.isclass.space and not Root.$AllProxies.indexof.{$Candidate} and not @Root.$Adopted.indexof.{$Candidate} and not @Root.$Mirrors.indexof.{$Candidate}">
+                  <append_to_list name="$Near" exact="$Candidate"/>
+                </do_elseif>
+              </do_for_each>
+            </do_if>
+            <set_value name="player.entity.$x4coop_bubble_partner" exact="$Near"/>
+            <set_value name="player.entity.$x4coop_bubble_partner_complete" exact="$NearComplete"/>
             <raise_lua_event name="'x4coop.bubble'"/>
           </actions>
         </cue>

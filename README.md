@@ -182,13 +182,23 @@ What syncs while linked:
 * **Kills and damage:** a ship one of you kills dies in the other's world too; hits lower its
   hull on the other side, so both players' damage adds up.
 * **Gunfire:** your partner's ship fires at the ship they shoot at (hits or misses).
-* **NPCs near you** (within 6 km): the host's world is the truth. The joiner's copies are moved
-  to the host's positions 10 times a second and follow the host's hull; ships only the host has
-  get a stand-in; ships only the joiner has, well inside the host's range, are removed from the
-  joiner's (throwaway) copy. Their own AI still decides when to shoot.
+* **NPCs near either of you** (within 6 km): each game is the truth for the ships around its own
+  player, which it simulates in full; where you're together, the host's game is. Both games send
+  their area's ships 10 times a second, and the other game moves its copies of them to match:
+  * **Together:** the joiner follows the host. Ships only the host has get a stand-in on the
+    joiner's side; ships only the joiner has, well inside the host's range, are removed there.
+  * **Apart,** even in different sectors: the host's copies of the ships around the joiner follow
+    the joiner's game, in the same way, and the joiner's copies around the host follow the host.
+  * Hull follows the game that's in charge of that area; your own fresh hits are never undone.
+  * The NPCs' own AI still decides when to shoot.
 
-Outside the area around you, the two worlds drift apart (economy, far-away NPCs). The host's
-world is the real one: next session, share again.
+  When you're apart, this changes the **host's** world near the joiner, and the host's world is the
+  one that gets saved. Ships there follow the joiner's game, and NPC ships only the host has there are
+  removed. Player-owned ships are never removed, and neither is anything near the host itself.
+  `/x4coop set npc_remove 0` turns removal off on your side.
+
+Away from both of you, the two worlds still drift apart (economy, far-away NPCs). The host's world
+is the real one: next session, share again.
 
 ## Commands
 
@@ -377,7 +387,8 @@ python extensions/x4_coop/dev/run_tests.py [--quick]
 * `ui/x4_coop.lua` flown through ~20 scenarios in **X4's own LuaJIT** (`lua51_64.dll`) with a
   stubbed engine (`dev/sim.lua`): unusual rotation conventions, degree angles, the MD fallback,
   network with RTT, partner restarts, sector jumps, near-vertical flight, shared-world link and
-  mismatch, kills/hits/fire, adoption, NPC bubble host and joiner (stand-ins, removal, hull),
+  mismatch, kills/hits/fire, adoption, NPC sync both ways: together and in different sectors
+  (stand-ins, removal, hull, the host keeping its own area, no echo),
   hostile messages, guest ship, save handoff commands. Errors are measured against ground truth:
   the partner within ~2–3 m and ~2° (95th percentile) at 220–300 m/s; NPC copies within ~3.5 m.
 * Bridge: password codec (encryption, replay, tamper, stale, other versions), reconnects, chat, wrong password, partner

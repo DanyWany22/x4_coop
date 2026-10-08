@@ -325,7 +325,7 @@ local function reset()
 		ghost = { queue = {} },
 		health = { frames = 0, gap_max = 0, corr_sum = 0, corr_n = 0, corr_max = 0 },
 		link = { role = kept_role, world = nil, state = nil, linked = false, last_sent = -1e9, last_hit = {} },
-		npc = { sent_radius = nil, members = {}, ents = {}, prev = {}, last_send = -1e9, received = 0, driven = 0,
+		npc = { sent_radius = nil, members = {}, near_partner = {}, ents = {}, prev = {}, last_send = -1e9, received = 0, driven = 0,
 			found = {}, mirrors = {}, mirror_of = {}, pending = {}, unmatched = {}, removed = {}, removed_count = 0,
 			dead = {}, my_hits = {}, last_sweep = -1e9 },
 		net = { api = nil, status = "idle", reading = false, connected = false, retry_at = 0, last_ping = -1e9, rtt = nil,
@@ -1049,18 +1049,25 @@ local function proxy_tick(now, dt)
 end
 
 -------------------------------------------------------------------------------
--- NPC bubble (shared world). Both games list the ships near their player (md BubbleScan, every second).
--- The host sends their poses at npc_rate; the joiner moves its own copies of the same ships (same ID
--- code) with the partner's smoothing and prediction, so a fight looks the same on both sides.
--- The host's world is the truth near the players (the joiner's world is a copy of the host's save):
---   * a ship the joiner can't find gets a stand-in ("mirror") - md first looks for the real copy;
---   * ships only the joiner has, well inside the host's coverage, are removed (never player-owned);
---   * hull follows the host, except that the joiner's own fresh hits are not undone.
+-- NPC bubble (shared world): regional authority. Each game is the truth for the ships near its own
+-- player, which it simulates in full; where both players are, the host is. Both games list the ships near
+-- their player and near the partner's ship (md BubbleScan, every second), and both send their own area's
+-- poses at npc_rate ("B"). Each moves its copies of the partner's ships (same ID code) with the partner's
+-- smoothing and prediction, so a fight looks the same on both sides:
+--   * the joiner follows all of the host's reports, and reports only ships outside the host's area;
+--   * the host follows the joiner's reports only for ships its own scan doesn't cover;
+--   * neither reports ships it is moving for the partner, so nothing echoes back;
+--   * a ship we can't find gets a stand-in ("mirror") - md first looks for our real copy;
+--   * ships only we have, well inside the partner's area, are removed (never player-owned; the host
+--     never removes ships near itself);
+--   * hull follows the partner's, except that our own fresh hits are not undone.
 -- Ships that were just killed are "dead" for a while, so they don't come back as stand-ins.
 
 local NPC_MAX = 40           -- ships per bubble (md lists at most this many)
-local NPC_DEAD_HOLD = 30     -- s a killed ship stays dead here, whatever the host still says
-local NPC_LOST_GRACE = 3     -- s to wait for the host's verdict when our copy dies on its own
+local NPC_DEAD_HOLD = 30     -- s a killed ship stays dead here, whatever the partner still says
+local NPC_LOST_GRACE = 3     -- s to wait for the partner's verdict when our copy dies on its own
+local NPC_HOST_MARGIN = 1.1  -- joiner: ships within this times the host's radius of the host are the host's
+local NPC_HOST_KEEP = 1.25   -- host: never removes ships within this times its radius of itself
 
 local function npc_enabled()
 	return config.mode == "net" and S.link.linked and config.npc_sync == 1 and effective_backend() == "lua"
@@ -1070,13 +1077,19 @@ local function lua_id(id)
 	return ConvertStringToLuaID(tostring(id))
 end
 
--- md finished a scan: player.entity.$x4coop_bubble lists the nearby ships, nearest first;
--- $x4coop_bubble_complete says whether that is all of them.
-local function on_bubble()
-	local N = S.npc
-	local list = S.player and GetNPCBlackboard(S.player, "$x4coop_bubble")
-	if type(list) ~= "table" then return end
-	local members = {}
+local function distance(a, b)
+	return math.sqrt((a.x - b.x) ^ 2 + (a.y - b.y) ^ 2 + (a.z - b.z) ^ 2)
+end
+
+-- Whether the partner is the truth for this ship: the host always is for the joiner; the joiner is for the
+-- host only where the host's own scan doesn't reach.
+local function partner_rules(code)
+	return S.link.role == "join" or not S.npc.members[code]
+end
+
+local function scan_list(key)
+	local list, members = GetNPCBlackboard(S.player, key), {}
+	if type(list) ~= "table" then return members end
 	for _, ship in ipairs(list) do
 		local id = to64(ship)
 		local code = C.GetObjectIDCode(id)
@@ -1085,12 +1098,22 @@ local function on_bubble()
 				hull = GetComponentData(id, "hullpercent"), playerowned = GetComponentData(id, "isplayerowned") }
 		end
 	end
-	N.members = members
+	return members
+end
+
+-- md finished a scan: player.entity.$x4coop_bubble lists the ships near us, nearest first, and
+-- $x4coop_bubble_partner those near the partner's ship; the _complete flags say whether that is all of them.
+local function on_bubble()
+	local N = S.npc
+	if not S.player or type(GetNPCBlackboard(S.player, "$x4coop_bubble")) ~= "table" then return end
+	N.members = scan_list("$x4coop_bubble")
+	N.near_partner = scan_list("$x4coop_bubble_partner")
+	local members = N.members
 	local complete = GetNPCBlackboard(S.player, "$x4coop_bubble_complete")
 	N.scan_complete = complete == 1 or complete == true
 	-- Our real copy came into range of a ship we had a stand-in for: the stand-in goes.
 	for code, mirror in pairs(N.mirrors) do
-		if members[code] then
+		if members[code] or N.near_partner[code] then
 			request("obj_remove", { lua_id(mirror.id) })
 			N.mirrors[code] = nil
 		end
@@ -1123,10 +1146,10 @@ local function on_npc_mirror()
 	end
 end
 
--- The joiner's ship for a host ID code: our copy (in our scan, or found further away), or our stand-in.
+-- Our ship for one of the partner's ID codes: our copy (in either scan, or found further away), or our stand-in.
 local function npc_local(code)
 	local N = S.npc
-	local m = N.members[code] or N.found[code] or N.mirrors[code]
+	local m = N.members[code] or N.near_partner[code] or N.found[code] or N.mirrors[code]
 	return m and C.IsComponentOperational(m.id) and m.id or nil
 end
 
@@ -1136,13 +1159,25 @@ local function npc_count(t)
 	return n
 end
 
+-- Our area's ships, for the partner. Not the ones we move for the partner, and on the joiner's side not the
+-- host's area (the host is the truth there).
 local function npc_send(now)
-	local N = S.npc
+	local N, P = S.npc, S.proxy
 	if now - N.last_send < 1 / config.npc_rate or not S.loc.sector_macro then return end
+	local host_area
+	if S.link.role == "join" then
+		if P.state ~= "live" then return end  -- where the host is decides what we may report
+		if P.sector == S.loc.sector then
+			host_area = { pos = C.GetObjectPositionInSector(P.id), radius = NPC_HOST_MARGIN * (N.partner_radius or config.npc_radius) }
+		end
+	end
 	N.last_send = now
 	local entries, prev = {}, N.prev
 	for code, m in pairs(N.members) do
-		if C.IsComponentOperational(m.id) and C.GetContextByClass(m.id, "sector", false) == S.loc.sector then
+		local E = N.ents[code]
+		local moved_for_partner = E and now - (E.seen or 0) <= 2
+		if not moved_for_partner and C.IsComponentOperational(m.id) and C.GetContextByClass(m.id, "sector", false) == S.loc.sector
+			and not (host_area and distance(C.GetObjectPositionInSector(m.id), host_area.pos) <= host_area.radius) then
 			local p = C.GetObjectPositionInSector(m.id)
 			local q = prev[code]
 			local vx, vy, vz = 0, 0, 0
@@ -1154,17 +1189,17 @@ local function npc_send(now)
 				code, m.macro, tostring(m.owner or "ownerless"), tonumber(m.hull) or 100, p.x, p.y, p.z, p.yaw, p.pitch, p.roll, vx, vy, vz)
 		end
 	end
-	-- "complete" tells the joiner it may remove ships we don't list; md says whether the list was cut off.
+	-- "complete" tells the partner it may remove ships we don't list; md says whether the list was cut off.
 	net_send(string.format("B|%.4f|%s|%d|%d|%s", now, S.loc.sector_macro, config.npc_radius, N.scan_complete and 1 or 0,
 		table.concat(entries, ";")))
 end
 
--- Joiner: one B message from the host.
+-- One B message from the partner: the ships in its area, in its sector (which may not be ours).
 local function npc_receive(f, now)
 	local N = S.npc
 	local t, radius = tonumber(f[2]), tonumber(f[4])
-	if not t or f[3] ~= S.loc.sector_macro or not radius or radius ~= radius then return end  -- only the sector we are in
-	N.host_radius, N.host_complete, N.last_b = math.max(0, math.min(radius, config.npc_radius)), f[5] == "1", now
+	if not t or not f[3] or not f[3]:match("^[%w_]+$") or not radius or radius ~= radius then return end
+	N.partner_radius, N.partner_complete, N.last_b = math.max(0, math.min(radius, config.npc_radius)), f[5] == "1", now
 	local taken = 0
 	for entry in (f[6] or ""):gmatch("[^;]+") do
 		if taken >= NPC_MAX then break end
@@ -1173,7 +1208,7 @@ local function npc_receive(f, now)
 		local code, macro, owner, hull = v[1], v[2], v[3], tonumber(v[4])
 		if #v == 13 and #code <= 16 and code:match("^[%w%-]+$") and #macro <= 80 and macro:match("^[%w_]+$")
 			and #owner <= 40 and owner:match("^[%w_]+$") and hull and hull >= 0 and hull <= 100
-			and not (N.dead[code] and now - N.dead[code] < NPC_DEAD_HOLD) then
+			and not (N.dead[code] and now - N.dead[code] < NPC_DEAD_HOLD) and partner_rules(code) then
 			local s = { t = t, sector_macro = f[3], ship_macro = macro }
 			local okay = true
 			for i, k in ipairs({ "x", "y", "z", "yaw", "pitch", "roll", "vx", "vy", "vz" }) do
@@ -1194,8 +1229,55 @@ local function npc_receive(f, now)
 end
 
 local function npc_reset_tables(N)
-	N.ents, N.members, N.found, N.mirrors, N.mirror_of = {}, {}, {}, {}, {}
+	N.ents, N.members, N.near_partner, N.found, N.mirrors, N.mirror_of = {}, {}, {}, {}, {}, {}
 	N.pending, N.unmatched, N.dead, N.my_hits = {}, {}, {}, {}
+end
+
+-- Drop what we follow for one partner ship: its stand-in goes, our own copy returns to its own AI.
+local function npc_forget(N, code)
+	N.ents[code] = nil
+	local mirror = N.mirrors[code]
+	if mirror then
+		if C.IsComponentOperational(mirror.id) then request("obj_remove", { lua_id(mirror.id) }) end
+		N.mirrors[code] = nil
+	end
+	N.found[code] = nil
+end
+
+-- Remove ships only we have, where the partner is the truth, its list is complete and covers them.
+local function npc_sweep(N, now)
+	local P = S.proxy
+	local partner_pos = (P.state == "live" and N.partner_complete and now - (N.last_b or -1e9) < 1)
+		and C.GetObjectPositionInSector(P.id) or nil
+	local own_ship = C.GetPlayerOccupiedShipID()
+	local own_pos = S.link.role == "host" and own_ship ~= 0 and C.GetObjectPositionInSector(own_ship) or nil
+	local seen = {}
+	for _, list in ipairs({ N.members, N.near_partner }) do
+		for code, m in pairs(list) do
+			if not seen[code] then
+				seen[code] = true
+				local sector = C.GetContextByClass(m.id, "sector", false)
+				local near = partner_pos and not N.ents[code] and not N.removed[code] and not m.playerowned
+					and partner_rules(code) and sector == P.sector
+				local p = near and C.GetObjectPositionInSector(m.id)
+				near = near and distance(p, partner_pos) <= 0.8 * N.partner_radius
+				-- the host keeps everything near itself, whatever the joiner's list says
+				if near and own_pos and sector == S.loc.sector then
+					near = distance(p, own_pos) > NPC_HOST_KEEP * config.npc_radius
+				end
+				if not near then
+					N.unmatched[code] = nil
+				else
+					N.unmatched[code] = N.unmatched[code] or now
+					if now - N.unmatched[code] >= 3 then
+						N.removed[code] = true
+						N.removed_count = N.removed_count + 1
+						request("obj_remove", { lua_id(m.id) })
+					end
+				end
+			end
+		end
+	end
 end
 
 local function npc_tick(now, dt)
@@ -1210,11 +1292,8 @@ local function npc_tick(now, dt)
 		end
 	end
 	if radius == 0 or C.IsGamePaused() then return end
-	if S.link.role == "host" then
-		npc_send(now)
-		return
-	end
-	-- Joiner: drive our ships for the host's. Ones the host stopped mentioning go back to their own AI;
+	npc_send(now)
+	-- Move our ships for the partner's. Ones the partner stopped mentioning go back to their own AI;
 	-- stand-ins for them are removed.
 	local driven, requested = 0, 0
 	for code, at in pairs(N.pending) do
@@ -1231,16 +1310,19 @@ local function npc_tick(now, dt)
 				N.found[code], id = nil, nil
 			end
 		end
+		-- Our copy must be in the sector the partner reports it in (the worlds can differ).
+		if id and now - (E.sector_check or 0) >= 1 then
+			E.sector_check = now
+			local newest = E.snaps[#E.snaps]
+			E.elsewhere = newest ~= nil
+				and GetComponentData(to64(C.GetContextByClass(id, "sector", false)), "macro") ~= newest.sector_macro
+		end
 		if id == own_ship then
 			-- e.g. just after /x4coop takeship, while the scan still lists our new ship: never move it
-		elseif now - (E.seen or 0) > 2 or (N.dead[code] and now - N.dead[code] < NPC_DEAD_HOLD) then
-			N.ents[code] = nil
-			local mirror = N.mirrors[code]
-			if mirror then
-				if C.IsComponentOperational(mirror.id) then request("obj_remove", { lua_id(mirror.id) }) end
-				N.mirrors[code] = nil
-			end
-			N.found[code] = nil
+		elseif now - (E.seen or 0) > 2 or (N.dead[code] and now - N.dead[code] < NPC_DEAD_HOLD) or not partner_rules(code) then
+			npc_forget(N, code)
+		elseif id and E.elsewhere then
+			-- our copy is in another sector than the partner's: leave it, and make no stand-in either
 		elseif id then
 			E.had, E.lost = true, nil
 			local target = remote_target(now, E)
@@ -1250,7 +1332,7 @@ local function npc_tick(now, dt)
 				C.SetObjectSectorPos(id, sector, make_posrot(E.shown.x, E.shown.y, E.shown.z, E.shown.q))
 				driven = driven + 1
 			end
-			-- The host referees damage: follow its hull, but don't undo our own hits from the last 3 s.
+			-- The partner referees damage in its area: follow its hull, but don't undo our own hits from the last 3 s.
 			if config.npc_hull == 1 and E.hull and now - (E.hull_at or 0) >= 1 then
 				E.hull_at = now
 				local mine = tonumber(GetComponentData(id, "hullpercent"))
@@ -1260,7 +1342,7 @@ local function npc_tick(now, dt)
 				end
 			end
 		else
-			-- Nothing of ours to drive. If our copy just died, give the host time to report the kill first.
+			-- Nothing of ours to move. If our copy just died, give the partner time to report the kill first.
 			if E.had then E.lost = E.lost or now end
 			local settled = not E.had or now - E.lost >= NPC_LOST_GRACE
 			if config.npc_mirror == 1 and settled and now - E.first > 1 and now - (N.pending[code] or -1e9) > 5
@@ -1277,30 +1359,9 @@ local function npc_tick(now, dt)
 	end
 	N.driven = driven
 
-	-- Remove ships the host doesn't have, but only where the host's list is complete and covers them.
 	if config.npc_remove == 1 and now - N.last_sweep >= 1 then
 		N.last_sweep = now
-		local P = S.proxy
-		local host_pos = (P.state == "live" and P.sector == S.loc.sector and N.host_complete and now - (N.last_b or -1e9) < 1)
-			and C.GetObjectPositionInSector(P.id) or nil
-		for code, m in pairs(N.members) do
-			if N.ents[code] or N.removed[code] or not host_pos or m.playerowned then
-				N.unmatched[code] = nil
-			else
-				local p = C.GetObjectPositionInSector(m.id)
-				local d = math.sqrt((p.x - host_pos.x) ^ 2 + (p.y - host_pos.y) ^ 2 + (p.z - host_pos.z) ^ 2)
-				if d > 0.8 * N.host_radius then
-					N.unmatched[code] = nil
-				else
-					N.unmatched[code] = N.unmatched[code] or now
-					if now - N.unmatched[code] >= 3 then
-						N.removed[code] = true
-						N.removed_count = N.removed_count + 1
-						request("obj_remove", { lua_id(m.id) })
-					end
-				end
-			end
-		end
+		npc_sweep(N, now)
 	end
 end
 
@@ -1392,7 +1453,7 @@ on_world_message = function(kind, f, now)
 			update_link(now)
 		end
 	elseif kind == "B" then
-		if K.linked and K.role == "join" and npc_enabled() then npc_receive(f, now) end
+		if K.linked and npc_enabled() then npc_receive(f, now) end
 	elseif K.linked and valid_world_ref(f[2], f[3], f[4]) then
 		local mirror = S.npc.mirrors[f[2]]  -- a ship we only have as a stand-in: address it directly
 		if kind == "K" then S.npc.dead[f[2]] = now end

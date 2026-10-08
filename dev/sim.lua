@@ -31,6 +31,8 @@ local SC = {
 	                 role = "host", own_world = "abc123", partner_world = "abc123", npc_test = "host" },
 	npc_join     = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
 	                 role = "join", own_world = "abc123", partner_world = "abc123", npc_test = "join" },
+	npc_apart    = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
+	                 role = "host", own_world = "abc123", partner_world = "abc123", npc_test = "apart", partner_sector = 501 },
 	world_oldmod = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
 	                 role = "join", own_world = "abc123", partner_world = "abc123", world_test = "mismatch", partner_protocol = "",
 	                 want_check = "different mod versions" },
@@ -105,6 +107,17 @@ if sc.npc_test then
 			macro = SHIP_MACRO, idcode = "NPC-" .. i }
 	end
 end
+if sc.npc_test == "apart" then
+	local pl = objects[PLAYER]
+	for i = 1, NPC_COUNT do
+		local x, y, z = npc_truth(20 + i, 0, { x = pl.x + 150, y = pl.y, z = pl.z })
+		objects[420 + i] = { sector = 501, x = x + 500, y = y, z = z, yaw = 0, pitch = 0, roll = 0, macro = SHIP_MACRO,
+			idcode = "NPC-" .. (20 + i) }
+	end
+	objects[427] = { sector = 501, x = pl.x + 400, y = pl.y, z = pl.z, yaw = 0, pitch = 0, roll = 0, macro = SHIP_MACRO, idcode = "NPC-27" }
+	objects[428] = { sector = 501, x = pl.x - 100, y = pl.y, z = pl.z, yaw = 0, pitch = 0, roll = 0, macro = SHIP_MACRO, idcode = "OWN-28",
+		playerowned = true }
+end
 if sc.npc_test == "join" then
 	local pl = objects[PLAYER]
 	objects[407] = { sector = 500, x = pl.x + 200, y = pl.y, z = pl.z, yaw = 0, pitch = 0, roll = 0, macro = SHIP_MACRO, idcode = "NPC-7" }
@@ -122,6 +135,7 @@ local teleports, game_saves, game_loads = {}, {}, {}
 local last_status = nil
 local spawn_sectors, world_requests, adoptions = {}, {}, 0
 local bubble_radius = 0
+setpos_count = {}
 local mirror_of_code, obj_actions, found_own = {}, {}, {}
 local proxy_id = nil
 local history = {}   -- player pose history for ground truth
@@ -175,6 +189,7 @@ C = {
 	SetObjectSectorPos = function(id, sector, pr)
 		local o = objects[id]
 		assert(o, "SetObjectSectorPos on missing object " .. tostring(id))
+		setpos_count[id] = (setpos_count[id] or 0) + 1
 		if sc.setpos == "ignore" then return end
 		local k = sc.setpos == "degrees" and math.pi / 180 or 1
 		o.x, o.y, o.z, o.yaw, o.pitch, o.roll = pr.x, pr.y, pr.z, pr.yaw * k, pr.pitch * k, pr.roll * k
@@ -281,8 +296,9 @@ function AddUITriggeredEvent(screen, control, args)
 		queue("x4coop.probe_result")
 	elseif control == "npc_mirror" then
 		blackboard["$x4coop_mirrors"] = blackboard["$x4coop_mirrors"] or {}
+		local in_sector = sector_by_macro(args[4]) or 500
 		for oid, o in pairs(objects) do
-			if o.idcode == args[1] and oid ~= PLAYER and oid ~= proxy_id and not o.mirror then
+			if o.idcode == args[1] and oid ~= PLAYER and oid ~= proxy_id and not o.mirror and o.sector == in_sector then
 				local list = blackboard["$x4coop_mirrors"]
 				list[#list + 1] = { args[1], oid, 0 }  -- our own copy, outside the scan
 				found_own[args[1]] = oid
@@ -292,7 +308,7 @@ function AddUITriggeredEvent(screen, control, args)
 		end
 		local id = next_id
 		next_id = next_id + 1
-		objects[id] = { sector = 500, x = args[5], y = args[6], z = args[7], yaw = args[8], pitch = args[9], roll = args[10],
+		objects[id] = { sector = in_sector, x = args[5], y = args[6], z = args[7], yaw = args[8], pitch = args[9], roll = args[10],
 			macro = args[2], owner = args[3], idcode = "MIR-" .. id, hull = 100, mirror = true }
 		mirror_of_code[args[1]] = id
 		local list = blackboard["$x4coop_mirrors"]
@@ -376,6 +392,7 @@ if sc.pipes then
 					f[2] = tostring(tonumber(f[2]))
 					f[3] = string.format("%.4f", tonumber(f[3]) + partner_clock_offset)  -- partner's clock differs
 					f[6] = string.format("%.2f", tonumber(f[6]) + ECHO_OFFSET[1])
+				if sc.partner_sector then f[4] = SECTORS[sc.partner_sector] end
 					f[15] = "Echo"
 					if sc.partner_ship then f[16] = sc.partner_ship end
 					partner_queue[#partner_queue + 1] = { at = clock + 2 * ONE_WAY, msg = table.concat(f, "|") }
@@ -400,6 +417,25 @@ local function fake_host_bubble()
 	end
 	partner_queue[#partner_queue + 1] = { at = clock + ONE_WAY,
 		msg = string.format("B|%.4f|%s|6000|1|%s", clock + partner_clock_offset, SECTORS[500], table.concat(entries, ";")) }
+end
+
+local function fake_joiner_bubble()
+	if sc.npc_test ~= "apart" or not pipe_reader or clock < next_b or #history < 2 then return end
+	next_b = clock + 0.1
+	local h, h0 = history[#history], player_at(clock - 0.05)
+	local c = { x = h.x + ECHO_OFFSET[1], y = h.y, z = h.z }
+	local c0 = { x = h0.x + ECHO_OFFSET[1], y = h0.y, z = h0.z }
+	local entries = {}
+	for i = 21, 21 + NPC_COUNT do  -- NPC-21..24, then NPC-25: the host has no such ship
+		local x, y, z = npc_truth(i, clock, c)
+		local x0, y0, z0 = npc_truth(i, h0.t, c0)
+		local dt0 = clock - h0.t
+		entries[#entries + 1] = string.format("NPC-%d,%s,pirate,%.1f,%.2f,%.2f,%.2f,%.5f,0,0,%.2f,%.2f,%.2f", i, SHIP_MACRO,
+			i == 21 and 55 or 100, x, y, z, (i - 20) * 0.5, (x - x0) / dt0, (y - y0) / dt0, (z - z0) / dt0)
+	end
+	entries[#entries + 1] = string.format("NPC-1,%s,pirate,100.0,%.2f,%.2f,%.2f,0,0,0,0,0,0", SHIP_MACRO, c.x, c.y, c.z)
+	partner_queue[#partner_queue + 1] = { at = clock + ONE_WAY,
+		msg = string.format("B|%.4f|%s|6000|1|%s", clock + partner_clock_offset, SECTORS[501], table.concat(entries, ";")) }
 end
 
 local function deliver_pipe()
@@ -481,7 +517,7 @@ local max_proxies = 0
 while clock < sc.duration do
 	clock = clock + frame_dt
 	step_player(frame_dt)
-	if sc.npc_test == "host" then
+	if sc.npc_test == "host" or sc.npc_test == "apart" then
 		local h = history[#history]
 		for i = 1, NPC_COUNT do
 			local o = objects[400 + i]
@@ -498,9 +534,21 @@ while clock < sc.duration do
 		end
 		blackboard["$x4coop_bubble"] = list
 		blackboard["$x4coop_bubble_complete"] = 1
+		local near, px = {}, proxy_id and objects[proxy_id]
+		if px then
+			for id, o in pairs(objects) do
+				if id ~= PLAYER and id ~= proxy_id and not o.mirror and o.sector == px.sector
+					and math.sqrt((o.x - px.x) ^ 2 + (o.y - px.y) ^ 2 + (o.z - px.z) ^ 2) <= bubble_radius then
+					near[#near + 1] = id
+				end
+			end
+		end
+		blackboard["$x4coop_bubble_partner"] = near
+		blackboard["$x4coop_bubble_partner_complete"] = px and 1 or 0
 		if handlers["x4coop.bubble"] then handlers["x4coop.bubble"]("x4coop.bubble") end
 	end
 	fake_host_bubble()
+	fake_joiner_bubble()
 	if sc.partner_restart_at and clock >= sc.partner_restart_at and partner_clock_offset == 1000 then
 		partner_clock_offset = -500
 		say("t=%.1f partner restarted their game (clock jumped back)", clock)
@@ -612,7 +660,7 @@ while clock < sc.duration do
 		local truth
 		if sc.mode == "net" then
 			local h = player_at(clock - ONE_WAY)
-			truth = { sector = h.sector, x = h.x + ECHO_OFFSET[1], y = h.y, z = h.z, m = h.m }
+			truth = { sector = sc.partner_sector or h.sector, x = h.x + ECHO_OFFSET[1], y = h.y, z = h.z, m = h.m }
 		else
 			local h = history[#history]
 			local cfg = api.config
@@ -623,6 +671,22 @@ while clock < sc.duration do
 		if not chatted and clock > math.max(10, (calibrated_at or 1e9) + 1) and o.sector == truth.sector and (not sc.jump_at or math.abs(clock - sc.jump_at) > 2) and (not sc.partner_restart_at or math.abs(clock - sc.partner_restart_at) > 2) then
 			pos_errs[#pos_errs + 1] = math.sqrt((o.x - truth.x) ^ 2 + (o.y - truth.y) ^ 2 + (o.z - truth.z) ^ 2)
 			rot_errs[#rot_errs + 1] = mat_angle(engine_mat(o.yaw, o.pitch, o.roll), truth.m)
+		end
+	end
+	if sc.npc_test == "apart" and clock > 8 and not chatted then
+		local h = history[#history]
+		local c = { x = h.x + ECHO_OFFSET[1], y = h.y, z = h.z }
+		for i = 1, NPC_COUNT do
+			local o = objects[420 + i]
+			local x, y, z = npc_truth(20 + i, clock, c)
+			npc_errs[#npc_errs + 1] = math.sqrt((o.x - x) ^ 2 + (o.y - y) ^ 2 + (o.z - z) ^ 2)
+		end
+		local mid = mirror_of_code["NPC-25"]
+		if mid and objects[mid] then
+			apart_mirror_sector = objects[mid].sector
+			local x, y, z = npc_truth(25, clock, c)
+			local o = objects[mid]
+			mirror_errs[#mirror_errs + 1] = math.sqrt((o.x - x) ^ 2 + (o.y - y) ^ 2 + (o.z - z) ^ 2)
 		end
 	end
 	if sc.npc_test == "join" and clock > 8 and not chatted then
@@ -770,7 +834,26 @@ end
 if sc.npc_test then
 	local bs = {}
 	for _, w in ipairs(pipe_writes) do if w:sub(1, 2) == "B|" then bs[#bs + 1] = w end end
-	if sc.npc_test == "host" then
+	if sc.npc_test == "apart" then
+		local last = ""  -- our last report from our own sector (at the end, /x4coop join takes us to the joiner)
+		for _, b in ipairs(bs) do if b:find("|" .. SECTORS[500] .. "|", 1, true) then last = b end end
+		local st, emax, e95 = stats(npc_errs)
+		local mst, mmax, m95 = stats(mirror_errs)
+		local mid = mirror_of_code["NPC-25"]
+		local acts = table.concat(obj_actions, " ")
+		say("npc apart: our copies near the joiner vs its truth (m): %s   [%d samples]; stand-in NPC-25 = %s in sector %s: %s",
+			st, #npc_errs, tostring(mid), tostring(apart_mirror_sector), mst)
+		say("npc apart: NPC-1 moved by us %d times; our last B lists NPC-1: %s, NPC-21: %s; actions: %s",
+			setpos_count[401] or 0, tostring(last:find("NPC-1,", 1, true) ~= nil), tostring(last:find("NPC-21,", 1, true) ~= nil), acts)
+		ok = ok and #npc_errs > 1000 and e95 < 5
+			and mid ~= nil and apart_mirror_sector == 501 and #mirror_errs > 500 and m95 < 10
+			and (setpos_count[401] or 0) == 0                            -- our own area stays ours
+			and last:find("NPC-1,", 1, true) ~= nil and last:find("NPC-21,", 1, true) == nil
+			and acts:find("obj_remove:427", 1, true) ~= nil             -- only we had it, in the joiner's area
+			and acts:find("obj_remove:428", 1, true) == nil             -- player-owned: kept
+			and acts:find("obj_hull:421,55", 1, true) ~= nil            -- the joiner's lower hull taken
+			and acts:find("obj_remove:40", 1, true) == nil              -- nothing of our own area removed
+	elseif sc.npc_test == "host" then
 		local last = bs[#bs] or ""
 		local codes = 0
 		for i = 1, NPC_COUNT do if last:find("NPC-" .. i .. ",", 1, true) then codes = codes + 1 end end
@@ -783,8 +866,16 @@ if sc.npc_test then
 		ok = ok and #bs > 8 * (sc.duration - 2) and codes == NPC_COUNT and x and math.abs(x - o.x) < 20
 	else
 		local st, emax, e95 = stats(npc_errs)
-		say("npc join: copies vs host truth (m): %s   [%d samples]; B sent by us: %d", st, #npc_errs, #bs)
-		ok = ok and #npc_errs > 1000 and e95 < 5 and #bs == 0
+		-- we report our own area, never the host's: everything here is near the host, so no ships at all
+		local listed = 0
+		for _, b in ipairs(bs) do
+			for _, code in ipairs({ "NPC-1,", "NPC-2,", "NPC-3,", "NPC-4,", "NPC-7,", "OWN-8,", "NPC-9,", "NPC-10,", "NPC-11," }) do
+				if b:find(code, 1, true) then listed = listed + 1 end
+			end
+		end
+		say("npc join: copies vs host truth (m): %s   [%d samples]; B sent by us: %d, listing host-area ships %d times",
+			st, #npc_errs, #bs, listed)
+		ok = ok and #npc_errs > 1000 and e95 < 5 and #bs > 8 * (sc.duration - 5) and listed == 0
 		local mst, mmax, m95 = stats(mirror_errs)
 		local mid = mirror_of_code["NPC-9"]
 		local acts = table.concat(obj_actions, " ")
