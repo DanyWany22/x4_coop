@@ -348,6 +348,46 @@
           </actions>
         </cue>
 
+        <!--
+          The local player firing at their target, hit or miss ("A|idcode|macro|sector", at most every 0.4 s), so the
+          partner's proxy of them fires too. The group holds the weapons of the ship the player flies; the listener
+          is a child cue, so the group exists before it starts listening (also in saves made before this cue).
+        -->
+        <cue name="WeaponWatch">
+          <actions>
+            <create_group groupname="$Weapons"/>
+            <set_value name="$Ship" exact="null"/>
+            <set_value name="$NextReport" exact="0s"/>
+          </actions>
+          <cues>
+            <cue name="WeaponWatchRefresh" instantiate="true" checkinterval="2s">
+              <conditions>
+                <check_value value="player.occupiedship != WeaponWatch.$Ship"/>
+              </conditions>
+              <actions>
+                <clear_group group="WeaponWatch.$Weapons"/>
+                <set_value name="WeaponWatch.$Ship" exact="player.occupiedship"/>
+                <do_if value="@player.occupiedship.isoperational">
+                  <add_to_group groupname="WeaponWatch.$Weapons" list="player.occupiedship.weapons.operational.list"/>
+                </do_if>
+              </actions>
+            </cue>
+            <cue name="OnPlayerWeaponFired" instantiate="true">
+              <conditions>
+                <event_weapon_fired group="WeaponWatch.$Weapons"/>
+                <check_value value="player.age ge WeaponWatch.$NextReport and @player.target.isclass.ship and @player.target.isoperational"/>
+              </conditions>
+              <actions>
+                <set_value name="WeaponWatch.$NextReport" exact="player.age + 0.4s"/>
+                <set_value name="$Obj" exact="player.target"/>
+                <do_if value="@$Obj.sector and not Root.$AllProxies.indexof.{$Obj} and not @Root.$Adopted.indexof.{$Obj}">
+                  <raise_lua_event name="'x4coop.world'" param="'A|' + $Obj.idcode + '|' + $Obj.macro.id + '|' + $Obj.sector.macro.id"/>
+                </do_if>
+              </actions>
+            </cue>
+          </cues>
+        </cue>
+
         <!-- param3: [idcode, ship_macro, sector_macro] -->
         <cue name="OnWorldKill" instantiate="true">
           <conditions>

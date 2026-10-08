@@ -445,7 +445,7 @@ if sc.mode ~= "ghost" or sc.backend then
 	clock = 0.1
 end
 local commanded, chatted, hostile_sent, world_sent, piped, fire_sent = false, false, false, false, false, false
-local guest_done, took_ship, checked, shared_in = false, false, false, false
+local guest_done, took_ship, checked, shared_in, miss_sent = false, false, false, false, false
 local adopted_seen = false
 -- Malformed or malicious partner messages: all must be dropped without errors or odd spawns.
 local HOSTILE = {
@@ -527,6 +527,11 @@ while clock < sc.duration do
 	if sc.fire_test and not fire_sent and clock > 12 then
 		fire_sent = true
 		handlers["x4coop.world"]("x4coop.world", "D|TGT-001|ship_arg_s_fighter_01_a_macro|cluster_01_sector001_macro|80")
+		handlers["x4coop.world"]("x4coop.world", "A|TGT-001|ship_arg_s_fighter_01_a_macro|cluster_01_sector001_macro")  -- throttled
+	end
+	if sc.fire_test and not miss_sent and clock > 14 then
+		miss_sent = true  -- firing and missing still makes the ghost fire
+		handlers["x4coop.world"]("x4coop.world", "A|TGT-002|ship_arg_s_fighter_01_a_macro|cluster_01_sector001_macro")
 	end
 	if sc.world_test == "host" and not guest_done and clock > 12 then
 		guest_done = true
@@ -782,7 +787,8 @@ if sc.fire_test then
 	local fires = {}
 	for _, r in ipairs(world_requests) do if r:sub(1, 5) == "fire:" then fires[#fires + 1] = r end end
 	say("ghost fire requests: %s", table.concat(fires, " "))
-	ok = ok and #fires == 1 and fires[1] == "fire:TGT-001,ship_arg_s_fighter_01_a_macro,cluster_01_sector001_macro"
+	ok = ok and #fires == 2 and fires[1] == "fire:TGT-001,ship_arg_s_fighter_01_a_macro,cluster_01_sector001_macro"
+		and fires[2] == "fire:TGT-002,ship_arg_s_fighter_01_a_macro,cluster_01_sector001_macro"
 end
 if sc.expect_no_proxy then
 	ok = ok and spawns == 0 and said:find("Mod Support APIs not installed", 1, true) ~= nil

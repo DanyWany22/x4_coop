@@ -1258,15 +1258,16 @@ on_world_message = function(kind, f, now)
 	end
 end
 
--- md reports the local player's kills ("K|idcode|macro|sector") and hits ("D|...|hull").
+-- md reports the local player's kills ("K|idcode|macro|sector"), hits ("D|...|hull") and shots at their
+-- target, hit or miss ("A|idcode|macro|sector").
 local function on_world_event(_, param)
 	local K = S.link
 	local f = split(tostring(param or ""))
 	if not valid_world_ref(f[2], f[3], f[4]) then return end
 	f[2] = S.npc.mirror_of[f[2]] or f[2]  -- a stand-in we made: use the host's code for it
 	local now = getElapsedTime()
-	if f[1] == "D" and config.fire_fx == 1 and now - (K.last_fire or -1e9) >= 0.5 then
-		-- You are hitting f[2]: your proxy on the other side (or your ghost here) fires at it too.
+	if (f[1] == "D" or f[1] == "A") and config.fire_fx == 1 and now - (K.last_fire or -1e9) >= 0.5 then
+		-- You are firing at (A) or hitting (D) f[2]: your proxy on the other side (or your ghost here) fires at it too.
 		K.last_fire = now
 		if config.mode == "ghost" then
 			request("fire", { f[2], f[3], f[4] })
