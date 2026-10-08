@@ -50,11 +50,17 @@ mod double-checks the engine's rotation convention (`probe:` in the log).
 ## Playing together
 
 1. **Bridges.** Each player runs one bridge next to their game (before or after starting X4).
-   * Host: double-click `bridge\host.bat`. It shows your Tailscale address and asks for a password.
+   * Host: double-click `bridge\host.bat`. It shows your addresses and asks for a password.
    * Joiner: double-click `bridge\join.bat`, enter the host's address and the same password.
-   * The host must be reachable on UDP and TCP **47810**: easiest is both PCs on
-     [Tailscale](https://tailscale.com) (or ZeroTier); otherwise forward the port on the router.
+   * The joiner must reach the host on UDP and TCP **47810**, in one of three ways:
+     * **Same home network:** use the host PC's home-network address (`192.168…`). Nothing to set up.
+     * **Over the internet:** on the host's router, forward UDP and TCP 47810 to the host PC. The
+       joiner then uses the host's public IP. Use a long password (12+ characters, such as a few
+       random words), because it is the only thing keeping strangers out.
+     * **[Tailscale](https://tailscale.com) or ZeroTier** on both PCs: no router setup. Use the host's
+       Tailscale address.
      The first time, **allow Python through Windows Firewall** on the host.
+   * The password encrypts and signs everything between the bridges, including the save.
 2. **In game**, both: `/x4coop net`, then `/x4coop check`. It names the first thing in the way
    (missing mod, no bridge, partner not reaching you, …) and what to do.
 3. When both are in a ship, your partner appears ("Aaron is in Mars, 412 km away"). `/x4coop join`
@@ -116,9 +122,16 @@ effects), `fire_fx` (proxy fires; gives spawned proxies a pilot), `npc_sync`, `n
 ## Troubleshooting
 
 * `/x4coop check` first.
-* **Partner never connects:** same password on both bridges? Host's firewall allows Python?
-  Joiner using the host's Tailscale address? Both PCs' clocks right (within a minute)? The bridge
-  windows log `partner connected` / `rejected packets … <reason>`.
+* **Partner never connects:** same password on both bridges? Same bridge version on both? Host's
+  firewall allows Python? Joiner using the right address for how you connect? Both PCs' clocks right
+  (within a minute)? The bridge windows log `partner connected` / `rejected packets … <reason>`.
+* **Over the internet, the host's bridge never logs a partner:** check the port forward (UDP 47810 to
+  the host PC's home-network address). If the router's own "WAN IP" differs from what "what is my
+  ip" shows, or starts with `100.64`–`100.127`, the ISP shares one address between customers
+  (CGNAT) and forwarding can't work. Then the other player hosts, or use Tailscale, or try
+  `--peer` on both sides (each names the other's public IP; many routers let that through because
+  both send first):
+  `python x4_coop_bridge.py --peer <their public IP> --role host --password …` (the joiner uses `--role join`).
 * **"pipe DLL blocked":** Protected UI Mode is on. **"Mod Support APIs not installed":** subscribe
   in the Workshop and restart.
 * **Partner's ship jitters:** the `health:` lines (every 15 s) show updates/s and the longest
@@ -143,8 +156,8 @@ effects), `fire_fx` (proxy fires; gives spawned proxies a pilot), `npc_sync`, `n
   adopt ships, warp, set hull/shields, destroy, find ships by ID code, notice your kills, hits and
   shots, list ships near you. The AI script makes a proxy fire.
 * **Bridge** (`bridge/x4_coop_bridge.py`) carries the messages: named pipe to the game (only
-  `X4.exe` on this PC may connect), UDP to the partner (HMAC-signed with the password, replay
-  protected, one partner at a time), TCP for the save handoff.
+  `X4.exe` on this PC may connect), UDP to the partner (encrypted and signed with keys made from
+  the password, replay protected, one partner at a time), TCP for the save handoff (encrypted too).
 
 Messages (one text line each): `S` snapshot (position, rotation, velocity, ship, hull, shield),
 `P`/`Q` ping, `M` chat, `L` world link, `K` kill, `D` hit, `F` firing at, `B` host's nearby
@@ -161,7 +174,9 @@ axis vectors. In-game results so far: degrees, YXZ+--.
 * Proxies are player-owned (friendly, but listed in your property).
 * No highway or travel-drive visuals for the partner; they reappear when they leave the highway.
   SETA (time acceleration) is not synchronised; avoid it while playing together.
-* Packets are authenticated, not encrypted: use Tailscale/ZeroTier rather than an open port.
+* The bridge's encryption uses Python's standard library only: scrypt for the key, a SHAKE-256
+  keystream, HMAC-SHA256. That is sound, but it is home-made, not a reviewed protocol like
+  Tailscale's WireGuard. A weak password can be guessed offline by anyone who records your traffic.
 * Proxies are saved with the game and removed on load. Before uninstalling: `/x4coop off`, save.
 
 ## Developer tests
@@ -178,7 +193,7 @@ python extensions/x4_coop/dev/run_tests.py [--quick]
   mismatch, kills/hits/fire, adoption, NPC bubble host and joiner (stand-ins, removal, hull),
   hostile messages, guest ship, save handoff commands. Errors are measured against ground truth:
   the partner within ~2–3 m and ~2° (95th percentile) at 220–300 m/s; NPC copies within ~3.5 m.
-* Bridge: password codec (replay, tamper, stale), reconnects, chat, wrong password, partner
+* Bridge: password codec (encryption, replay, tamper, stale, other versions), reconnects, chat, wrong password, partner
   injecting bridge messages, non-X4 pipe clients, second partner, and a real save handoff
   between two bridges (`dev/share_test.py`).
 

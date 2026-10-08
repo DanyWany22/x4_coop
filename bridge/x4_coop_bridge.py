@@ -7,14 +7,15 @@ it waits for the game and reconnects after reloads):
 
     python x4_coop_bridge.py --host                   # wait for a partner on UDP 47810
     python x4_coop_bridge.py --join 203.0.113.7       # connect to a host (port defaults to 47810)
-    python x4_coop_bridge.py --peer 100.64.0.2:47810  # both name each other (LAN / VPN)
+    python x4_coop_bridge.py --peer 198.51.100.4 --role host  # both name each other (no forwarding)
 
-Only the host needs to be reachable (UDP port forwarded, or both on a VPN such as
-Tailscale/ZeroTier). Add the same --password on both sides to ignore anyone else's packets.
+Only the host needs to be reachable: on the same LAN, on a VPN such as Tailscale/ZeroTier, or over
+the internet with UDP and TCP port 47810 forwarded to the host's PC. Both sides use the same
+--password: it encrypts and signs everything, so nobody else can read or forge the traffic.
 Standard library only: Windows, Python 3.8+.
 
 X4 reaches this pipe through SirNukes' Mod Support APIs (Protected UI Mode must be off).
-Datagrams are b"X4C1 " [+ HMAC tag] + one pipe message (see Codec); the message format is
+Datagrams are b"X4C2 " + header + one encrypted pipe message (see Codec); the message format is
 documented in ui/x4_coop.lua. "H" keepalives are handled here and never reach the game.
 A host serves one partner at a time and takes a new one only after the current one goes silent.
 On connect the game is told its role ("R|host" / "R|join"): the host's save is the shared world.
@@ -22,6 +23,7 @@ On connect the game is told its role ("R|host" / "R|join"): the host's save is t
 """
 import argparse
 import ctypes
+import functools
 import hashlib
 import hmac
 import os
@@ -33,7 +35,9 @@ import time
 import zlib
 from ctypes import wintypes
 
-MAGIC = b"X4C1 "
+MAGIC = b"X4C2 "        # X4C1 was the unencrypted format; the two don't talk to each other
+KDF_SALT = b"x4coop bridge v2"
+SHORT_PASSWORD = 12      # below this, warn: fine on a LAN or VPN, weak on the open internet
 DEFAULT_PORT = 47810
 BUFFER_SIZE = 64 * 1024
 KEEPALIVE_S = 1.0
@@ -170,11 +174,31 @@ def log(text):
     print(time.strftime("%H:%M:%S ") + text, flush=True)
 
 
+@functools.lru_cache(maxsize=8)
+def derive_keys(password):
+    """
+    Password -> (signing key, encryption key, save key). scrypt makes every guess cost ~0.1 s and 32 MB, so
+    someone who records a packet can't try passwords quickly; a long password (a few random words) still matters.
+    """
+    master = hashlib.scrypt(password.encode("utf-8"), salt=KDF_SALT, n=1 << 15, r=8, p=1, maxmem=64 << 20, dklen=32)
+    return tuple(hmac.new(master, label, hashlib.sha256).digest() for label in (b"sign", b"encrypt", b"save"))
+
+
+def keystream_xor(key, nonce, data):
+    """Encrypts or decrypts: data XOR SHAKE-256(key + nonce). Each nonce is used once per key."""
+    if not data:
+        return b""
+    stream = hashlib.shake_256(key + nonce).digest(len(data))
+    return (int.from_bytes(data, "big") ^ int.from_bytes(stream, "big")).to_bytes(len(data), "big")
+
+
 class Codec:
     """
-    Frames one pipe message per datagram: MAGIC + message. With a password:
-    MAGIC + tag + " " + session:counter:unixtime + " " + message, where tag is the first 16 hex digits of
-    HMAC-SHA256 over everything after it. A replayed datagram fails the counter check; an old one the time check.
+    Frames one pipe message per datagram: MAGIC + message. With a password the message is encrypted and signed:
+    MAGIC + tag + " " + session:counter:unixtime + " " + ciphertext. The ciphertext is the message XORed with a
+    keystream from the encryption key and that header (session is random per bridge start, counter never repeats);
+    tag is the first 32 hex digits of HMAC-SHA256 over header and ciphertext. A replayed datagram fails the counter
+    check; an old one the time check.
     """
 
     MAX_SKEW_S = 60      # sender's clock may differ from ours by this much
@@ -182,27 +206,29 @@ class Codec:
     WINDOW = 256         # a datagram may arrive this many counters late (UDP reorders) and still count once
 
     def __init__(self, password=""):
-        self.key = hashlib.sha256(password.encode("utf-8")).digest() if password else None
-        self.session = os.urandom(4).hex()
+        self.key, self.enc_key, self.save_key = derive_keys(password) if password else (None, None, None)
+        self.session = os.urandom(8).hex()
         self.counter = 0
         self.seen = {}           # session -> (highest counter accepted, set of accepted counters in the window)
         self.last_reject = ""
 
     def _tag(self, data):
-        return hmac.new(self.key, data, hashlib.sha256).hexdigest()[:16].encode()
+        return hmac.new(self.key, data, hashlib.sha256).hexdigest()[:32].encode()
 
     def seal(self, msg):
         data = msg.encode("utf-8")
         if self.key:
             self.counter += 1
-            data = f"{self.session}:{self.counter}:{int(time.time())}".encode() + b" " + data
+            header = f"{self.session}:{self.counter}:{int(time.time())}".encode()
+            data = header + b" " + keystream_xor(self.enc_key, header, data)
             data = self._tag(data) + b" " + data
         return MAGIC + data
 
     def open(self, datagram):
         """The message text, or None (see last_reject) for foreign, unsigned, replayed or stale traffic."""
         if not datagram.startswith(MAGIC):
-            self.last_reject = "not ours"
+            self.last_reject = ("your partner runs a different version of the bridge; update both"
+                                if datagram.startswith(b"X4C") else "not ours")
             return None
         data = datagram[len(MAGIC):]
         if self.key:
@@ -231,6 +257,7 @@ class Codec:
             if len(recent) > 2 * self.WINDOW:
                 recent = {c for c in recent if c > top - self.WINDOW}
             self.seen[session] = (top, recent)
+            data = keystream_xor(self.enc_key, meta, data)
         return data.decode("utf-8", "replace")
 
 
@@ -253,6 +280,7 @@ MAX_SAVE_BYTES = 1 << 30   # refuse anything bigger than 1 GiB
 SHARE_WAIT_S = 90          # host: how long to wait for the game to finish writing the save
 OFFER_TTL_S = 120          # host: how long the partner has to fetch it
 GZIP_MAGIC = b"\x1f\x8b"
+SAVE_CHUNK = 1 << 20       # the save travels in 1 MB pieces, each encrypted with its own nonce
 
 
 def gzip_complete(data):
@@ -277,7 +305,7 @@ class SaveShare:
     Host: the game quicksaves and sends "X|share|<save folder>|quicksave.xml.gz". Once the file has been
     rewritten and stopped growing, it is offered over the signed UDP link ("X|offer|size|sha256|token") and
     served once over TCP on the same port number, only to the partner's address, only after an HMAC proof
-    of the shared password over the one-time token.
+    of the shared password over the one-time token, encrypted with the save key and that token.
     Joiner: the game reports its save folder ("X|savedir|<path>"). On an offer, the bridge fetches the file,
     checks size, sha256 and gzip header, keeps a backup of the quicksave it replaces, and tells the game
     ("X|received|quicksave"). Transfers run on threads; results come back through a queue, so the relay
@@ -296,6 +324,10 @@ class SaveShare:
 
     def _proof(self, token):
         return hmac.new(self.codec.key, b"fetch:" + token.encode(), hashlib.sha256).hexdigest().encode()
+
+    def _crypt(self, token, offset, chunk):
+        """Encrypts or decrypts the save's bytes at offset (a multiple of SAVE_CHUNK)."""
+        return keystream_xor(self.codec.save_key, f"{token}:{offset}".encode(), chunk)
 
     def _say(self, text):
         self.events.put(("game", "N|" + text))
@@ -401,8 +433,8 @@ class SaveShare:
                 self.events.put(("log", "save fetch refused: wrong proof"))
                 return
             view = memoryview(offer["data"])
-            for i in range(0, len(view), 1 << 20):
-                conn.sendall(view[i:i + (1 << 20)])  # the 30 s timeout applies per 1 MB chunk
+            for i in range(0, len(view), SAVE_CHUNK):  # the 30 s timeout applies per 1 MB chunk
+                conn.sendall(self._crypt(offer["token"], i, view[i:i + SAVE_CHUNK]))
             self._say(f"save sent to your partner ({len(offer['data']) / 1e6:.1f} MB)")
         except OSError as e:
             self._say(f"sending the save failed: {e}")
@@ -439,6 +471,7 @@ class SaveShare:
                     chunks.append(chunk)
                     got += len(chunk)
             data = b"".join(chunks)
+            data = b"".join(self._crypt(token, i, data[i:i + SAVE_CHUNK]) for i in range(0, len(data), SAVE_CHUNK))
             if len(data) != size or hashlib.sha256(data).hexdigest() != sha or not gzip_complete(data):
                 self._say("the host's save arrived damaged; ask them to /x4coop share again")
                 return
@@ -481,7 +514,10 @@ def run(args):
 
     game = GamePipe(args.pipe)
     log(f"UDP port {port}; " + (f"partner {peer[0]}:{peer[1]}" if peer else "waiting for a partner to join")
-        + ("; password required" if args.password else ""))
+        + ("; encrypted with your password" if args.password else ""))
+    if args.password and len(args.password) < SHORT_PASSWORD:
+        log(f"note: short password. Fine on a LAN or Tailscale; over the open internet use {SHORT_PASSWORD}+ "
+            "characters (a few random words), because anyone who records a packet can try guesses offline")
     log(f"waiting for X4 on {game.path}")
 
     stats = {"to_peer": 0, "from_peer": 0, "to_game": 0, "dropped": 0, "rejected": 0, "ignored": 0, "flooded": 0}
@@ -552,7 +588,7 @@ def run(args):
             busy = True
             msg = codec.open(data)
             if msg is None:
-                if data.startswith(MAGIC):
+                if data.startswith(b"X4C"):  # ours, any version
                     stats["rejected"] += 1
                     if now - last_reject_note > 10:
                         last_reject_note = now
@@ -612,13 +648,16 @@ def main(argv=None):
     mode = p.add_mutually_exclusive_group()
     mode.add_argument("--host", action="store_true", help="wait for a partner to join (default)")
     mode.add_argument("--join", metavar="ADDR[:PORT]", help="connect to a hosting partner")
-    mode.add_argument("--peer", metavar="ADDR[:PORT]", help="fixed partner address; both sides use it")
+    mode.add_argument("--peer", metavar="ADDR[:PORT]",
+                      help="fixed partner address; both sides use it. Over the internet this often works without "
+                           "port forwarding, since both sides send first and open their own routers")
     p.add_argument("--port", type=int, default=None, help=f"local UDP port (default {DEFAULT_PORT}; random when joining)")
     p.add_argument("--pipe", default="x4_coop", help="pipe name, must match config.pipe in ui/x4_coop.lua")
     p.add_argument("--password", default=os.environ.get("X4COOP_PASSWORD", ""),
                    help="shared secret; both bridges must use the same one (or set X4COOP_PASSWORD)")
     p.add_argument("--no-password", action="store_true",
-                   help="run without a password: anyone who can reach this port can act as your partner")
+                   help="run without a password: nothing is encrypted, and anyone who can reach this port can "
+                        "act as your partner")
     p.add_argument("--any-client", action="store_true",
                    help="let any local program use the pipe, not only X4.exe (for test tools)")
     p.add_argument("--role", choices=["host", "join"],

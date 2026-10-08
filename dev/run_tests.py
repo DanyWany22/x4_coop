@@ -122,8 +122,12 @@ def test_codec():
           b.open(m3) == "S|3" and b.open(m2) == "S|2" and b.open(m2) is None)
     good = __import__("gzip").compress(b"x" * 100000)
     check("bridge: gzip completeness check", bridge.gzip_complete(good) and not bridge.gzip_complete(good[:-10]))
-    tampered = first.replace(b"ABC-1", b"ABC-2")
+    check("codec: message is encrypted", b"ABC-1" not in first and b"K|" not in first)
+    tampered = first[:-1] + bytes([first[-1] ^ 1])
     check("codec: tampered message rejected", bridge.Codec("s3cret").open(tampered) is None)
+    c = bridge.Codec("s3cret")
+    check("codec: other bridge version named",
+          c.open(b"X4C1 " + first[len(bridge.MAGIC):]) is None and "version" in c.last_reject)
     old = bridge.Codec("s3cret")
     old_time = bridge.time.time
     bridge.time.time = lambda: old_time() - 600
