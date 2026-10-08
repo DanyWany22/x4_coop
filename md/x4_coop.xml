@@ -559,6 +559,58 @@
           </actions>
         </cue>
 
+        <!--
+          Economy (shared world). Lua turns it on or off (param3: [1 or 0]); while on, every station is listed
+          once a minute for Lua (player.entity.$x4coop_stations, then 'x4coop.stations').
+        -->
+        <cue name="OnEconomyConfig" instantiate="true">
+          <conditions>
+            <event_ui_triggered screen="'x4coop'" control="'economy'"/>
+          </conditions>
+          <actions>
+            <set_value name="Root.$EconomyOn" exact="event.param3.{1}"/>
+            <set_value name="Root.$NextStationList" exact="0s"/>
+          </actions>
+        </cue>
+
+        <cue name="StationList" instantiate="true" checkinterval="5s">
+          <conditions>
+            <check_value value="@Root.$EconomyOn == 1 and player.age ge @Root.$NextStationList"/>
+          </conditions>
+          <actions>
+            <set_value name="Root.$NextStationList" exact="player.age + 60s"/>
+            <find_station name="$All" space="player.galaxy" multiple="true"/>
+            <set_value name="player.entity.$x4coop_stations" exact="$All"/>
+            <raise_lua_event name="'x4coop.stations'"/>
+          </actions>
+        </cue>
+
+        <!--
+          Joiner: set one station's stock to the host's.
+          param3: [station, ware id, change, ware id, change, ...]; a positive change adds, a negative one removes.
+        -->
+        <cue name="OnStock" instantiate="true">
+          <conditions>
+            <event_ui_triggered screen="'x4coop'" control="'stock'"/>
+          </conditions>
+          <actions>
+            <set_value name="$Args" exact="event.param3"/>
+            <set_value name="$Station" exact="$Args.{1}"/>
+            <do_if value="@$Station.isclass.station and $Station.isoperational">
+              <do_all exact="($Args.count - 1) / 2" counter="$k">
+                <set_value name="$Ware" exact="@ware.{$Args.{2 * $k}}"/>
+                <set_value name="$Change" exact="$Args.{2 * $k + 1}"/>
+                <do_if value="$Ware and $Change gt 0">
+                  <add_cargo object="$Station" ware="$Ware" exact="$Change"/>
+                </do_if>
+                <do_elseif value="$Ware and $Change lt 0">
+                  <remove_cargo object="$Station" ware="$Ware" exact="-$Change"/>
+                </do_elseif>
+              </do_all>
+            </do_if>
+          </actions>
+        </cue>
+
         <cue name="OnNpcClear" instantiate="true">
           <conditions>
             <event_ui_triggered screen="'x4coop'" control="'npc_clear'"/>

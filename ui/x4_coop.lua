@@ -86,10 +86,12 @@ local config = {
 	fire_fx = 1,              -- 1: proxies get a pilot and fire at what their player is hitting (ghost: what you hit)
 	npc_sync = 1,             -- 1: in a linked shared world, the host's nearby ships drive the joiner's copies
 	npc_radius = 6000,        -- m, "nearby"
-	npc_rate = 10,            -- host: NPC pose updates per second
-	npc_mirror = 1,           -- joiner: create stand-ins for ships only the host has
-	npc_remove = 1,           -- joiner: remove ships near the host that the host doesn't have
-	npc_hull = 1,             -- joiner: take the host's (lower) hull values
+	npc_rate = 10,            -- NPC pose updates per second, each way
+	npc_mirror = 1,           -- create stand-ins for ships only the partner has, in its area
+	npc_remove = 1,           -- remove ships in the partner's area that only we have
+	npc_hull = 1,             -- take the partner's hull values for ships in its area
+	economy = 1,              -- shared world: the joiner's station stock follows the host's
+	economy_cycle = 60,       -- s for the host to send every station once
 	ghost_latency = 0.12,     -- s, simulated one-way latency in ghost mode
 	ghost_jitter = 0.03,      -- s, extra random delay per snapshot
 	ghost_loss = 0.0,         -- 0..1, fraction of snapshots dropped
@@ -102,7 +104,7 @@ local config = {
 
 -- Bump when messages change meaning, so two different builds refuse to link instead of misreading each
 -- other. Builds before this check send no version and count as 1.
-local PROTOCOL = 3
+local PROTOCOL = 4  -- 4: NPC sync both ways, economy (E)
 
 local SETTINGS_KEY = { mode = "$x4coop_mode", backend = "$x4coop_backend" }
 local PIPES_MODULE = "extensions.sn_mod_support_apis.ui.named_pipes.Interface"
@@ -328,6 +330,7 @@ local function reset()
 		npc = { sent_radius = nil, members = {}, near_partner = {}, ents = {}, prev = {}, last_send = -1e9, received = 0, driven = 0,
 			found = {}, mirrors = {}, mirror_of = {}, pending = {}, unmatched = {}, removed = {}, removed_count = 0,
 			dead = {}, my_hits = {}, last_sweep = -1e9 },
+		econ = { on = false, list = {}, by_code = {}, next = 1, budget = 0, cycle = 0, pass = nil, last = nil },
 		net = { api = nil, status = "idle", reading = false, connected = false, retry_at = 0, last_ping = -1e9, rtt = nil,
 			partner = kept_partner },
 	}
@@ -779,7 +782,7 @@ on_pipe_message = function(msg)
 		if text == "partner connected" then N.partner = true elseif text == "partner silent" then N.partner = false end
 		kept_partner = N.partner
 		notify("%s", text)
-	elseif kind == "R" or kind == "L" or kind == "K" or kind == "D" or kind == "F" or kind == "B" then
+	elseif kind == "R" or kind == "L" or kind == "K" or kind == "D" or kind == "F" or kind == "B" or kind == "E" then
 		if config.mode == "net" then on_world_message(kind, f, now) end
 	end
 end
@@ -1366,6 +1369,146 @@ local function npc_tick(now, dt)
 end
 
 -------------------------------------------------------------------------------
+-- Economy (shared world): the host's station stock is the truth everywhere. Prices and trade offers follow
+-- stock, so the same stock makes the two economies match. md lists every station once a minute
+-- (StationList). The host reads each station's cargo, a slice at a time (every station once per
+-- economy_cycle seconds), and sends it ("E|stock|pass|index|count|station code|ware:amount,..."). The
+-- joiner sets its own copy of each station to the same amounts (md OnStock: add_cargo / remove_cargo) and
+-- measures how far the two had drifted apart since the previous pass.
+
+local ECON_BURST = 10        -- stations at most per frame, after a pause
+
+local function econ_enabled()
+	return config.mode == "net" and S.link.linked and config.economy == 1
+end
+
+-- md listed the stations: player.entity.$x4coop_stations
+local function on_stations()
+	local E = S.econ
+	local list = S.player and GetNPCBlackboard(S.player, "$x4coop_stations")
+	if type(list) ~= "table" then return end
+	local stations, by_code = {}, {}
+	for _, station in ipairs(list) do
+		local id = to64(station)
+		local code = C.GetObjectIDCode(id)
+		if code ~= nil then
+			code = ffi.string(code)
+			stations[#stations + 1] = { id = id, code = code }
+			by_code[code] = id
+		end
+	end
+	E.list, E.by_code = stations, by_code
+	if E.next > #stations then E.next = 1 end
+end
+
+local function cargo_of(id)
+	local cargo, out = GetComponentData(id, "cargo"), {}
+	for ware, amount in pairs(type(cargo) == "table" and cargo or {}) do
+		amount = tonumber(amount)
+		if type(ware) == "string" and ware:match("^[%w_]+$") and amount and amount >= 0 then
+			out[ware] = math.floor(amount + 0.5)
+		end
+	end
+	return out
+end
+
+-- Host: the next slice of stations.
+local function econ_send(dt)
+	local E = S.econ
+	local n = #E.list
+	if n == 0 then return end
+	E.budget = math.min(E.budget + dt * math.max(5, n / config.economy_cycle), ECON_BURST)
+	while E.budget >= 1 do
+		E.budget = E.budget - 1
+		if E.next > n then E.next, E.cycle = 1, E.cycle + 1 end
+		local station = E.list[E.next]
+		E.next = E.next + 1
+		if C.IsComponentOperational(station.id) then
+			local wares = {}
+			for ware, amount in pairs(cargo_of(station.id)) do wares[#wares + 1] = ware .. ":" .. amount end
+			table.sort(wares)
+			net_send(string.format("E|stock|%d|%d|%d|%s|%s", E.cycle, E.next - 1, n, station.code, table.concat(wares, ",")))
+		end
+	end
+end
+
+-- Joiner: a pass ended; keep and log how it went.
+local function econ_finish_pass(E)
+	local P = E.pass
+	if not P or P.stations + P.missing == 0 then return end
+	P.drift_pct = 100 * P.drift / math.max(1, P.stock)
+	E.last = P
+	log("economy: pass %d: %d stations matched, %d not in this world, %d corrected (%d wares); stock had drifted %.2f%%",
+		P.cycle, P.stations, P.missing, P.changed, P.wares, P.drift_pct)
+end
+
+-- Joiner: one station from the host.
+local function econ_receive(f)
+	local E = S.econ
+	local cycle, code = tonumber(f[3]), f[6]
+	if f[2] ~= "stock" or not cycle or not tonumber(f[4]) or not tonumber(f[5]) or not code or not code:match("^[%w%-]+$")
+		or #code > 16 then
+		return
+	end
+	if not E.pass or E.pass.cycle ~= cycle then
+		econ_finish_pass(E)
+		E.pass = { cycle = cycle, stations = 0, missing = 0, changed = 0, wares = 0, stock = 0, drift = 0 }
+	end
+	local P = E.pass
+	local id = E.by_code[code]
+	if not id or not C.IsComponentOperational(id) then
+		P.missing = P.missing + 1
+		return
+	end
+	local host, mine = {}, cargo_of(id)
+	for item in (f[7] or ""):gmatch("[^,]+") do
+		local ware, amount = item:match("^([%w_]+):(%d+)$")
+		if ware and #ware <= 64 then host[ware] = tonumber(amount) end
+	end
+	local args = { lua_id(id) }
+	for ware, amount in pairs(host) do
+		P.stock = P.stock + amount
+		local diff = amount - (mine[ware] or 0)
+		if diff ~= 0 then
+			args[#args + 1], args[#args + 2] = ware, diff
+			P.drift = P.drift + math.abs(diff)
+		end
+	end
+	for ware, amount in pairs(mine) do
+		if not host[ware] and amount > 0 then
+			args[#args + 1], args[#args + 2] = ware, -amount
+			P.drift = P.drift + amount
+		end
+	end
+	P.stations = P.stations + 1
+	if #args > 1 then
+		P.changed, P.wares = P.changed + 1, P.wares + (#args - 1) / 2
+		request("stock", args)
+	end
+end
+
+local function econ_tick(now, dt)
+	local E = S.econ
+	local on = econ_enabled()
+	if on ~= E.on then
+		E.on = on
+		request("economy", { on and 1 or 0 })
+	end
+	if on and S.link.role == "host" and not C.IsGamePaused() then econ_send(dt) end
+end
+
+local function econ_summary()
+	local E = S.econ
+	if not E.on then return "off" end
+	if S.link.role == "host" then
+		return string.format("sending pass %d (%d stations)", E.cycle, #E.list)
+	end
+	local P = E.last
+	return P and string.format("pass %d: %d matched, %d missing, drifted %.2f%%", P.cycle, P.stations, P.missing, P.drift_pct)
+		or "waiting for the host's first pass"
+end
+
+-------------------------------------------------------------------------------
 -- Shared world. Both players load the same save (the host's), so every ship exists on both sides
 -- with the same ID code. The host's save carries a world id; once both games report the same id,
 -- with one host and one joiner, the local player's kills and hits are mirrored onto the same ships
@@ -1454,6 +1597,8 @@ on_world_message = function(kind, f, now)
 		end
 	elseif kind == "B" then
 		if K.linked and npc_enabled() then npc_receive(f, now) end
+	elseif kind == "E" then
+		if K.linked and K.role == "join" and econ_enabled() then econ_receive(f) end
 	elseif K.linked and valid_world_ref(f[2], f[3], f[4]) then
 		local mirror = S.npc.mirrors[f[2]]  -- a ship we only have as a stand-in: address it directly
 		if kind == "K" then S.npc.dead[f[2]] = now end
@@ -1647,7 +1792,8 @@ local function status_text()
 	local age = R.last_recv > 0 and string.format("%.1fs ago", getElapsedTime() - R.last_recv) or "never"
 	local link = config.mode == "net" and (N.status .. (N.rtt and string.format(", rtt %.0f ms", N.rtt * 1000) or "")
 		.. " | pipe " .. config.pipe .. " via " .. (N.client or "-")
-		.. " | " .. (S.link.role or "?") .. ", world " .. (S.link.state or "unknown")) or "-"
+		.. " | " .. (S.link.role or "?") .. ", world " .. (S.link.state or "unknown")
+		.. " | economy " .. econ_summary()) or "-"
 	return string.format("mode %s | backend %s (%s) | proxy %s%s | partner %s %s, last snapshot %s | link %s | rotation %s %s",
 		config.mode, config.backend, S.backend or "untested", P.state, proxy_is_adopted() and " (their own ship)" or "",
 		R.name or "-", partner_whereabouts() or "", age, link,
@@ -1857,6 +2003,7 @@ local function tick(now, dt)
 	end
 	proxy_tick(now, dt)
 	npc_tick(now, dt)
+	econ_tick(now, dt)
 end
 
 local function on_update()
@@ -1881,6 +2028,7 @@ local function init()
 	RegisterEvent("x4coop.probe_result", on_probe_result)
 	RegisterEvent("x4coop.world", on_world_event)
 	RegisterEvent("x4coop.bubble", on_bubble)
+	RegisterEvent("x4coop.stations", on_stations)
 	RegisterEvent("x4coop.npc_mirror", on_npc_mirror)
 
 	-- Chat window "/x4coop ..." commands; everything else goes to the original handler.

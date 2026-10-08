@@ -31,6 +31,10 @@ local SC = {
 	                 role = "host", own_world = "abc123", partner_world = "abc123", npc_test = "host" },
 	npc_join     = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
 	                 role = "join", own_world = "abc123", partner_world = "abc123", npc_test = "join" },
+	econ_host    = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
+	                 role = "host", own_world = "abc123", partner_world = "abc123", econ_test = "host" },
+	econ_join    = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
+	                 role = "join", own_world = "abc123", partner_world = "abc123", econ_test = "join" },
 	npc_apart    = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
 	                 role = "host", own_world = "abc123", partner_world = "abc123", npc_test = "apart", partner_sector = 501 },
 	world_oldmod = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
@@ -118,6 +122,23 @@ if sc.npc_test == "apart" then
 	objects[428] = { sector = 501, x = pl.x - 100, y = pl.y, z = pl.z, yaw = 0, pitch = 0, roll = 0, macro = SHIP_MACRO, idcode = "OWN-28",
 		playerowned = true }
 end
+local HOST_STOCK = {  -- the host's stations; STN-9 doesn't exist in the joiner's world
+	["STN-1"] = { energycells = 5200, foodrations = 340 }, ["STN-2"] = { hullparts = 800 },
+	["STN-3"] = { energycells = 100, water = 2500, ice = 0 }, ["STN-4"] = {}, ["STN-5"] = { claytronics = 75 },
+	["STN-9"] = { energycells = 1 },
+}
+if sc.econ_test then
+	local mine = sc.econ_test == "host" and HOST_STOCK or {  -- the joiner's world drifted
+		["STN-1"] = { energycells = 4900, foodrations = 340 }, ["STN-2"] = { hullparts = 800, silicon = 120 },
+		["STN-3"] = { energycells = 100, water = 2600 }, ["STN-4"] = { energycells = 50 }, ["STN-5"] = { claytronics = 75 },
+	}
+	for i = 1, 5 do
+		local cargo = {}
+		for ware, amount in pairs(mine["STN-" .. i]) do cargo[ware] = amount end
+		objects[700 + i] = { sector = 500, x = 50000 * i, y = 0, z = 0, yaw = 0, pitch = 0, roll = 0, macro = "station_gen_factory_base_01_macro",
+			idcode = "STN-" .. i, station = true, cargo = cargo }
+	end
+end
 if sc.npc_test == "join" then
 	local pl = objects[PLAYER]
 	objects[407] = { sector = 500, x = pl.x + 200, y = pl.y, z = pl.z, yaw = 0, pitch = 0, roll = 0, macro = SHIP_MACRO, idcode = "NPC-7" }
@@ -136,6 +157,7 @@ local last_status = nil
 local spawn_sectors, world_requests, adoptions = {}, {}, 0
 local bubble_radius = 0
 setpos_count = {}
+stock_actions, log_lines = {}, {}
 local mirror_of_code, obj_actions, found_own = {}, {}, {}
 local proxy_id = nil
 local history = {}   -- player pose history for ground truth
@@ -211,6 +233,7 @@ package.loaded.ffi = {
 }
 function getElapsedTime() return clock end
 function DebugError(s)
+	log_lines[#log_lines + 1] = s
 	if s:find("[x4coop] error", 1, true) or s:find("[x4coop] command error", 1, true) then lua_errors = lua_errors + 1 end
 	say("  log %6.2f %s", clock, s)
 end
@@ -226,6 +249,11 @@ function GetComponentData(id, key)
 	if key == "hullpercent" then return o and o.hull or 100 end
 	if key == "shieldpercent" then return o and o.shield or 100 end
 	if key == "isplayerowned" then return o and o.playerowned or false end
+	if key == "cargo" then
+		local copy = {}
+		for ware, amount in pairs(o and o.cargo or {}) do copy[ware] = amount end
+		return copy
+	end
 end
 function GetNPCBlackboard(_, key) return blackboard[key] end
 function SetNPCBlackboard(_, key, v) blackboard[key] = v end
@@ -314,6 +342,23 @@ function AddUITriggeredEvent(screen, control, args)
 		local list = blackboard["$x4coop_mirrors"]
 		list[#list + 1] = { args[1], id, 1 }
 		queue("x4coop.npc_mirror")
+	elseif control == "economy" then
+		local list = {}
+		if args[1] == 1 then
+			for id = 701, 705 do if objects[id] then list[#list + 1] = id end end
+			blackboard["$x4coop_stations"] = list
+			queue("x4coop.stations")
+		end
+	elseif control == "stock" then
+		local o = objects[args[1]]
+		if o and o.station then
+			for k = 2, #args - 1, 2 do
+				local ware, change = args[k], args[k + 1]
+				o.cargo[ware] = (o.cargo[ware] or 0) + change
+				if o.cargo[ware] <= 0 then o.cargo[ware] = nil end
+				stock_actions[#stock_actions + 1] = string.format("%s:%s%+d", o.idcode, ware, change)
+			end
+		end
 	elseif control == "npc_clear" then
 		for id, o in pairs(objects) do if o.mirror then objects[id] = nil end end
 	elseif control:sub(1, 4) == "obj_" then
@@ -438,6 +483,22 @@ local function fake_joiner_bubble()
 		msg = string.format("B|%.4f|%s|6000|1|%s", clock + partner_clock_offset, SECTORS[501], table.concat(entries, ";")) }
 end
 
+local econ_next, econ_pass, econ_index = 0, 1, 0
+local HOST_ORDER = { "STN-1", "STN-2", "STN-3", "STN-4", "STN-5", "STN-9" }
+local function fake_host_stock()
+	if sc.econ_test ~= "join" or not pipe_reader or clock < econ_next or clock < 3 then return end
+	econ_next = clock + 0.1
+	if clock > 15 then HOST_STOCK["STN-3"].water = nil end
+	econ_index = econ_index + 1
+	if econ_index > #HOST_ORDER then econ_index, econ_pass = 1, econ_pass + 1 end
+	local code = HOST_ORDER[econ_index]
+	local wares = {}
+	for ware, amount in pairs(HOST_STOCK[code]) do wares[#wares + 1] = ware .. ":" .. amount end
+	table.sort(wares)
+	partner_queue[#partner_queue + 1] = { at = clock + ONE_WAY, msg = string.format("E|stock|%d|%d|%d|%s|%s", econ_pass,
+		econ_index, #HOST_ORDER, code, table.concat(wares, ",")) }
+end
+
 local function deliver_pipe()
 	if not pipe_reader then return end
 	local keep = {}
@@ -549,6 +610,7 @@ while clock < sc.duration do
 	end
 	fake_host_bubble()
 	fake_joiner_bubble()
+	fake_host_stock()
 	if sc.partner_restart_at and clock >= sc.partner_restart_at and partner_clock_offset == 1000 then
 		partner_clock_offset = -500
 		say("t=%.1f partner restarted their game (clock jumped back)", clock)
@@ -899,6 +961,55 @@ if sc.npc_test then
 			and sent:find("D|NPC-9|", 1, true) ~= nil                   -- our hit on the stand-in, as NPC-9
 			and sent:find("D|MIR-", 1, true) == nil
 	end
+end
+if sc.econ_test == "host" then
+	local sent, per_station, last_by_code = 0, {}, {}
+	for _, w in ipairs(pipe_writes) do
+		local pass, index, count, code, wares = w:match("^E|stock|(%d+)|(%d+)|(%d+)|([%w%-]+)|(.*)$")
+		if code then
+			sent = sent + 1
+			per_station[code] = (per_station[code] or 0) + 1
+			last_by_code[code] = wares
+		end
+	end
+	local exact = 0
+	for code, cargo in pairs(HOST_STOCK) do
+		local want = {}
+		for ware, amount in pairs(cargo) do want[#want + 1] = ware .. ":" .. amount end
+		table.sort(want)
+		if last_by_code[code] == table.concat(want, ",") then exact = exact + 1 end
+	end
+	say("econ host: %d station reports sent (%.1f/s); each of the 5 stations sent %s times; exact contents %d of 5",
+		sent, sent / sc.duration, tostring(per_station["STN-1"]), exact)
+	ok = ok and sent > 80 and exact == 5 and per_station["STN-9"] == nil and #stock_actions == 0
+end
+if sc.econ_test == "join" then
+	local passes, first, late_zero = {}, nil, 0
+	for _, line in ipairs(log_lines) do
+		local pass, matched, missing, drift = line:match("economy: pass (%d+): (%d+) stations matched, (%d+) not in this world.-drifted ([%d%.]+)%%")
+		if pass then
+			passes[#passes + 1] = { tonumber(pass), tonumber(matched), tonumber(missing), tonumber(drift) }
+			first = first or passes[#passes]
+		end
+	end
+	for _, p in ipairs(passes) do
+		if p[1] > 30 and p[4] == 0 and p[2] == 5 and p[3] == 1 then late_zero = late_zero + 1 end
+	end
+	local equal = 0
+	for i = 1, 5 do
+		local o, want, same = objects[700 + i], HOST_STOCK["STN-" .. i], true
+		for ware, amount in pairs(want) do if amount > 0 and o.cargo[ware] ~= amount then same = false end end
+		for ware, amount in pairs(o.cargo) do if (want[ware] or 0) ~= amount then same = false end end
+		if same then equal = equal + 1 end
+	end
+	local acts = table.concat(stock_actions, " ")
+	say("econ join: %d passes logged; first: %s matched, %s missing, drift %s%%; late passes with no drift: %d; stations equal to the host's at the end: %d of 5",
+		#passes, first and first[2] or "-", first and first[3] or "-", first and first[4] or "-", late_zero, equal)
+	say("econ join: stock changes: %s", acts:sub(1, 300))
+	ok = ok and #passes > 30 and first and first[4] > 0 and late_zero > 5 and equal == 5
+		and acts:find("STN-1:energycells+300", 1, true) ~= nil and acts:find("STN-2:silicon-120", 1, true) ~= nil
+		and acts:find("STN-3:water-100", 1, true) ~= nil and acts:find("STN-3:water-2500", 1, true) ~= nil
+		and acts:find("STN-4:energycells-50", 1, true) ~= nil and acts:find("STN-5:", 1, true) == nil
 end
 if sc.fire_test then
 	local fires = {}

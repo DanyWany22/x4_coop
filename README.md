@@ -196,8 +196,18 @@ What syncs while linked:
   one that gets saved. Ships there follow the joiner's game, and NPC ships only the host has there are
   removed. Player-owned ships are never removed, and neither is anything near the host itself.
   `/x4coop set npc_remove 0` turns removal off on your side.
+* **The economy:** every station's stock, galaxy-wide, follows the host's. The host sends each
+  station's cargo, about one pass over all stations a minute, and the joiner's game sets its own copy
+  of each station to the same amounts. Prices and trade offers come from stock, so they match too.
+  The joiner's log (`[x4coop] economy: pass …`) and `/x4coop status` show each pass: stations matched,
+  stations not in the joiner's world, and how far the stock had drifted since the previous pass.
+  `/x4coop set economy 0` turns it off; `economy_cycle` sets the seconds per pass.
 
-Away from both of you, the two worlds still drift apart (economy, far-away NPCs). The host's world
+Credits aren't shared yet: each of you has your own. Both games run your automated traders, so simply
+adding the two balances together would count every automated sale twice. A shared wallet needs the
+host's balance to be the one true account, with only the joiner's own purchases forwarded to it.
+
+Away from both of you, the two worlds still drift apart (far-away NPC ships, what they carry). The host's world
 is the real one: next session, share again.
 
 ## Commands
@@ -221,7 +231,7 @@ is the real one: next session, share again.
 Settings (`set`, or the `config` table at the top of `ui/x4_coop.lua`): `send_rate`, `predict`,
 `smoothing`, `ghost_right/up/forward`, `engine_fx` (proxy gets physics velocity, for engine
 effects), `fire_fx` (proxy fires; gives spawned proxies a pilot), `npc_sync`, `npc_radius`,
-`npc_mirror`, `npc_remove`, `npc_hull` (the shared-world NPC parts), and more.
+`npc_mirror`, `npc_remove`, `npc_hull` (the shared-world NPC parts), `economy`, `economy_cycle`, and more.
 
 ## Telemetry: seeing and proving the link
 
@@ -357,8 +367,8 @@ game's own schema (`libraries/md.xsd`, `libraries/common.xsd`).
   the password, replay protected, one partner at a time), TCP for the save handoff (encrypted too).
 
 Messages (one text line each): `S` snapshot (position, rotation, velocity, ship, hull, shield),
-`P`/`Q` ping, `M` chat, `L` world link, `K` kill, `D` hit, `F` firing at, `B` host's nearby
-ships; `R`/`W`/`N`/`X` are between a game and its own bridge.
+`P`/`Q` ping, `M` chat, `L` world link, `K` kill, `D` hit, `F` firing at, `B` nearby ships (both
+ways), `E` station stock (host to joiner); `R`/`W`/`N`/`X` are between a game and its own bridge.
 
 Self-calibration: on first contact the proxy is nudged and read back (does `SetObjectSectorPos`
 work, and in which angle unit), and the rotation convention is checked against the engine's own
@@ -388,7 +398,8 @@ python extensions/x4_coop/dev/run_tests.py [--quick]
   stubbed engine (`dev/sim.lua`): unusual rotation conventions, degree angles, the MD fallback,
   network with RTT, partner restarts, sector jumps, near-vertical flight, shared-world link and
   mismatch, kills/hits/fire, adoption, NPC sync both ways: together and in different sectors
-  (stand-ins, removal, hull, the host keeping its own area, no echo),
+  (stand-ins, removal, hull, the host keeping its own area, no echo), the economy as host and joiner
+  (every station sent; drift found, corrected and measured; stations missing on one side),
   hostile messages, guest ship, save handoff commands. Errors are measured against ground truth:
   the partner within ~2–3 m and ~2° (95th percentile) at 220–300 m/s; NPC copies within ~3.5 m.
 * Bridge: password codec (encryption, replay, tamper, stale, other versions), reconnects, chat, wrong password, partner
