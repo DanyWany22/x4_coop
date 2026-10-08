@@ -175,9 +175,12 @@ on low settings; each instance gets about half the machine.
 * The other joins: `python x4_coop_bridge.py --join <host address> --password <something>`
 * Both type `/x4coop net`. Then one of you types `/x4coop join` to warp beside the other,
   or you both fly into the same sector.
-* The password is optional but recommended. Packets are signed with it (HMAC), and packets
-  without it are dropped and logged. A host serves one partner and ignores others until that
-  partner has been silent for 10 s.
+* The password is required (`--no-password` turns that off, so anyone who can reach your port
+  could act as your partner). Every packet is signed with it (HMAC) and carries a session,
+  counter and timestamp, so replayed or tampered packets are dropped and logged. The two PCs'
+  clocks must be within a minute of each other. A host serves one partner and ignores others
+  until that partner has been silent for 10 s. A partner can only send game messages; the
+  bridge's own messages (role, notices) never come from the network.
 
 ## What to check first
 
