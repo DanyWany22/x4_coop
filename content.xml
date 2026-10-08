@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<content id="x4_coop" version="1" name="X4 Co-op (prototype)" description="Experimental: shows another player's ship flying alongside you. Offline ghost test works out of the box; networking needs SirNukes' Mod Support APIs and the bridge script in bridge/." author="Aaron" date="2026-10-08" enabled="1" save="0">
+  <!-- Optional: only needed for real networking (named pipes). Listed so it loads before us when present. -->
+  <dependency id="ws_2042901274" optional="true" name="Mod Support APIs" />
+</content>

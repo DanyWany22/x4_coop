@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<addon name="x4_coop" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../../core/coreaddon.xsd">
+  <environment type="menus">
+    <file name="ui/x4_coop.lua" />
+  </environment>
+</addon>

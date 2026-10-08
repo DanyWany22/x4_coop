@@ -1,0 +1,205 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  X4 Co-op (prototype) - Mission Director side.
+
+  ui/x4_coop.lua does the maths and the networking. This script only does what Lua cannot:
+    * spawn / despawn the proxy ship that stands in for the other player
+    * warp the proxy (sector changes, and every snap of the "md" movement backend)
+    * set the proxy's velocity (the "md" movement backend)
+    * report the engine's rotation basis vectors (the rotation-convention probe)
+
+  Lua -> MD : AddUITriggeredEvent("x4coop", <command>, {args...})   => event.param3 is the args list
+  MD  -> Lua: raise_lua_event 'x4coop.<name>'; structured replies go through player.entity.$x4coop_* blackboard vars
+
+  Safeguards: every proxy we create is tracked in Root.$AllProxies and destroyed on game start/load,
+  when Lua (re)starts, and before every new spawn, so a proxy cannot outlive the session that owns it.
+  Units: Lua sends plain numbers, which MD reads as metres, radians and metres per second.
+-->
+<mdscript name="X4_Coop" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="md.xsd">
+  <cues>
+    <cue name="Root" version="1">
+      <actions>
+        <set_value name="$DebugChance" exact="100"/>
+        <set_value name="$Proxy" exact="null"/>
+        <set_value name="$AllProxies" exact="[]"/>
+        <set_value name="$FallbackMacro" exact="macro.ship_arg_s_fighter_01_a_macro"/>
+      </actions>
+      <cues>
+
+        <!-- Game started or save loaded: clear leftovers, then tell Lua that MD is listening. -->
+        <cue name="OnGameStart" instantiate="true">
+          <conditions>
+            <check_any>
+              <event_game_started/>
+              <event_game_loaded/>
+            </check_any>
+          </conditions>
+          <actions>
+            <include_actions ref="DestroyProxies"/>
+            <raise_lua_event name="'x4coop.md_ready'"/>
+          </actions>
+        </cue>
+
+        <!-- Lua (re)started, e.g. after /reloadui. Its state is gone, so drop the proxy and re-handshake. -->
+        <cue name="OnLuaReady" instantiate="true">
+          <conditions>
+            <event_ui_triggered screen="'x4coop'" control="'lua_ready'"/>
+          </conditions>
+          <actions>
+            <include_actions ref="DestroyProxies"/>
+            <raise_lua_event name="'x4coop.md_ready'"/>
+          </actions>
+        </cue>
+
+        <!-- param3: [sector_macro, ship_macro, x, y, z, yaw, pitch, roll, label] (sector space, metres, radians) -->
+        <cue name="OnSpawn" instantiate="true">
+          <conditions>
+            <event_ui_triggered screen="'x4coop'" control="'spawn'"/>
+          </conditions>
+          <actions>
+            <set_value name="$Args" exact="event.param3"/>
+            <include_actions ref="DestroyProxies"/>
+            <find_sector name="$Sector" macro="@macro.{$Args.{1}}"/>
+            <do_if value="not $Sector">
+              <debug_text text="'x4coop: cannot spawn proxy, unknown sector macro %s'.[$Args.{1}]" filter="error"/>
+              <raise_lua_event name="'x4coop.spawn_failed'" param="'unknown sector ' + $Args.{1}"/>
+            </do_if>
+            <do_else>
+              <set_value name="$Macro" exact="@macro.{$Args.{2}}"/>
+              <do_if value="not @$Macro.isclass.ship">
+                <debug_text text="'x4coop: ship macro %s not available here, using fallback'.[$Args.{2}]" chance="$DebugChance"/>
+                <set_value name="$Macro" exact="Root.$FallbackMacro"/>
+              </do_if>
+              <create_ship name="$Ship" macro="$Macro" sector="$Sector">
+                <owner exact="faction.player" overridenpc="true"/>
+                <pilot actor="null"/>
+                <loadout>
+                  <level exact="0.5"/>
+                </loadout>
+                <position x="$Args.{3}" y="$Args.{4}" z="$Args.{5}"/>
+                <rotation yaw="$Args.{6}" pitch="$Args.{7}" roll="$Args.{8}"/>
+              </create_ship>
+              <do_if value="@$Ship.isoperational">
+                <append_to_list name="Root.$AllProxies" exact="$Ship"/>
+                <set_value name="Root.$Proxy" exact="$Ship"/>
+                <!-- The real ship lives in the partner's universe; this one must not die, be boarded or be repaired into something else. -->
+                <set_object_min_hull object="$Ship" exact="100"/>
+                <set_object_capturable object="$Ship" capturable="false"/>
+                <set_object_name object="$Ship" name="'[Co-op] ' + $Args.{9}"/>
+                <debug_text text="'x4coop: spawned proxy %s (%s) in %s'.[$Ship, $Macro.id, $Sector.knownname]" chance="$DebugChance"/>
+                <raise_lua_event name="'x4coop.proxy_spawned'" param="$Ship"/>
+              </do_if>
+              <do_else>
+                <debug_text text="'x4coop: create_ship failed for %s in %s'.[$Macro, $Sector.knownname]" filter="error"/>
+                <raise_lua_event name="'x4coop.spawn_failed'" param="'create_ship failed'"/>
+              </do_else>
+            </do_else>
+          </actions>
+        </cue>
+
+        <cue name="OnDespawn" instantiate="true">
+          <conditions>
+            <event_ui_triggered screen="'x4coop'" control="'despawn'"/>
+          </conditions>
+          <actions>
+            <include_actions ref="DestroyProxies"/>
+            <raise_lua_event name="'x4coop.proxy_despawned'"/>
+          </actions>
+        </cue>
+
+        <!-- Move the proxy into another sector. param3: [sector_macro, x, y, z, yaw, pitch, roll] -->
+        <cue name="OnWarp" instantiate="true">
+          <conditions>
+            <event_ui_triggered screen="'x4coop'" control="'warp'"/>
+            <check_value value="@Root.$Proxy.isoperational"/>
+          </conditions>
+          <actions>
+            <set_value name="$Args" exact="event.param3"/>
+            <find_sector name="$Sector" macro="@macro.{$Args.{1}}"/>
+            <do_if value="not $Sector">
+              <debug_text text="'x4coop: cannot warp proxy, unknown sector macro %s'.[$Args.{1}]" filter="error"/>
+              <raise_lua_event name="'x4coop.spawn_failed'" param="'unknown sector ' + $Args.{1}"/>
+            </do_if>
+            <do_else>
+              <warp object="Root.$Proxy" sector="$Sector">
+                <position x="$Args.{2}" y="$Args.{3}" z="$Args.{4}"/>
+                <rotation yaw="$Args.{5}" pitch="$Args.{6}" roll="$Args.{7}"/>
+              </warp>
+              <raise_lua_event name="'x4coop.warped'" param="Root.$Proxy"/>
+            </do_else>
+          </actions>
+        </cue>
+
+        <!--
+          "md" movement backend, used when Lua cannot place the proxy itself.
+          param3: [x, y, z, yaw, pitch, roll, vx, vy, vz, snap]   (sector space; velocity in m/s, world axes)
+          A snap teleports to the exact pose. Between snaps the engine coasts the proxy at the commanded velocity.
+        -->
+        <cue name="OnMove" instantiate="true">
+          <conditions>
+            <event_ui_triggered screen="'x4coop'" control="'move'"/>
+            <check_value value="@Root.$Proxy.isoperational"/>
+          </conditions>
+          <actions>
+            <set_value name="$Args" exact="event.param3"/>
+            <do_if value="$Args.{10} == 1">
+              <warp object="Root.$Proxy" sector="Root.$Proxy.sector">
+                <position x="$Args.{1}" y="$Args.{2}" z="$Args.{3}"/>
+                <rotation yaw="$Args.{4}" pitch="$Args.{5}" roll="$Args.{6}"/>
+              </warp>
+            </do_if>
+            <set_object_velocity object="Root.$Proxy" constantvel="true">
+              <linear x="$Args.{7}" y="$Args.{8}" z="$Args.{9}"/>
+            </set_object_velocity>
+          </actions>
+        </cue>
+
+        <!--
+          Rotation-convention probe. Lua knows yaw/pitch/roll but not which axis order and signs the engine uses;
+          the engine's own basis vectors for the player's ship settle it.
+          Reply (player.entity.$x4coop_probe): [yaw, pitch, roll, fx, fy, fz, rx, ry, rz, ux, uy, uz] in sector space.
+        -->
+        <cue name="OnProbe" instantiate="true">
+          <conditions>
+            <event_ui_triggered screen="'x4coop'" control="'probe'"/>
+          </conditions>
+          <actions>
+            <set_value name="$Ship" exact="player.occupiedship"/>
+            <do_if value="@$Ship.isoperational and $Ship.sector">
+              <set_value name="$Rot" exact="$Ship.relativerotation.{$Ship.sector}"/>
+              <set_value name="player.entity.$x4coop_probe" exact="[
+                $Rot.yaw, $Rot.pitch, $Rot.roll,
+                $Rot.forward.x, $Rot.forward.y, $Rot.forward.z,
+                $Rot.right.x, $Rot.right.y, $Rot.right.z,
+                $Rot.up.x, $Rot.up.y, $Rot.up.z]"/>
+              <raise_lua_event name="'x4coop.probe_result'"/>
+            </do_if>
+          </actions>
+        </cue>
+
+        <!-- param3: text to show the player -->
+        <cue name="OnNotify" instantiate="true">
+          <conditions>
+            <event_ui_triggered screen="'x4coop'" control="'notify'"/>
+          </conditions>
+          <actions>
+            <show_notification text="'Co-op: ' + event.param3" timeout="6s"/>
+          </actions>
+        </cue>
+
+        <library name="DestroyProxies">
+          <actions>
+            <do_for_each name="$OldProxy" in="Root.$AllProxies">
+              <do_if value="$OldProxy.exists">
+                <destroy_object object="$OldProxy" explosion="false"/>
+              </do_if>
+            </do_for_each>
+            <set_value name="Root.$AllProxies" exact="[]"/>
+            <set_value name="Root.$Proxy" exact="null"/>
+          </actions>
+        </library>
+
+      </cues>
+    </cue>
+  </cues>
+</mdscript>
