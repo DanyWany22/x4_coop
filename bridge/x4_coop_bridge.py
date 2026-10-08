@@ -18,14 +18,17 @@ Datagrams are b"X4C1 " [+ HMAC tag] + one pipe message (see Codec); the message 
 documented in ui/x4_coop.lua. "H" keepalives are handled here and never reach the game.
 A host serves one partner at a time and takes a new one only after the current one goes silent.
 On connect the game is told its role ("R|host" / "R|join"): the host's save is the shared world.
+"X|..." messages are the bridges' own: the save handoff (see SaveShare), never forwarded to a game.
 """
 import argparse
 import ctypes
 import hashlib
 import hmac
 import os
+import queue
 import socket
 import sys
+import threading
 import time
 from ctypes import wintypes
 
@@ -239,6 +242,179 @@ class RateLimit:
         return True
 
 
+MAX_SAVE_BYTES = 1 << 30   # refuse anything bigger than 1 GiB
+SHARE_WAIT_S = 90          # host: how long to wait for the game to finish writing the save
+OFFER_TTL_S = 120          # host: how long the partner has to fetch it
+GZIP_MAGIC = b"\x1f\x8b"
+
+
+class SaveShare:
+    """
+    Hands the host's save to the joiner's bridge (the shared world starts from the host's save).
+
+    Host: the game quicksaves and sends "X|share|<save folder>|quicksave.xml.gz". Once the file has been
+    rewritten and stopped growing, it is offered over the signed UDP link ("X|offer|size|sha256|token") and
+    served once over TCP on the same port number, only to the partner's address, only after an HMAC proof
+    of the shared password over the one-time token.
+    Joiner: the game reports its save folder ("X|savedir|<path>"). On an offer, the bridge fetches the file,
+    checks size, sha256 and gzip header, keeps a backup of the quicksave it replaces, and tells the game
+    ("X|received|quicksave"). Transfers run on threads; results come back through a queue, so the relay
+    loop never stalls.
+    """
+
+    def __init__(self, codec, port):
+        self.codec, self.port = codec, port
+        self.save_dir = None
+        self.pending = None
+        self.offer = None
+        self.events = queue.Queue()  # ("game", message) or ("log", text)
+
+    def _proof(self, token):
+        return hmac.new(self.codec.key, b"fetch:" + token.encode(), hashlib.sha256).hexdigest().encode()
+
+    def _say(self, text):
+        self.events.put(("game", "N|" + text))
+        self.events.put(("log", text))
+
+    # --- messages from our own game
+    def from_game(self, f):
+        if f[1] == "savedir" and len(f) >= 3 and os.path.isdir(f[2]):
+            self.save_dir = f[2]
+        elif f[1] == "share" and len(f) >= 4:
+            name = os.path.basename(f[3])
+            if not self.codec.key:
+                self._say("sharing a save needs a password on both bridges")
+            elif not name.lower().endswith(".xml.gz") or not os.path.isdir(f[2]):
+                self._say("can't share that save")
+            else:
+                self.pending = {"path": os.path.join(f[2], name), "asked": time.time(), "size": -1, "since": 0.0}
+
+    # --- host side, every loop
+    def tick(self, partner, send_udp):
+        p, now = self.pending, time.time()
+        if p:
+            try:
+                st = os.stat(p["path"])
+            except OSError:
+                st = None
+            if now - p["asked"] > SHARE_WAIT_S:
+                self.pending = None
+                self._say("the save to share did not appear; try /x4coop share again")
+            elif st and st.st_mtime >= p["asked"] - 1:
+                if st.st_size != p["size"]:
+                    p["size"], p["since"] = st.st_size, now
+                elif now - p["since"] >= 1.5:  # finished writing
+                    self.pending = None
+                    self._offer(p["path"], partner, send_udp)
+        o = self.offer
+        if o:
+            if now > o["deadline"]:
+                self._close_offer()
+                self._say("your partner did not fetch the save in time")
+                return
+            try:
+                conn, addr = o["listener"].accept()
+            except (BlockingIOError, OSError):
+                return
+            if not partner or addr[0] != partner[0]:
+                conn.close()
+                return
+            self._close_offer()
+            threading.Thread(target=self._serve, args=(conn, o), daemon=True).start()
+
+    def _offer(self, path, partner, send_udp):
+        if not partner:
+            self._say("no partner to send the save to")
+            return
+        with open(path, "rb") as fh:
+            data = fh.read(MAX_SAVE_BYTES + 1)
+        if len(data) > MAX_SAVE_BYTES or not data.startswith(GZIP_MAGIC):
+            self._say("that save is too big or not a game save")
+            return
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            listener.bind(("0.0.0.0", self.port))
+            listener.listen(1)
+            listener.setblocking(False)
+        except OSError as e:
+            listener.close()
+            self._say(f"can't open TCP port {self.port} for the save: {e}")
+            return
+        token = os.urandom(16).hex()
+        self.offer = {"data": data, "token": token, "listener": listener, "deadline": time.time() + OFFER_TTL_S}
+        send_udp(f"X|offer|{len(data)}|{hashlib.sha256(data).hexdigest()}|{token}")
+        self._say(f"offering your save ({len(data) / 1e6:.1f} MB) to your partner")
+
+    def _close_offer(self):
+        if self.offer:
+            self.offer["listener"].close()
+            self.offer = None
+
+    def _serve(self, conn, offer):
+        try:
+            conn.settimeout(30)
+            line = b""
+            while not line.endswith(b"\n") and len(line) < 200:
+                chunk = conn.recv(200 - len(line))
+                if not chunk:
+                    break
+                line += chunk
+            if not hmac.compare_digest(line.strip(), self._proof(offer["token"])):
+                self.events.put(("log", "save fetch refused: wrong proof"))
+                return
+            conn.sendall(offer["data"])
+            self._say(f"save sent to your partner ({len(offer['data']) / 1e6:.1f} MB)")
+        except OSError as e:
+            self._say(f"sending the save failed: {e}")
+        finally:
+            conn.close()
+
+    # --- joiner side
+    def on_offer(self, f, host):
+        try:
+            size, sha, token = int(f[2]), f[3], f[4]
+        except (IndexError, ValueError):
+            return
+        if not (0 < size <= MAX_SAVE_BYTES and len(sha) == 64 and len(token) == 32):
+            return
+        if not self.codec.key:
+            self._say("the host offered a save, but receiving one needs a password on both bridges")
+        elif not self.save_dir:
+            self._say("the host offered a save, but this bridge doesn't know your save folder yet (is X4 connected?)")
+        else:
+            threading.Thread(target=self._fetch, args=(host, size, sha, token, self.save_dir), daemon=True).start()
+
+    def _fetch(self, host, size, sha, token, save_dir):
+        try:
+            with socket.create_connection(host, timeout=15) as conn:
+                conn.settimeout(60)
+                conn.sendall(self._proof(token) + b"\n")
+                chunks, got = [], 0
+                while got < size:
+                    chunk = conn.recv(min(1 << 20, size - got))
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                    got += len(chunk)
+            data = b"".join(chunks)
+            if len(data) != size or hashlib.sha256(data).hexdigest() != sha or not data.startswith(GZIP_MAGIC):
+                self._say("the host's save arrived damaged; ask them to /x4coop share again")
+                return
+            target = os.path.join(save_dir, "quicksave.xml.gz")
+            note = ""
+            if os.path.exists(target):
+                backup = target + time.strftime(".bak-%Y%m%d-%H%M%S")
+                os.replace(target, backup)
+                note = f"; your old quicksave is kept as {os.path.basename(backup)}"
+            with open(target + ".part", "wb") as fh:
+                fh.write(data)
+            os.replace(target + ".part", target)
+            self._say(f"host's save received ({size / 1e6:.1f} MB){note}")
+            self.events.put(("game", "X|received|quicksave"))
+        except OSError as e:
+            self._say(f"fetching the host's save failed: {e}")
+
+
 def run(args):
     if args.join:
         peer, port = parse_address(args.join, DEFAULT_PORT), args.port or 0
@@ -257,6 +433,7 @@ def run(args):
     sock.bind(("0.0.0.0", port))
     sock.setblocking(False)
     port = sock.getsockname()[1]
+    share = SaveShare(codec, port)
 
     game = GamePipe(args.pipe)
     log(f"UDP port {port}; " + (f"partner {peer[0]}:{peer[1]}" if peer else "waiting for a partner to join")
@@ -315,7 +492,9 @@ def run(args):
                     if msg is None:
                         break
                     busy = True
-                    if peer and send(msg):
+                    if msg.startswith("X|"):
+                        share.from_game(msg.split("|"))
+                    elif peer and send(msg):
                         stats["to_peer"] += 1
             except PipeClosed as e:
                 log(f"X4 disconnected ({e}); waiting for it to reconnect")
@@ -354,12 +533,22 @@ def run(args):
                 tell_game("N|partner connected")
             if msg == "H":
                 continue
+            if msg.startswith("X|offer|") and not hosting:
+                share.on_offer(msg.split("|"), peer)
+                continue
             if msg[:1] not in FROM_PARTNER or msg[1:2] != "|":
                 stats["ignored"] += 1
                 continue
             stats["from_peer"] += 1
             tell_game(msg)
 
+        share.tick(peer if partner_present else None, send)
+        while not share.events.empty():
+            kind, text = share.events.get()
+            if kind == "game":
+                tell_game(text)
+            else:
+                log(text)
         if partner_present and now - last_heard > PARTNER_TIMEOUT_S:
             partner_present = False
             log("partner silent")

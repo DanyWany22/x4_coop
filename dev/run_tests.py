@@ -7,7 +7,7 @@ Offline checks for X4 Co-op. No game session needed; run after every change:
 1. md/*.xml and aiscripts/*.xml validated against the game's own schemas (from the .cat archives; needs lxml)
 2. ui/x4_coop.lua flown through every sim.lua scenario inside X4's own LuaJIT (lua51_64.dll)
 3. the network bridge end to end: x4_coop_bridge.py + fake_peer.py + game_sim.py (stands in
-   for the game's pipe client)
+   for the game's pipe client), and share_test.py (save handoff between two real bridges)
 """
 import glob
 import socket
@@ -165,6 +165,9 @@ def main():
         test_lua(tmp)
     test_codec()
     test_bridge()
+    r = subprocess.run(PY + [str(DEV / "share_test.py"), str(free_udp_port())], capture_output=True, text=True, timeout=120)
+    check("bridge: host's save reaches the joiner (backup kept)", r.returncode == 0,
+          " ".join(l.strip() for l in r.stdout.splitlines() if l.startswith(("ok", "FAIL"))))
     failed = results.count(False)
     print(f"\n{len(results) - failed} passed, {failed} failed")
     return 1 if failed else 0

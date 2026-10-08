@@ -114,7 +114,7 @@ if sc.partner_ship then
 		idcode = sc.partner_ship, pilot = true }
 end
 local next_id, spawns, warps, moves, md_events, lua_errors = 200, 0, 0, 0, {}, 0
-local teleports = {}
+local teleports, game_saves, game_loads = {}, {}, {}
 local spawn_sectors, world_requests, adoptions = {}, {}, 0
 local bubble_radius = 0
 local mirror_of_code, obj_actions, found_own = {}, {}, {}
@@ -176,6 +176,7 @@ C = {
 	end,
 	IsGamePaused = function() return false end,
 	CanTeleportPlayerTo = function(id) return objects[id] and "granted" or "no such ship" end,
+	GetSaveFolderPath = function() return "C:/fake/Egosoft/X4/1/save" end,
 	TeleportPlayerTo = function(id) teleports[#teleports + 1] = id; return true end,
 	IsComponentOperational = function(id) return objects[id] ~= nil end,
 }
@@ -205,6 +206,8 @@ end
 function GetNPCBlackboard(_, key) return blackboard[key] end
 function SetNPCBlackboard(_, key, v) blackboard[key] = v end
 function ExecuteDebugCommand(cmd, param) say("  ego command /%s %s", cmd, tostring(param)) end
+function SaveGame(name, desc) game_saves[#game_saves + 1] = name end
+function LoadGame(name) game_loads[#game_loads + 1] = name end
 
 local function queue(name, param) queued[#queued + 1] = { name, param } end
 local proxy_adopted = false
@@ -442,7 +445,7 @@ if sc.mode ~= "ghost" or sc.backend then
 	clock = 0.1
 end
 local commanded, chatted, hostile_sent, world_sent, piped, fire_sent = false, false, false, false, false, false
-local guest_done, took_ship, checked = false, false, false
+local guest_done, took_ship, checked, shared_in = false, false, false, false
 local adopted_seen = false
 -- Malformed or malicious partner messages: all must be dropped without errors or odd spawns.
 local HOSTILE = {
@@ -532,6 +535,13 @@ while clock < sc.duration do
 	if sc.world_test == "host" and guest_done and not took_ship and clock > 13 then
 		took_ship = true
 		ExecuteDebugCommand("x4coop", "takeship")
+		ExecuteDebugCommand("x4coop", "share")
+	end
+	if sc.world_test == "linked" and not shared_in and clock > 14 then
+		shared_in = true
+		ExecuteDebugCommand("x4coop", "loadshared")  -- nothing received yet: must refuse
+		pipe_reader("X|received|quicksave")
+		ExecuteDebugCommand("x4coop", "loadshared")
 	end
 	if sc.world_test and not world_sent and clock > 10 then
 		world_sent = true
@@ -702,6 +712,9 @@ if sc.world_test then
 		ok = ok and #sent_f == 0 and #fires == 0
 	end
 	if sc.world_test == "linked" then
+		local savedir_sent = table.concat(pipe_writes, string.char(10)):find("X|savedir|C:/fake/Egosoft/X4/1/save", 1, true) ~= nil
+		say("loadshared: loads %s, savedir told %s", table.concat(game_loads, ","), tostring(savedir_sent))
+		ok = ok and #game_loads == 1 and game_loads[1] == "quicksave" and savedir_sent and said:find("no save from the host yet", 1, true) ~= nil
 		local leaked = table.concat(world_requests, " "):find("XYZ-777", 1, true) ~= nil
 		say("partner kill after leaving net mode applied: %s", tostring(leaked))
 		ok = ok and not leaked
@@ -714,6 +727,9 @@ if sc.world_test then
 		local guest = blackboard["$x4coop_guestship"]
 		say("guest ship %s, teleports %s", tostring(guest), table.concat(teleports, ","))
 		ok = ok and guest ~= nil and #teleports == 1 and teleports[1] == guest and said:find("moved to the guest ship", 1, true) ~= nil
+		local share_sent = table.concat(pipe_writes, string.char(10)):find("X|share|C:/fake/Egosoft/X4/1/save|quicksave.xml.gz", 1, true) ~= nil
+		say("share: saves %s, share request sent %s", table.concat(game_saves, ","), tostring(share_sent))
+		ok = ok and #game_saves == 1 and game_saves[1] == "quicksave" and share_sent
 		ok = ok and said:find("new co-op world", 1, true) ~= nil and type(blackboard["$x4coop_world"]) == "string"
 	end
 	if sc.world_test == "mismatch" then

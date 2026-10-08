@@ -20,6 +20,8 @@ Chat window commands (type them in the chat window, they never leave your PC):
   /x4coop say <text>        send a chat line to your partner
   /x4coop guestship         (host, shared world) park a spare ship next to you for the joiner, then save
   /x4coop takeship          (joiner) move into the guest ship from the host's save
+  /x4coop share             (host) quicksave and send that save to the joiner's bridge
+  /x4coop loadshared        (joiner) load the save the host sent (it replaces your quicksave)
   /x4coop ghost | net | off switch mode (remembered in the savegame)
   /x4coop backend lua|md|auto
   /x4coop probe             re-run the rotation-convention probe
@@ -31,6 +33,7 @@ Wire format (one message per pipe write, '|' separated, also used by the Python 
   P|t / Q|t                                                            ping / pong (RTT)
   M|name|text                                                          chat line
   R|role, L|world|role|ship, K|ship, D|ship|hull, F|ship                shared world (see that section)
+  X|savedir|path, X|share|dir|file (game to its bridge), X|received|file (bridge to game)   save handoff
   B|t|sector|radius|complete|code,macro,owner,hull,x,y,z,yaw,pitch,roll,vx,vy,vz;...   host's nearby ships
   W|text, N|text                                                       bridge welcome / notice
 ]]
@@ -49,6 +52,7 @@ ffi.cdef[[
 	} UIPosRot;
 	UniverseID GetContextByClass(UniverseID componentid, const char* classname, bool includeself);
 	const char* GetObjectIDCode(UniverseID objectid);
+	const char* GetSaveFolderPath(void);
 	UIPosRot GetObjectPositionInSector(UniverseID objectid);
 	const char* GetPlayerName(void);
 	UniverseID GetPlayerID(void);
@@ -631,7 +635,16 @@ on_pipe_message = function(msg)
 		if text ~= "" then
 			notify("%s: %s", clean_text(f[2], 32), text)
 		end
+	elseif kind == "X" then
+		if f[2] == "received" then
+			S.net.shared_save = true
+			notify("the host's save arrived (it is now your quicksave): /x4coop loadshared to load it")
+		end
 	elseif kind == "N" or kind == "W" then
+		if kind == "W" then
+			local dir = C.GetSaveFolderPath()
+			if dir ~= nil then net_send("X|savedir|" .. ffi.string(dir)) end
+		end
 		local text = clean_text(f[2], 200)
 		if text == "partner connected" then N.partner = true elseif text == "partner silent" then N.partner = false end
 		notify("%s", text)
@@ -1413,7 +1426,7 @@ local function status_text()
 		conv_name(S.conv), S.probe.measured and "measured" or "assumed")
 end
 
-local USAGE = "usage: /x4coop status | check | join | say <text> | guestship | takeship | ghost | net | off | backend lua|md|auto | probe | pipe <name> | set <key> <number>"
+local USAGE = "usage: /x4coop status | check | join | say <text> | guestship | takeship | share | loadshared | ghost | net | off | backend lua|md|auto | probe | pipe <name> | set <key> <number>"
 
 local function guest_ship()
 	local ship = S.player and GetNPCBlackboard(S.player, "$x4coop_guestship")
@@ -1439,6 +1452,33 @@ local function take_guest_ship()
 	end
 	C.TeleportPlayerTo(id, true, true, true)
 	notify("moved to the guest ship %s; take the pilot seat", ffi.string(C.GetObjectIDCode(id)))
+end
+
+-- Host: quicksave (with the world id in it) and have the bridge send that file to the joiner's bridge.
+local function share_save()
+	local N, K = S.net, S.link
+	if config.mode ~= "net" or not N.connected then
+		notify("start your bridge and /x4coop net first")
+	elseif K.role ~= "host" then
+		notify("only the host shares a save; the joiner gets it and uses /x4coop loadshared")
+	elseif not N.partner then
+		notify("no partner connected to send the save to")
+	else
+		world_id()  -- make sure the save carries the co-op world id
+		SaveGame("quicksave", "X4 Co-op shared world")
+		net_send("X|share|" .. ffi.string(C.GetSaveFolderPath()) .. "|quicksave.xml.gz")
+		notify("saving to your quicksave and sending it to your partner%s",
+			guest_ship() and "" or " (tip: /x4coop guestship first gives them a ship of their own)")
+	end
+end
+
+local function load_shared()
+	if not S.net.shared_save then
+		notify("no save from the host yet: they type /x4coop share")
+	else
+		notify("loading the host's save")
+		LoadGame("quicksave")
+	end
 end
 
 local function say(text)
@@ -1493,6 +1533,10 @@ local function command(param)
 		request("guestship", {})
 	elseif cmd == "takeship" then
 		take_guest_ship()
+	elseif cmd == "share" then
+		share_save()
+	elseif cmd == "loadshared" then
+		load_shared()
 	elseif cmd == "pipe" then
 		-- A second game on the same PC needs its own pipe (and its own bridge with --pipe). Not saved:
 		-- both games may load the same save.

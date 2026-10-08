@@ -73,6 +73,8 @@ General Controls**, then scroll to the bottom section **"Expert Settings - Use w
 | `/x4coop say <text>` | send a chat line to your partner (in ghost mode the ghost repeats it) |
 | `/x4coop guestship` | (host, shared world) park a spare ship next to you for the joiner, then save |
 | `/x4coop takeship` | (joiner) move into the guest ship from the host's save |
+| `/x4coop share` | (host) quicksave and send it to the joiner's bridge (needs the password set) |
+| `/x4coop loadshared` | (joiner) load the save the host sent |
 | `/x4coop ghost` / `net` / `off` | switch mode (remembered in the savegame) |
 | `/x4coop backend auto` / `lua` / `md` | movement backend (auto = self-test, then pick) |
 | `/x4coop probe` | redo the rotation calibration |
@@ -116,10 +118,13 @@ The bridge only talks to `X4.exe` on this PC. It rejects network clients and oth
 Kills and damage sync when both players run **the same world**: the host's save.
 1. Host: start the bridge with `--host`, type `/x4coop net`. The game creates a co-op world id
    (notification "new co-op world …"). Type **`/x4coop guestship`**: a spare ship of your type
-   appears next to you for your partner. **Save now** and give that save file to your partner
-   (`Documents/Egosoft/X4/<id>/save/`).
-2. Joiner: put the save in your own save folder, load it, start the bridge with `--join`, type
-   `/x4coop net`. Both sides should then show **"world: linked"**.
+   appears next to you for your partner. Then **`/x4coop share`**: the game quicksaves and your
+   bridge sends that save to your partner's bridge. (Or save normally and copy the file from
+   `Documents/Egosoft/X4/<id>/save/` yourself.)
+2. Joiner: when "the host's save arrived" shows up, type **`/x4coop loadshared`**. The save goes
+   into your quicksave slot, and your previous quicksave is kept as a `.bak-…` file next to it.
+   After loading, type `/x4coop net` again if needed. Both sides should then show
+   **"world: linked"**.
 3. The joiner starts out in the host's ship (it's the host's save). Type **`/x4coop takeship`**
    to move into the guest ship, then take its pilot seat. Both ships now exist in both worlds,
    so each of you sees the other's real ship, not a copy.
