@@ -9,6 +9,15 @@ by sending messages between them, using only X4's own modding interfaces (no mem
   partner's guns fire at what they shoot at, the host's NPCs near you are in the same places on
   both sides, and each of you sees the other's real ship and its hull and shields.
 
+## Roadmap
+
+Co-op is very achievable, a shared world is probably achievable, and the whole universe is an open
+question that the next few milestones will answer:
+
+1. Nearby sync in both directions.
+2. The economy still matching after an hour of play.
+3. A stress test at full scale.
+
 ## For reviewers
 
 This repository is the whole mod. There are **no compiled files**: every file is readable text, and
