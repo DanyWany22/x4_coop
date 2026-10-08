@@ -57,8 +57,9 @@ X4 (ui/x4_coop.lua) <-> named pipe <-> bridge (Python: UDP/TCP sockets) <-> netw
 
 The mod has **no DLLs, no hooks, no injection, and reads or writes no memory addresses**.
 [`demo/x4_memory_demo.py`](demo/x4_memory_demo.py) is a separate tool that shows reading and
-writing X4's memory is possible, on your credits; the mod never loads or calls it (see
-[Memory demo](#memory-demo-not-part-of-the-mod)). The Lua calls functions by name through FFI:
+writing X4's memory is possible, on your credits; the mod never loads or calls it. The
+[Memory demo](#memory-demo-not-part-of-the-mod) section also explains why the mod doesn't need
+memory writes. The Lua calls functions by name through FFI:
 
 * **6 Windows functions** for the pipe (listed above).
 * **15 game functions.** Egosoft's own UI scripts call every one of them; one example file each, from
@@ -99,19 +100,12 @@ and AI script. The tests validate those files against the game's own XSD schemas
   Every UDP payload starts with `X4C2 `, then the same HMAC tag the bridge's trace lists.
 * `python dev/run_tests.py` runs the offline tests (set `X4_GAME_DIR` outside the game folder).
 
-**Status (2026-10-08):** single-player ghost mode is tested in-game (Terran start, X4 9.00): the
-ghost spawns and follows, the engine's angle unit (degrees) and rotation convention (YXZ+--)
-were measured and are built in. **Networking and the shared world are only tested offline** (a
-simulator running this Lua in X4's own LuaJIT, plus real bridges on one PC); the first real
-two-player sessions are next.
-
 ## Requirements
 
 * X4 9.00 on both PCs, with the same DLCs (the partner is placed by sector name).
 * For playing together (not for the ghost test): the bridge on both PCs. The mod opens the
-  bridge's pipe with Windows' own functions. It isn't known yet whether X4 allows that with
-  **Protected UI Mode** on (Settings → Extensions). If `/x4coop check` says the pipe functions
-  can't be reached, turn Protected UI Mode off. SirNukes'
+  bridge's pipe with Windows' own functions. If `/x4coop check` says the pipe functions can't be
+  reached, turn **Protected UI Mode** off (Settings → Extensions). SirNukes'
   [Mod Support APIs](https://github.com/bvbohnen/x4-projects) are an optional fallback.
 * Python 3.8+ on Windows for the bridge (standard library only, nothing to install).
 * A key for X4's chat window, where the `/x4coop` commands go: **Settings → Controls → General
@@ -267,6 +261,38 @@ written directly, using your credits. The co-op mod doesn't work this way and ne
 The addresses change every time the game starts, which is why the tool scans for them each time.
 No administrator rights are needed. `dev/memdemo_test.py` checks the tool against a stand-in
 process, not X4.
+
+### Why the mod doesn't need memory writes
+
+Everything co-op has to share can be reached through X4's own scripting. Scripts keep working
+across game updates, while memory addresses move with every update, and a memory write can only
+change a value that already exists; it can't create anything.
+
+| what co-op shares | script command that reaches it | used by the mod today |
+|---|---|---|
+| ship position, rotation, speed | `SetObjectSectorPos` (Lua), `set_object_velocity`, `warp` | yes |
+| hull, shields, kills | `set_object_hull`, `set_object_shield`, `destroy_object` | yes |
+| firing at a target | `shoot_at` (AI script) | yes |
+| NPC ships near the players | the same position and hull commands | yes |
+| credits | `add_money`, `remove_money`, `transfer_money` | not yet |
+| station stock, and so prices | `add_cargo`, `remove_cargo` | not yet |
+| trade offers | `create_trade_offer`, `remove_trade_offer` | not yet |
+| faction relations | `set_faction_relation` | not yet |
+| research, blueprints, inventory | `add_research`, `add_blueprints`, `add_inventory` | not yet |
+| time acceleration (SETA) | `set_timewarp_factor` | not yet |
+| ownership, orders, missions | `set_owner`, `create_order`, `create_mission` | not yet |
+
+All of these, except `SetObjectSectorPos` and `shoot_at`, are Mission Director commands from the
+game's own schema (`libraries/md.xsd`, `libraries/common.xsd`).
+
+* **What scripts can't set:** the game clock, and small per-frame details such as weapon heat on
+  the partner's ship. The details are cosmetic. The clock is risky to overwrite, because the game
+  schedules everything on it.
+* **What neither scripts nor memory writes can do:** these are the engine's behaviour, not stored
+  values, so they would need changes to the game's own code:
+  * fully simulating a sector far from the player
+  * creating projectiles
+  * a headless server
 
 ## Troubleshooting
 
