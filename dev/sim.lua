@@ -99,6 +99,12 @@ if sc.npc_test then
 			macro = SHIP_MACRO, idcode = "NPC-" .. i }
 	end
 end
+if sc.npc_test == "join" then
+	local pl = objects[PLAYER]
+	objects[407] = { sector = 500, x = pl.x + 200, y = pl.y, z = pl.z, yaw = 0, pitch = 0, roll = 0, macro = SHIP_MACRO, idcode = "NPC-7" }
+	objects[408] = { sector = 500, x = pl.x - 200, y = pl.y, z = pl.z, yaw = 0, pitch = 0, roll = 0, macro = SHIP_MACRO, idcode = "OWN-8",
+		playerowned = true }
+end
 if sc.partner_ship then
 	objects[PARKED] = { sector = 500, x = 5000, y = 0, z = 5000, yaw = 0, pitch = 0, roll = 0, macro = SHIP_MACRO,
 		idcode = sc.partner_ship, pilot = true }
@@ -106,6 +112,7 @@ end
 local next_id, spawns, warps, moves, md_events, lua_errors = 200, 0, 0, 0, {}, 0
 local spawn_sectors, world_requests, adoptions = {}, {}, 0
 local bubble_radius = 0
+local mirror_of_code, obj_actions = {}, {}
 local proxy_id = nil
 local history = {}   -- player pose history for ground truth
 
@@ -179,9 +186,14 @@ end
 function RegisterEvent(name, fn) handlers[name] = fn end
 function SetScript(kind, fn) if kind == "onUpdate" then on_update = fn end end
 function ConvertStringTo64Bit(s) return tonumber((tostring(s):gsub("ULL$", ""))) end
+function ConvertStringToLuaID(s) return tonumber((tostring(s):gsub("ULL$", ""))) end
 function GetComponentData(id, key)
 	if key == "macro" then return SECTORS[id] or (objects[id] and objects[id].macro) end
 	if key == "name" and SECTORS[id] then return "Sector " .. id end
+	local o = objects[id]
+	if key == "owner" then return o and o.owner or "pirate" end
+	if key == "hullpercent" then return o and o.hull or 100 end
+	if key == "isplayerowned" then return o and o.playerowned or false end
 end
 function GetNPCBlackboard(_, key) return blackboard[key] end
 function SetNPCBlackboard(_, key, v) blackboard[key] = v end
@@ -248,6 +260,26 @@ function AddUITriggeredEvent(screen, control, args)
 		local r, u, f = col(m, 1), col(m, 2), col(m, 3)
 		blackboard["$x4coop_probe"] = { o.yaw, o.pitch, o.roll, f[1], f[2], f[3], r[1], r[2], r[3], u[1], u[2], u[3] }
 		queue("x4coop.probe_result")
+	elseif control == "npc_mirror" then
+		local id = next_id
+		next_id = next_id + 1
+		objects[id] = { sector = 500, x = args[5], y = args[6], z = args[7], yaw = args[8], pitch = args[9], roll = args[10],
+			macro = args[2], owner = args[3], idcode = "MIR-" .. id, hull = 100, mirror = true }
+		mirror_of_code[args[1]] = id
+		blackboard["$x4coop_mirror"] = { args[1], id }
+		queue("x4coop.npc_mirror")
+	elseif control == "npc_clear" then
+		for id, o in pairs(objects) do if o.mirror then objects[id] = nil end end
+	elseif control:sub(1, 4) == "obj_" then
+		local id = args[1]
+		local o = objects[id]
+		assert(id ~= PLAYER and id ~= proxy_id, "obj_ action on the player or proxy")
+		obj_actions[#obj_actions + 1] = control .. ":" .. tostring(id) .. (args[2] and ("," .. args[2]) or "")
+		if o and (control == "obj_kill" or (control == "obj_remove" and (not o.playerowned or o.mirror))) then
+			objects[id] = nil
+		elseif o and control == "obj_hull" and args[2] < (o.hull or 100) then
+			o.hull = args[2]
+		end
 	elseif control == "bubble" then
 		bubble_radius = args[1]
 	elseif control == "fire" then
@@ -322,11 +354,11 @@ local function fake_host_bubble()
 		local x, y, z = npc_truth(i, clock, h)
 		local x0, y0, z0 = npc_truth(i, h0.t, h0)  -- velocity over the actual history step
 		local dt0 = clock - h0.t
-		entries[#entries + 1] = string.format("%s,%s,%.2f,%.2f,%.2f,%.5f,0,0,%.2f,%.2f,%.2f", code, SHIP_MACRO, x, y, z, i * 0.5,
-			(x - x0) / dt0, (y - y0) / dt0, (z - z0) / dt0)
+		entries[#entries + 1] = string.format("%s,%s,pirate,%.1f,%.2f,%.2f,%.2f,%.5f,0,0,%.2f,%.2f,%.2f", code, SHIP_MACRO,
+			i == 1 and 55 or 100, x, y, z, i * 0.5, (x - x0) / dt0, (y - y0) / dt0, (z - z0) / dt0)
 	end
 	partner_queue[#partner_queue + 1] = { at = clock + ONE_WAY,
-		msg = string.format("B|%.4f|%s|%s", clock + partner_clock_offset, SECTORS[500], table.concat(entries, ";")) }
+		msg = string.format("B|%.4f|%s|6000|1|%s", clock + partner_clock_offset, SECTORS[500], table.concat(entries, ";")) }
 end
 
 local function deliver_pipe()
@@ -398,7 +430,8 @@ local HOSTILE = {
 	"",
 	"|||||",
 }
-local pos_errs, rot_errs, npc_errs = {}, {}, {}
+local pos_errs, rot_errs, npc_errs, mirror_errs = {}, {}, {}, {}
+local mapping_sent, mapped_mirror = false, nil
 local first_live_at, calibrated_at
 local max_proxies = 0
 while clock < sc.duration do
@@ -414,7 +447,7 @@ while clock < sc.duration do
 	if bubble_radius > 0 and math.floor(clock) ~= math.floor(clock - frame_dt) then
 		local pl, list = objects[PLAYER], {}
 		for id, o in pairs(objects) do
-			if id ~= PLAYER and id ~= proxy_id and o.sector == pl.sector
+			if id ~= PLAYER and id ~= proxy_id and not o.mirror and o.sector == pl.sector
 				and math.sqrt((o.x - pl.x) ^ 2 + (o.y - pl.y) ^ 2 + (o.z - pl.z) ^ 2) <= bubble_radius then
 				list[#list + 1] = id
 			end
@@ -447,6 +480,16 @@ while clock < sc.duration do
 	if sc.mode == "net" and sc.pipes and pipe_reader and not hostile_sent and clock > 5 then
 		hostile_sent = true
 		for _, msg in ipairs(HOSTILE) do pipe_reader(msg) end
+	end
+	if sc.npc_test == "join" and not mapping_sent and clock > 20 and mirror_of_code["NPC-9"] then
+		mapping_sent = true
+		local mid = mirror_of_code["NPC-9"]
+		mapped_mirror = mid
+		-- we shoot the stand-in: the host must hear about NPC-9, not the stand-in's own code
+		handlers["x4coop.world"]("x4coop.world", "D|MIR-" .. mid .. "|" .. SHIP_MACRO .. "|" .. SECTORS[500] .. "|70")
+		-- the host fires at and kills NPC-9: that must reach the stand-in
+		pipe_reader("F|NPC-9|" .. SHIP_MACRO .. "|" .. SECTORS[500])
+		pipe_reader("K|NPC-9|" .. SHIP_MACRO .. "|" .. SECTORS[500])
 	end
 	if sc.fire_test and not fire_sent and clock > 12 then
 		fire_sent = true
@@ -506,6 +549,12 @@ while clock < sc.duration do
 	end
 	if sc.npc_test == "join" and clock > 8 and not chatted then
 		local h = history[#history]
+		local mid = mirror_of_code["NPC-9"]
+		if mid and objects[mid] then
+			local x, y, z = npc_truth(NPC_COUNT + 1, clock, h)
+			local o = objects[mid]
+			mirror_errs[#mirror_errs + 1] = math.sqrt((o.x - x) ^ 2 + (o.y - y) ^ 2 + (o.z - z) ^ 2)
+		end
 		for i = 1, NPC_COUNT do
 			local o = objects[400 + i]
 			local x, y, z = npc_truth(i, clock, h)
@@ -513,7 +562,9 @@ while clock < sc.duration do
 		end
 	end
 	local count = 0
-	for id in pairs(objects) do if id ~= PLAYER and not (id > 400 and id <= 400 + NPC_COUNT) and id ~= PARKED then count = count + 1 end end
+	for id, o in pairs(objects) do  -- proxies only: not the player, scenario ships (400+), the parked ship or stand-ins
+		if id ~= PLAYER and id < 400 and id ~= PARKED and not o.mirror then count = count + 1 end
+	end
 	max_proxies = math.max(max_proxies, count)
 end
 
@@ -613,7 +664,8 @@ if sc.npc_test then
 		local codes = 0
 		for i = 1, NPC_COUNT do if last:find("NPC-" .. i .. ",", 1, true) then codes = codes + 1 end end
 		-- the entry for NPC-1 must carry the ship's position at send time (within a frame of motion)
-		local x = tonumber(last:match("NPC%-1,[%w_]+,([%-%d%.]+),"))
+		local x = tonumber(last:match("NPC%-1,[%w_]+,[%w_]+,[%d%.]+,([%-%d%.]+),"))
+		ok = ok and last:match("^B|[%d%.]+|[%w_]+|6000|1|") ~= nil  -- radius and "complete" in the header
 		local o = objects[401]
 		say("npc host: %d B messages (%.1f/s), last one lists %d of %d ships, NPC-1 x %.1f vs %.1f",
 			#bs, #bs / sc.duration, codes, NPC_COUNT, x or -1, o.x)
@@ -622,6 +674,20 @@ if sc.npc_test then
 		local st, emax, e95 = stats(npc_errs)
 		say("npc join: copies vs host truth (m): %s   [%d samples]; B sent by us: %d", st, #npc_errs, #bs)
 		ok = ok and #npc_errs > 1000 and e95 < 5 and #bs == 0
+		local mst, mmax, m95 = stats(mirror_errs)
+		local mid = mirror_of_code["NPC-9"]
+		local acts = table.concat(obj_actions, " ")
+		local sent = table.concat(pipe_writes, "\n")
+		say("npc join: stand-in for NPC-9 = %s, vs host truth (m): %s; actions: %s", tostring(mid), mst, acts)
+		ok = ok and mid ~= nil and #mirror_errs > 500 and m95 < 10
+			and acts:find("obj_remove:407", 1, true) ~= nil            -- joiner-only NPC removed
+			and acts:find("obj_remove:408", 1, true) == nil            -- player-owned ship kept
+			and acts:find("obj_hull:401,55", 1, true) ~= nil           -- host's lower hull taken
+			and acts:find("obj_hull:402", 1, true) == nil              -- never raised / never for undamaged
+			and acts:find("obj_fire:" .. tostring(mapped_mirror), 1, true) ~= nil -- host fires at NPC-9 -> our stand-in
+			and acts:find("obj_kill:" .. tostring(mapped_mirror), 1, true) ~= nil -- host kills NPC-9 -> our stand-in
+			and sent:find("D|NPC-9|", 1, true) ~= nil                   -- our hit on the stand-in, as NPC-9
+			and sent:find("D|MIR-", 1, true) == nil
 	end
 end
 if sc.fire_test then

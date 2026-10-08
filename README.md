@@ -142,8 +142,17 @@ own AI still decides when to shoot. Offline tests: the copies stay within about 
 percentile) of the host's ships. `/x4coop set npc_sync 0` turns it off; `npc_radius` sets the
 range. The `health:` lines include an `npc bubble` line with counts.
 
-Not yet (stage B): ships only the host has aren't created on the joiner's side, ships only the
-joiner has aren't removed, and the host's hull values aren't pushed to the joiner's copies.
+The host's world is the truth near the players (the joiner's world is a throwaway copy of the
+host's save):
+* **Ships only the host has** (e.g. spawned after the save) get a stand-in on the joiner's side,
+  moved like the others. Kills, hits and fire on stand-ins are translated to the host's ship.
+* **Ships only the joiner has** near the host are removed from the joiner's world. This only
+  happens well inside the host's scan range (80% of `npc_radius`), only when the host's list
+  wasn't cut off at 40 ships, after 3 s of absence, and never for player-owned ships.
+* **Hull:** the joiner takes the host's hull value when it's lower. It never raises it, so the
+  joiner's own hits aren't undone before the host has counted them.
+
+Each part has a switch: `/x4coop set npc_mirror 0`, `npc_remove 0`, `npc_hull 0`.
 
 ## Two games on one PC
 

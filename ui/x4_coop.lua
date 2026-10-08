@@ -28,7 +28,7 @@ Wire format (one message per pipe write, '|' separated, also used by the Python 
   P|t / Q|t                                                            ping / pong (RTT)
   M|name|text                                                          chat line
   R|role, L|world|role|ship, K|ship, D|ship|hull, F|ship                shared world (see that section)
-  B|t|sector|code,macro,x,y,z,yaw,pitch,roll,vx,vy,vz;...              host's nearby ships (NPC bubble)
+  B|t|sector|radius|complete|code,macro,owner,hull,x,y,z,yaw,pitch,roll,vx,vy,vz;...   host's nearby ships
   W|text, N|text                                                       bridge welcome / notice
 ]]
 
@@ -75,6 +75,9 @@ local config = {
 	npc_sync = 1,             -- 1: in a linked shared world, the host's nearby ships drive the joiner's copies
 	npc_radius = 6000,        -- m, "nearby"
 	npc_rate = 10,            -- host: NPC pose updates per second
+	npc_mirror = 1,           -- joiner: create stand-ins for ships only the host has
+	npc_remove = 1,           -- joiner: remove ships near the host that the host doesn't have
+	npc_hull = 1,             -- joiner: take the host's (lower) hull values
 	ghost_latency = 0.12,     -- s, simulated one-way latency in ghost mode
 	ghost_jitter = 0.03,      -- s, extra random delay per snapshot
 	ghost_loss = 0.0,         -- 0..1, fraction of snapshots dropped
@@ -303,7 +306,8 @@ local function reset()
 		ghost = { queue = {} },
 		health = { frames = 0, gap_max = 0, corr_sum = 0, corr_n = 0, corr_max = 0 },
 		link = { role = nil, world = nil, state = nil, linked = false, last_sent = -1e9, last_hit = {} },
-		npc = { sent_radius = nil, members = {}, ents = {}, prev = {}, last_send = -1e9, received = 0, driven = 0 },
+		npc = { sent_radius = nil, members = {}, ents = {}, prev = {}, last_send = -1e9, received = 0, driven = 0,
+			mirrors = {}, mirror_of = {}, pending = {}, unmatched = {}, removed = {}, removed_count = 0, last_sweep = -1e9 },
 		net = { api = nil, status = "idle", reading = false, connected = false, retry_at = 0, last_ping = -1e9, rtt = nil },
 	}
 end
@@ -753,8 +757,10 @@ local function health_report(now, backend)
 		if (S.npc.sent_radius or 0) > 0 then
 			local n = 0
 			for _ in pairs(S.npc.members) do n = n + 1 end
-			log("health: npc bubble as %s: %d ships nearby, %d driven, %.0f poses/s received",
-				S.link.role or "?", n, S.npc.driven, S.npc.received / span)
+			local mirrors = 0
+			for _ in pairs(S.npc.mirrors) do mirrors = mirrors + 1 end
+			log("health: npc bubble as %s: %d ships nearby, %d driven, %d stand-ins, %d removed, %.0f poses/s received",
+				S.link.role or "?", n, S.npc.driven, mirrors, S.npc.removed_count, S.npc.received / span)
 		end
 		S.npc.received = 0
 	end
@@ -875,10 +881,12 @@ local function proxy_tick(now, dt)
 end
 
 -------------------------------------------------------------------------------
--- NPC bubble (shared world, stage A). Both games list the ships near their player (md BubbleScan,
--- every second). The host sends their poses at npc_rate; the joiner moves its own copies of the
--- same ships (same ID code) with the partner's smoothing and prediction, so a fight looks the same
--- on both sides. Ships only one side has are left alone for now (stage B).
+-- NPC bubble (shared world). Both games list the ships near their player (md BubbleScan, every second).
+-- The host sends their poses at npc_rate; the joiner moves its own copies of the same ships (same ID
+-- code) with the partner's smoothing and prediction, so a fight looks the same on both sides.
+-- The host's world is the truth near the players: the joiner creates stand-ins ("mirrors") for ships
+-- only the host has, removes ships only it has (well inside the host's coverage, never player-owned),
+-- and takes the host's hull values when they are lower.
 
 local function npc_enabled()
 	return config.mode == "net" and S.link.linked and config.npc_sync == 1 and S.backend == "lua"
@@ -893,10 +901,36 @@ local function on_bubble()
 		local id = to64(ship)
 		local code = C.GetObjectIDCode(id)
 		if code ~= nil and C.IsComponentOperational(id) then
-			members[ffi.string(code)] = { id = id, macro = GetComponentData(id, "macro") }
+			local id64 = to64(id)
+			members[ffi.string(code)] = { id = id, macro = GetComponentData(id64, "macro"), owner = GetComponentData(id64, "owner"),
+				hull = GetComponentData(id64, "hullpercent"), playerowned = GetComponentData(id64, "isplayerowned") }
 		end
 	end
 	S.npc.members = members
+	S.npc.scan_count = #list
+end
+
+local function lua_id(id)
+	return ConvertStringToLuaID(tostring(id))
+end
+
+-- md created a stand-in: player.entity.$x4coop_mirror = [host idcode, ship]
+local function on_npc_mirror()
+	local N = S.npc
+	local v = S.player and GetNPCBlackboard(S.player, "$x4coop_mirror")
+	if type(v) ~= "table" or type(v[1]) ~= "string" or not v[2] then return end
+	local id = to64(v[2])
+	local local_code = C.GetObjectIDCode(id)
+	N.mirrors[v[1]] = { id = id }
+	if local_code ~= nil then N.mirror_of[ffi.string(local_code)] = v[1] end
+	N.pending[v[1]] = nil
+end
+
+-- The joiner's ship for a host ID code: our own copy, or the stand-in we made for it.
+local function npc_local(code)
+	local N = S.npc
+	local m = N.members[code] or N.mirrors[code]
+	return m and C.IsComponentOperational(m.id) and m.id or nil
 end
 
 local function npc_send(now)
@@ -913,37 +947,39 @@ local function npc_send(now)
 				vx, vy, vz = (p.x - q.x) / (now - q.t), (p.y - q.y) / (now - q.t), (p.z - q.z) / (now - q.t)
 			end
 			prev[code] = { t = now, x = p.x, y = p.y, z = p.z }
-			entries[#entries + 1] = string.format("%s,%s,%.2f,%.2f,%.2f,%.5f,%.5f,%.5f,%.2f,%.2f,%.2f",
-				code, m.macro, p.x, p.y, p.z, p.yaw, p.pitch, p.roll, vx, vy, vz)
+			entries[#entries + 1] = string.format("%s,%s,%s,%.1f,%.2f,%.2f,%.2f,%.5f,%.5f,%.5f,%.2f,%.2f,%.2f",
+				code, m.macro, tostring(m.owner or "ownerless"), tonumber(m.hull) or 100, p.x, p.y, p.z, p.yaw, p.pitch, p.roll, vx, vy, vz)
 		end
 	end
-	if #entries > 0 then
-		net_send(string.format("B|%.4f|%s|%s", now, S.loc.sector_macro, table.concat(entries, ";")))
-	end
+	-- md lists at most 40 ships; a full list means there may be more, so the joiner must not remove anything.
+	local complete = (N.scan_count or 0) < 40 and 1 or 0
+	net_send(string.format("B|%.4f|%s|%d|%d|%s", now, S.loc.sector_macro, config.npc_radius, complete, table.concat(entries, ";")))
 end
 
 -- Joiner: one B message from the host.
 local function npc_receive(f, now)
 	local N = S.npc
-	local t = tonumber(f[2])
-	if not t or f[3] ~= S.loc.sector_macro or not f[4] then return end  -- only the sector we are in
-	for entry in f[4]:gmatch("[^;]+") do
+	local t, radius = tonumber(f[2]), tonumber(f[4])
+	if not t or f[3] ~= S.loc.sector_macro or not radius then return end  -- only the sector we are in
+	N.host_radius, N.host_complete, N.last_b = radius, f[5] == "1", now
+	for entry in (f[6] or ""):gmatch("[^;]+") do
 		local v = {}
 		for field in entry:gmatch("[^,]+") do v[#v + 1] = field end
-		local code, macro = v[1], v[2]
-		if #v == 11 and #code <= 16 and code:match("^[%w%-]+$") and #macro <= 80 and macro:match("^[%w_]+$") then
+		local code, macro, owner, hull = v[1], v[2], v[3], tonumber(v[4])
+		if #v == 13 and #code <= 16 and code:match("^[%w%-]+$") and #macro <= 80 and macro:match("^[%w_]+$")
+			and #owner <= 40 and owner:match("^[%w_]+$") and hull and hull >= 0 and hull <= 100 then
 			local s = { t = t, sector_macro = f[3], ship_macro = macro }
 			local okay = true
 			for i, k in ipairs({ "x", "y", "z", "yaw", "pitch", "roll", "vx", "vy", "vz" }) do
-				local num = tonumber(v[2 + i])
+				local num = tonumber(v[4 + i])
 				if not num or num ~= num or math.abs(num) > SNAPSHOT_LIMITS[k] then okay = false break end
 				s[k] = num
 			end
 			if okay then
-				local E = N.ents[code] or { snaps = {} }
+				local E = N.ents[code] or { snaps = {}, first = now }
 				N.ents[code] = E
 				on_snapshot(s, now, E)
-				E.seen = now
+				E.seen, E.macro, E.owner, E.hull = now, macro, owner, hull
 				N.received = N.received + 1
 			end
 		end
@@ -956,30 +992,80 @@ local function npc_tick(now, dt)
 	if radius ~= N.sent_radius then
 		N.sent_radius = radius
 		request("bubble", { radius })
-		if radius == 0 then N.ents, N.members = {}, {} end
+		if radius == 0 then
+			request("npc_clear", {})
+			N.ents, N.members, N.mirrors, N.mirror_of, N.pending, N.unmatched = {}, {}, {}, {}, {}, {}
+		end
 	end
 	if radius == 0 or C.IsGamePaused() then return end
 	if S.link.role == "host" then
 		npc_send(now)
 		return
 	end
-	-- Joiner: drive our copies of the host's ships. Ones the host stopped mentioning go back to their own AI.
+	-- Joiner: drive our copies of the host's ships. Ones the host stopped mentioning go back to their own
+	-- AI; stand-ins for them are removed.
 	local driven = 0
 	for code, E in pairs(N.ents) do
-		local m = N.members[code]
+		local id = npc_local(code)
 		if now - (E.seen or 0) > 2 then
 			N.ents[code] = nil
-		elseif m and C.IsComponentOperational(m.id) then
+			local mirror = N.mirrors[code]
+			if mirror then
+				request("obj_remove", { lua_id(mirror.id) })
+				N.mirrors[code] = nil
+			end
+		elseif id then
 			local target = remote_target(now, E)
 			if target then
 				E.shown = follow(E.shown, target, dt)
-				local sector = C.GetContextByClass(m.id, "sector", false)
-				C.SetObjectSectorPos(m.id, sector, make_posrot(E.shown.x, E.shown.y, E.shown.z, E.shown.q))
+				local sector = C.GetContextByClass(id, "sector", false)
+				C.SetObjectSectorPos(id, sector, make_posrot(E.shown.x, E.shown.y, E.shown.z, E.shown.q))
 				driven = driven + 1
+			end
+			-- The host referees damage: take its hull when lower (never heal, so our own hits stick).
+			if config.npc_hull == 1 and E.hull and now - (E.hull_at or 0) >= 1 then
+				E.hull_at = now
+				local mine = tonumber(GetComponentData(to64(id), "hullpercent"))
+				if mine and E.hull < mine - 1 then
+					request("obj_hull", { lua_id(id), E.hull })
+				end
+			end
+		elseif config.npc_mirror == 1 and now - E.first > 1 and now - (N.pending[code] or -1e9) > 5 then
+			local newest = E.snaps[#E.snaps]
+			if newest then
+				N.pending[code] = now
+				request("npc_mirror", { code, E.macro, E.owner, newest.sector_macro,
+					newest.x, newest.y, newest.z, newest.yaw, newest.pitch, newest.roll })
 			end
 		end
 	end
 	N.driven = driven
+
+	-- Remove ships the host doesn't have, but only where the host's list is complete and covers them.
+	if config.npc_remove == 1 and now - N.last_sweep >= 1 then
+		N.last_sweep = now
+		local P = S.proxy
+		local host_pos = (P.state == "live" and P.sector == S.loc.sector and N.host_complete and now - (N.last_b or -1e9) < 1)
+			and C.GetObjectPositionInSector(P.id) or nil
+		for code, m in pairs(N.members) do
+			if N.ents[code] or N.removed[code] or not host_pos or m.playerowned then
+				N.unmatched[code] = nil
+			else
+				local p = C.GetObjectPositionInSector(m.id)
+				local d = math.sqrt((p.x - host_pos.x) ^ 2 + (p.y - host_pos.y) ^ 2 + (p.z - host_pos.z) ^ 2)
+				if d > 0.8 * N.host_radius then
+					N.unmatched[code] = nil
+				else
+					N.unmatched[code] = N.unmatched[code] or now
+					if now - N.unmatched[code] >= 3 then
+						N.removed[code] = true
+						N.removed_count = N.removed_count + 1
+						request("obj_remove", { lua_id(m.id) })
+					end
+				end
+			end
+		end
+	end
 end
 
 -------------------------------------------------------------------------------
@@ -1067,7 +1153,16 @@ on_world_message = function(kind, f, now)
 	elseif kind == "B" then
 		if K.linked and K.role == "join" and config.npc_sync == 1 then npc_receive(f, now) end
 	elseif K.linked and valid_world_ref(f[2], f[3], f[4]) then
-		if kind == "F" then
+		local mirror = S.npc.mirrors[f[2]]  -- a ship we only have as a stand-in: address it directly
+		if mirror then
+			if kind == "F" then
+				request("obj_fire", { lua_id(mirror.id) })
+			elseif kind == "K" then
+				request("obj_kill", { lua_id(mirror.id) })
+			elseif tonumber(f[5]) and tonumber(f[5]) >= 0 and tonumber(f[5]) <= 100 then
+				request("obj_hull", { lua_id(mirror.id), tonumber(f[5]) })
+			end
+		elseif kind == "F" then
 			request("fire", { f[2], f[3], f[4] })
 		elseif kind == "K" then
 			request("world_kill", { f[2], f[3], f[4] })
@@ -1085,6 +1180,7 @@ local function on_world_event(_, param)
 	local K = S.link
 	local f = split(tostring(param or ""))
 	if not valid_world_ref(f[2], f[3], f[4]) then return end
+	f[2] = S.npc.mirror_of[f[2]] or f[2]  -- a stand-in we made: use the host's code for it
 	local now = getElapsedTime()
 	if f[1] == "D" and config.fire_fx == 1 and now - (K.last_fire or -1e9) >= 0.5 then
 		-- You are hitting f[2]: your proxy on the other side (or your ghost here) fires at it too.
@@ -1346,6 +1442,7 @@ local function init()
 	RegisterEvent("x4coop.probe_result", on_probe_result)
 	RegisterEvent("x4coop.world", on_world_event)
 	RegisterEvent("x4coop.bubble", on_bubble)
+	RegisterEvent("x4coop.npc_mirror", on_npc_mirror)
 
 	-- Chat window "/x4coop ..." commands; everything else goes to the original handler.
 	local ego_ExecuteDebugCommand = ExecuteDebugCommand

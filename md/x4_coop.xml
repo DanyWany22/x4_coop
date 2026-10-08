@@ -37,6 +37,7 @@
           </conditions>
           <actions>
             <include_actions ref="DestroyProxies"/>
+            <include_actions ref="DestroyMirrors"/>
             <raise_lua_event name="'x4coop.md_ready'"/>
           </actions>
         </cue>
@@ -48,6 +49,7 @@
           </conditions>
           <actions>
             <include_actions ref="DestroyProxies"/>
+            <include_actions ref="DestroyMirrors"/>
             <raise_lua_event name="'x4coop.md_ready'"/>
           </actions>
         </cue>
@@ -359,7 +361,7 @@
             </find_ship>
             <set_value name="$Bubble" exact="[]"/>
             <do_for_each name="$Candidate" in="$Found">
-              <do_if value="$Bubble.count lt 40 and $Candidate != $Center and $Candidate.isoperational and not $Candidate.ismasstraffic and not $Candidate.isunit and not @$Candidate.dock and $Candidate.parent.isclass.space and not Root.$AllProxies.indexof.{$Candidate} and not @Root.$Adopted.indexof.{$Candidate}">
+              <do_if value="$Bubble.count lt 40 and $Candidate != $Center and $Candidate.isoperational and not $Candidate.ismasstraffic and not $Candidate.isunit and not @$Candidate.dock and $Candidate.parent.isclass.space and not Root.$AllProxies.indexof.{$Candidate} and not @Root.$Adopted.indexof.{$Candidate} and not @Root.$Mirrors.indexof.{$Candidate}">
                 <append_to_list name="$Bubble" exact="$Candidate"/>
               </do_if>
             </do_for_each>
@@ -367,6 +369,136 @@
             <raise_lua_event name="'x4coop.bubble'"/>
           </actions>
         </cue>
+
+        <!--
+          Stand-in for a ship only the host has (NPC bubble, joiner side). Lua moves it like the host's other ships.
+          param3: [host_idcode, ship_macro, owner_faction_id, sector_macro, x, y, z, yaw, pitch, roll]
+          Reply: player.entity.$x4coop_mirror = [host_idcode, ship], then raise 'x4coop.npc_mirror'.
+        -->
+        <cue name="OnNpcMirror" instantiate="true">
+          <conditions>
+            <event_ui_triggered screen="'x4coop'" control="'npc_mirror'"/>
+          </conditions>
+          <actions>
+            <set_value name="$Args" exact="event.param3"/>
+            <do_if value="not Root.$Mirrors?">
+              <set_value name="Root.$Mirrors" exact="[]"/>
+            </do_if>
+            <find_sector name="$Sector" macro="@macro.{$Args.{4}}"/>
+            <set_value name="$Macro" exact="@macro.{$Args.{2}}"/>
+            <set_value name="$Owner" exact="@faction.{$Args.{3}}"/>
+            <do_if value="$Sector and @$Macro.isclass.ship and $Owner">
+              <create_ship name="$Ship" macro="$Macro" sector="$Sector">
+                <owner exact="$Owner" overridenpc="true"/>
+                <pilot>
+                  <select race="race.drone" tags="tag.aipilot"/>
+                </pilot>
+                <loadout>
+                  <level exact="0.5"/>
+                </loadout>
+                <position x="$Args.{5}" y="$Args.{6}" z="$Args.{7}"/>
+                <rotation yaw="$Args.{8} * 57.29577951308232deg" pitch="$Args.{9} * 57.29577951308232deg" roll="$Args.{10} * 57.29577951308232deg"/>
+              </create_ship>
+              <do_if value="@$Ship.isoperational">
+                <append_to_list name="Root.$Mirrors" exact="$Ship"/>
+                <set_value name="player.entity.$x4coop_mirror" exact="[$Args.{1}, $Ship]"/>
+                <raise_lua_event name="'x4coop.npc_mirror'"/>
+              </do_if>
+            </do_if>
+          </actions>
+        </cue>
+
+        <cue name="OnNpcClear" instantiate="true">
+          <conditions>
+            <event_ui_triggered screen="'x4coop'" control="'npc_clear'"/>
+          </conditions>
+          <actions>
+            <include_actions ref="DestroyMirrors"/>
+          </actions>
+        </cue>
+
+        <!--
+          Direct actions on one of the joiner's ships, handed over by Lua (param3.{1} = the ship). Never the player's
+          ship or a proxy; obj_remove (quiet, used for ships the host doesn't have) never touches player-owned ships.
+        -->
+        <cue name="OnObjKill" instantiate="true">
+          <conditions>
+            <event_ui_triggered screen="'x4coop'" control="'obj_kill'"/>
+          </conditions>
+          <actions>
+            <set_value name="$Obj" exact="event.param3.{1}"/>
+            <include_actions ref="CheckObj"/>
+            <do_if value="$ObjOk">
+              <destroy_object object="$Obj" explosion="true"/>
+            </do_if>
+          </actions>
+        </cue>
+
+        <cue name="OnObjRemove" instantiate="true">
+          <conditions>
+            <event_ui_triggered screen="'x4coop'" control="'obj_remove'"/>
+          </conditions>
+          <actions>
+            <set_value name="$Obj" exact="event.param3.{1}"/>
+            <include_actions ref="CheckObj"/>
+            <do_if value="$ObjOk and (not $Obj.isplayerowned or @Root.$Mirrors.indexof.{$Obj})">
+              <do_if value="@Root.$Mirrors.indexof.{$Obj}">
+                <remove_from_list name="Root.$Mirrors" exact="$Obj"/>
+              </do_if>
+              <destroy_object object="$Obj" explosion="false"/>
+            </do_if>
+          </actions>
+        </cue>
+
+        <cue name="OnObjHull" instantiate="true">
+          <conditions>
+            <event_ui_triggered screen="'x4coop'" control="'obj_hull'"/>
+          </conditions>
+          <actions>
+            <set_value name="$Obj" exact="event.param3.{1}"/>
+            <include_actions ref="CheckObj"/>
+            <do_if value="$ObjOk and $Obj.hullpercentage gt event.param3.{2}">
+              <set_object_hull object="$Obj" exact="event.param3.{2}"/>
+            </do_if>
+          </actions>
+        </cue>
+
+        <cue name="OnObjFire" instantiate="true">
+          <conditions>
+            <event_ui_triggered screen="'x4coop'" control="'obj_fire'"/>
+            <check_value value="@Root.$Proxy.pilot.exists"/>
+          </conditions>
+          <actions>
+            <set_value name="$Obj" exact="event.param3.{1}"/>
+            <include_actions ref="CheckObj"/>
+            <do_if value="$ObjOk">
+              <start_script name="'x4coop.proxy.fire'" object="Root.$Proxy.pilot">
+                <param name="target" value="$Obj"/>
+                <param name="duration" value="1.2s"/>
+              </start_script>
+            </do_if>
+          </actions>
+        </cue>
+
+        <!-- In: $Obj. Out: $ObjOk, true for an operational ship that is not the player's and not a proxy. -->
+        <library name="CheckObj">
+          <actions>
+            <set_value name="$ObjOk" exact="@$Obj.isoperational and $Obj.isclass.ship and $Obj != player.occupiedship and not Root.$AllProxies.indexof.{$Obj} and not @Root.$Adopted.indexof.{$Obj}"/>
+          </actions>
+        </library>
+
+        <library name="DestroyMirrors">
+          <actions>
+            <do_if value="Root.$Mirrors?">
+              <do_for_each name="$OldMirror" in="Root.$Mirrors">
+                <do_if value="$OldMirror.exists">
+                  <destroy_object object="$OldMirror" explosion="false"/>
+                </do_if>
+              </do_for_each>
+            </do_if>
+            <set_value name="Root.$Mirrors" exact="[]"/>
+          </actions>
+        </library>
 
         <!-- The partner is hitting a ship: their proxy fires at the same ship here. param3: [idcode, ship_macro, sector_macro] -->
         <cue name="OnFire" instantiate="true">
