@@ -92,6 +92,8 @@ local config = {
 	npc_hull = 1,             -- take the partner's hull values for ships in its area
 	economy = 1,              -- shared world: the joiner's station stock follows the host's
 	economy_cycle = 60,       -- s for the host to send every station once
+	empire_income_to_host = 1, -- shared world: the empire's automated trade income is the host's, not the joiner's
+	credit_timeout = 30,      -- s: credits given that the partner hasn't confirmed by then come back
 	ghost_latency = 0.12,     -- s, simulated one-way latency in ghost mode
 	ghost_jitter = 0.03,      -- s, extra random delay per snapshot
 	ghost_loss = 0.0,         -- 0..1, fraction of snapshots dropped
@@ -331,6 +333,7 @@ local function reset()
 			found = {}, mirrors = {}, mirror_of = {}, pending = {}, unmatched = {}, removed = {}, removed_count = 0,
 			dead = {}, my_hits = {}, last_sweep = -1e9 },
 		econ = { on = false, list = {}, by_code = {}, next = 1, budget = 0, cycle = 0, pass = nil, last = nil },
+		credits = { pending = {}, received = {}, empire_on = false, empire_trades = 0 },
 		net = { api = nil, status = "idle", reading = false, connected = false, retry_at = 0, last_ping = -1e9, rtt = nil,
 			partner = kept_partner },
 	}
@@ -683,6 +686,7 @@ end
 
 local on_pipe_message
 local on_world_message  -- shared-world messages (R, L, K, D), defined after proxy management
+local credits_receive   -- credits from or for the partner (C), defined with the shared world
 local send_link
 
 local function net_send(msg)
@@ -762,6 +766,8 @@ on_pipe_message = function(msg)
 			local rtt = now - t
 			N.rtt = N.rtt and (N.rtt * 0.8 + rtt * 0.2) or rtt
 		end
+	elseif kind == "C" then
+		if config.mode == "net" then credits_receive(f, now) end
 	elseif kind == "M" then
 		local text = clean_text(f[3], 200)
 		if text ~= "" then
@@ -1749,6 +1755,87 @@ local function on_probe_result()
 end
 
 -------------------------------------------------------------------------------
+-- Credits (shared world: one empire, two wallets). The empire's income is the host's: the host's game runs
+-- the empire's trades for real, so in the joiner's game md takes back what the empire's own ships earn on
+-- their automated trades and refunds what they spend (OnEmpireTrade); the joiner keeps what they earn and
+-- spend themselves. Players can send each other credits: /x4coop give <amount> takes them from your wallet
+-- at once and offers them ("C|give|id|amount|name") until your partner confirms ("C|ack|id"); unconfirmed
+-- after credit_timeout seconds, they come back to you. The receiver counts each id once.
+
+local CREDIT_RETRY = 2       -- s between offers of the same credits
+local CREDIT_MAX = 1e12
+
+local function format_credits(n)
+	local digits = tostring(math.floor(math.abs(n)))
+	local grouped = digits:reverse():gsub("(%d%d%d)", "%1,"):reverse():gsub("^,", "")
+	return (n < 0 and "-" or "") .. grouped
+end
+
+credits_receive = function(f, now)
+	local W = S.credits
+	if f[2] == "give" then
+		local id, amount = f[3], tonumber(f[4])
+		if not (id and #id <= 16 and id:match("^%x+$") and amount and amount >= 1 and amount <= CREDIT_MAX
+			and amount == math.floor(amount)) then
+			return
+		end
+		if not W.received[id] then
+			W.received[id] = now
+			request("money", { amount })
+			notify("%s sent you %s Cr", clean_text(f[5], 32), format_credits(amount))
+		end
+		net_send("C|ack|" .. id)
+	elseif f[2] == "ack" then
+		local give = W.pending[f[3] or ""]
+		if give then
+			W.pending[f[3]] = nil
+			notify("your partner received %s Cr", format_credits(give.amount))
+		end
+	end
+end
+
+local function give_credits(text)
+	local amount = tonumber((tostring(text or ""):gsub(",", "")))
+	if not amount or amount < 1 or amount ~= math.floor(amount) or amount > CREDIT_MAX then
+		notify("usage: /x4coop give <credits>, e.g. /x4coop give 50000")
+	elseif config.mode ~= "net" or not S.net.connected or not S.net.partner then
+		notify("no partner connected to give credits to")
+	elseif GetPlayerMoney() < amount then
+		notify("you have only %s Cr", format_credits(GetPlayerMoney()))
+	else
+		local now = getElapsedTime()
+		local id = string.format("%06x%06x", math.floor(now * 1000) % 0x1000000, math.random(0, 0xffffff))
+		request("money", { -amount })
+		S.credits.pending[id] = { amount = amount, first = now, last = -1e9 }
+		notify("giving %s Cr to your partner", format_credits(amount))
+	end
+end
+
+-- md took one automated empire trade back out of the joiner's wallet
+local function on_empire_trade()
+	S.credits.empire_trades = S.credits.empire_trades + 1
+end
+
+local function credits_tick(now)
+	local W = S.credits
+	for id, give in pairs(W.pending) do
+		if now - give.first > config.credit_timeout then
+			W.pending[id] = nil
+			request("money", { give.amount })
+			notify("your partner didn't confirm %s Cr, so they came back to you", format_credits(give.amount))
+		elseif now - give.last >= CREDIT_RETRY and S.net.connected then
+			give.last = now
+			net_send(string.format("C|give|%s|%d|%s", id, give.amount, clean_text(S.loc.name, 32)))
+		end
+	end
+	local on = config.mode == "net" and S.link.linked and S.link.role == "join" and config.empire_income_to_host == 1
+	if on ~= W.empire_on then
+		W.empire_on = on
+		request("empire_income", { on and 1 or 0, world_id() or "" })
+	end
+end
+
+-------------------------------------------------------------------------------
 -- Chat commands
 
 -- The first thing standing in the way of co-op, with what to do about it; "all good" when nothing does.
@@ -1793,14 +1880,15 @@ local function status_text()
 	local link = config.mode == "net" and (N.status .. (N.rtt and string.format(", rtt %.0f ms", N.rtt * 1000) or "")
 		.. " | pipe " .. config.pipe .. " via " .. (N.client or "-")
 		.. " | " .. (S.link.role or "?") .. ", world " .. (S.link.state or "unknown")
-		.. " | economy " .. econ_summary()) or "-"
+		.. " | economy " .. econ_summary()
+		.. (S.credits.empire_on and string.format(" | empire trades kept for the host: %d", S.credits.empire_trades) or "")) or "-"
 	return string.format("mode %s | backend %s (%s) | proxy %s%s | partner %s %s, last snapshot %s | link %s | rotation %s %s",
 		config.mode, config.backend, S.backend or "untested", P.state, proxy_is_adopted() and " (their own ship)" or "",
 		R.name or "-", partner_whereabouts() or "", age, link,
 		conv_name(S.conv), S.probe.measured and "measured" or "assumed")
 end
 
-local USAGE = "usage: /x4coop status | check | join | say <text> | guestship | takeship | share | loadshared | ghost | net | off | backend lua|md|auto | probe | pipe <name> | pipeclient auto|own|sirnukes | set <key> <number>"
+local USAGE = "usage: /x4coop status | check | join | say <text> | give <credits> | guestship | takeship | share | loadshared | ghost | net | off | backend lua|md|auto | probe | pipe <name> | pipeclient auto|own|sirnukes | set <key> <number>"
 
 local function guest_ship()
 	local ship = S.player and GetNPCBlackboard(S.player, "$x4coop_guestship")
@@ -1915,6 +2003,8 @@ local function command(param)
 		share_save()
 	elseif cmd == "loadshared" then
 		load_shared()
+	elseif cmd == "give" then
+		give_credits(args[2])
 	elseif cmd == "pipeclient" then
 		local choice = args[2]
 		if choice == "auto" or choice == "own" or choice == "sirnukes" then
@@ -2004,6 +2094,7 @@ local function tick(now, dt)
 	proxy_tick(now, dt)
 	npc_tick(now, dt)
 	econ_tick(now, dt)
+	credits_tick(now)
 end
 
 local function on_update()
@@ -2029,6 +2120,7 @@ local function init()
 	RegisterEvent("x4coop.world", on_world_event)
 	RegisterEvent("x4coop.bubble", on_bubble)
 	RegisterEvent("x4coop.stations", on_stations)
+	RegisterEvent("x4coop.empire_trade", on_empire_trade)
 	RegisterEvent("x4coop.npc_mirror", on_npc_mirror)
 
 	-- Chat window "/x4coop ..." commands; everything else goes to the original handler.

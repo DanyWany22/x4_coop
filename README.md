@@ -203,9 +203,16 @@ What syncs while linked:
   stations not in the joiner's world, and how far the stock had drifted since the previous pass.
   `/x4coop set economy 0` turns it off; `economy_cycle` sets the seconds per pass.
 
-Credits aren't shared yet: each of you has your own. Both games run your automated traders, so simply
-adding the two balances together would count every automated sale twice. A shared wallet needs the
-host's balance to be the one true account, with only the joiner's own purchases forwarded to it.
+**Credits:** you share one empire (the same faction), but each of you has your own wallet.
+* **The empire's income is the host's.** Both games run the empire's automated traders and miners,
+  but only the host's game counts them. In the joiner's game, what an empire ship earns on its own
+  trades is taken back out of the joiner's wallet, and what it spends is refunded. This doesn't apply
+  to the ship you're flying, to ships working for a station (they use the station's account), or to
+  ships the joiner bought after loading the host's save. `/x4coop status` counts these trades;
+  `/x4coop set empire_income_to_host 0` turns it off.
+* **`/x4coop give <credits>`** sends credits to your partner. They leave your wallet at once and
+  arrive in your partner's when their game confirms. If it hasn't confirmed within 30 seconds
+  (`credit_timeout`), they come back to you.
 
 Away from both of you, the two worlds still drift apart (far-away NPC ships, what they carry). The host's world
 is the real one: next session, share again.
@@ -219,6 +226,7 @@ is the real one: next session, share again.
 | `/x4coop ghost` / `net` / `off` | mode (remembered in the savegame) |
 | `/x4coop join` | warp beside your partner (pilot seat, undocked) |
 | `/x4coop say <text>` | chat line to your partner |
+| `/x4coop give <credits>` | send credits to your partner (e.g. `give 50000`) |
 | `/x4coop guestship` | host: park a spare ship for the joiner (before sharing) |
 | `/x4coop share` | host: quicksave and send it to the joiner's bridge |
 | `/x4coop loadshared` | joiner: load the save the host sent |
@@ -368,7 +376,8 @@ game's own schema (`libraries/md.xsd`, `libraries/common.xsd`).
 
 Messages (one text line each): `S` snapshot (position, rotation, velocity, ship, hull, shield),
 `P`/`Q` ping, `M` chat, `L` world link, `K` kill, `D` hit, `F` firing at, `B` nearby ships (both
-ways), `E` station stock (host to joiner); `R`/`W`/`N`/`X` are between a game and its own bridge.
+ways), `E` station stock (host to joiner), `C` credits given; `R`/`W`/`N`/`X` are between a game and
+its own bridge.
 
 Self-calibration: on first contact the proxy is nudged and read back (does `SetObjectSectorPos`
 work, and in which angle unit), and the rotation convention is checked against the engine's own
@@ -400,6 +409,7 @@ python extensions/x4_coop/dev/run_tests.py [--quick]
   mismatch, kills/hits/fire, adoption, NPC sync both ways: together and in different sectors
   (stand-ins, removal, hull, the host keeping its own area, no echo), the economy as host and joiner
   (every station sent; drift found, corrected and measured; stations missing on one side),
+  credits given both ways (confirmed, counted once when offered twice, returned when unconfirmed),
   hostile messages, guest ship, save handoff commands. Errors are measured against ground truth:
   the partner within ~2–3 m and ~2° (95th percentile) at 220–300 m/s; NPC copies within ~3.5 m.
 * Bridge: password codec (encryption, replay, tamper, stale, other versions), reconnects, chat, wrong password, partner

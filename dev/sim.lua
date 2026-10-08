@@ -35,6 +35,8 @@ local SC = {
 	                 role = "host", own_world = "abc123", partner_world = "abc123", econ_test = "host" },
 	econ_join    = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
 	                 role = "join", own_world = "abc123", partner_world = "abc123", econ_test = "join" },
+	credits      = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
+	                 role = "join", own_world = "abc123", partner_world = "abc123", credits_test = true },
 	npc_apart    = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
 	                 role = "host", own_world = "abc123", partner_world = "abc123", npc_test = "apart", partner_sector = 501 },
 	world_oldmod = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
@@ -256,6 +258,8 @@ function GetComponentData(id, key)
 	end
 end
 function GetNPCBlackboard(_, key) return blackboard[key] end
+player_money, money_requests, empire_requests, partner_gives_acked = 100000, {}, {}, {}
+function GetPlayerMoney() return player_money end
 function SetNPCBlackboard(_, key, v) blackboard[key] = v end
 function ExecuteDebugCommand(cmd, param) say("  ego command /%s %s", cmd, tostring(param)) end
 function SaveGame(name, desc) game_saves[#game_saves + 1] = name end
@@ -342,6 +346,11 @@ function AddUITriggeredEvent(screen, control, args)
 		local list = blackboard["$x4coop_mirrors"]
 		list[#list + 1] = { args[1], id, 1 }
 		queue("x4coop.npc_mirror")
+	elseif control == "money" then
+		player_money = player_money + args[1]
+		money_requests[#money_requests + 1] = args[1]
+	elseif control == "empire_income" then
+		empire_requests[#empire_requests + 1] = tostring(args[1]) .. ":" .. tostring(args[2])
 	elseif control == "economy" then
 		local list = {}
 		if args[1] == 1 then
@@ -431,6 +440,11 @@ if sc.pipes then
 					partner_queue[#partner_queue + 1] = { at = clock + 2 * ONE_WAY, msg = reply }
 				elseif f[1] == "M" then
 					partner_queue[#partner_queue + 1] = { at = clock + 2 * ONE_WAY, msg = "M|Echo|you said: " .. tostring(f[3]) }
+				elseif f[1] == "C" and f[2] == "give" then
+					if not next(partner_gives_acked) then
+						partner_gives_acked[f[3]] = f[4]
+						partner_queue[#partner_queue + 1] = { at = clock + 2 * ONE_WAY, msg = "C|ack|" .. f[3] }
+					end
 				elseif f[1] == "P" then
 					partner_queue[#partner_queue + 1] = { at = clock + 2 * ONE_WAY, msg = "Q|" .. f[2] }
 				elseif f[1] == "S" then
@@ -497,6 +511,21 @@ local function fake_host_stock()
 	table.sort(wares)
 	partner_queue[#partner_queue + 1] = { at = clock + ONE_WAY, msg = string.format("E|stock|%d|%d|%d|%s|%s", econ_pass,
 		econ_index, #HOST_ORDER, code, table.concat(wares, ",")) }
+end
+
+local credit_steps = {
+	{ 6, function() ExecuteDebugCommand("x4coop", "set credit_timeout 5") end },
+	{ 8, function() ExecuteDebugCommand("x4coop", "give 5,000") end },
+	{ 9, function() ExecuteDebugCommand("x4coop", "give 999999999") end },
+	{ 10, function() pipe_reader("C|give|00c0ffee|1234|Partner") end },
+	{ 12, function() pipe_reader("C|give|00c0ffee|1234|Partner") end },  -- offered again: count once
+	{ 14, function() ExecuteDebugCommand("x4coop", "give 700") end },      -- never confirmed: comes back
+}
+local function credit_script()
+	if not sc.credits_test or not pipe_reader then return end
+	while credit_steps[1] and clock >= credit_steps[1][1] do
+		table.remove(credit_steps, 1)[2]()
+	end
 end
 
 local function deliver_pipe()
@@ -611,6 +640,7 @@ while clock < sc.duration do
 	fake_host_bubble()
 	fake_joiner_bubble()
 	fake_host_stock()
+	credit_script()
 	if sc.partner_restart_at and clock >= sc.partner_restart_at and partner_clock_offset == 1000 then
 		partner_clock_offset = -500
 		say("t=%.1f partner restarted their game (clock jumped back)", clock)
@@ -1010,6 +1040,23 @@ if sc.econ_test == "join" then
 		and acts:find("STN-1:energycells+300", 1, true) ~= nil and acts:find("STN-2:silicon-120", 1, true) ~= nil
 		and acts:find("STN-3:water-100", 1, true) ~= nil and acts:find("STN-3:water-2500", 1, true) ~= nil
 		and acts:find("STN-4:energycells-50", 1, true) ~= nil and acts:find("STN-5:", 1, true) == nil
+end
+if sc.credits_test then
+	local acks = 0
+	for _, w in ipairs(pipe_writes) do if w == "C|ack|00c0ffee" then acks = acks + 1 end end
+	local offers_700 = 0
+	for _, w in ipairs(pipe_writes) do if w:match("^C|give|%x+|700|") then offers_700 = offers_700 + 1 end end
+	say("credits: wallet %d (expected 96234); md money changes: %s; acks sent for the partner's gift: %d; offers of 700: %d; empire switch: %s",
+		player_money, table.concat(money_requests, ","), acks, offers_700, table.concat(empire_requests, ","))
+	ok = ok and player_money == 96234
+		and table.concat(money_requests, ",") == "-5000,1234,-700,700"
+		and acks == 2 and offers_700 >= 2
+		and said:find("your partner received 5,000 Cr", 1, true) ~= nil
+		and said:find("Partner sent you 1,234 Cr", 1, true) ~= nil
+		and select(2, said:gsub("Partner sent you", "")) == 1
+		and said:find("you have only 95,000 Cr", 1, true) ~= nil
+		and said:find("didn't confirm 700 Cr", 1, true) ~= nil
+		and empire_requests[1] == "1:abc123"
 end
 if sc.fire_test then
 	local fires = {}

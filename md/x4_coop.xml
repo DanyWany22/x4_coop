@@ -611,6 +611,67 @@
           </actions>
         </cue>
 
+        <!-- Credits to or from the player's wallet (param3: [credits]; positive adds, negative takes away). -->
+        <cue name="OnMoney" instantiate="true">
+          <conditions>
+            <event_ui_triggered screen="'x4coop'" control="'money'"/>
+          </conditions>
+          <actions>
+            <set_value name="$Credits" exact="event.param3.{1}"/>
+            <do_if value="$Credits gt 0">
+              <transfer_money from="faction.ownerless" to="faction.player" amount="($Credits)Cr"/>
+            </do_if>
+            <do_elseif value="$Credits lt 0">
+              <transfer_money from="faction.player" to="faction.ownerless" amount="(-$Credits)Cr"/>
+            </do_elseif>
+          </actions>
+        </cue>
+
+        <!--
+          Shared world, joiner: the empire's automated trade income is the host's (param3: [1 or 0, world id]).
+          The empire is the player-owned ships in the host's save, listed once per world; ships the joiner buys
+          later are the joiner's own.
+        -->
+        <cue name="OnEmpireConfig" instantiate="true">
+          <conditions>
+            <event_ui_triggered screen="'x4coop'" control="'empire_income'"/>
+          </conditions>
+          <actions>
+            <set_value name="Root.$EmpireOn" exact="event.param3.{1}"/>
+            <do_if value="Root.$EmpireOn == 1 and @Root.$EmpireWorld != event.param3.{2}">
+              <find_ship name="$Owned" owner="faction.player" space="player.galaxy" multiple="true"/>
+              <set_value name="Root.$EmpireShips" exact="$Owned"/>
+              <set_value name="Root.$EmpireWorld" exact="event.param3.{2}"/>
+            </do_if>
+          </actions>
+        </cue>
+
+        <!--
+          An empire ship (not the one we fly, not working for a station, which has its own account) bought or
+          sold on its own: the host's game made that trade for real, so its money is taken back out of (or
+          returned to) the joiner's wallet.
+        -->
+        <cue name="OnEmpireTrade" instantiate="true">
+          <conditions>
+            <event_trade_completed space="player.galaxy"/>
+            <check_value value="@Root.$EmpireOn == 1 and @event.param2.price and event.param2 != @Root.$LastEmpireOrder"/>
+          </conditions>
+          <actions>
+            <set_value name="$Order" exact="event.param2"/>
+            <set_value name="Root.$LastEmpireOrder" exact="$Order"/>
+            <set_value name="$Seller" exact="@$Order.seller"/>
+            <set_value name="$Buyer" exact="@$Order.buyer"/>
+            <do_if value="@$Seller.isclass.ship and $Seller.isplayerowned and $Seller != player.occupiedship and not @$Seller.commander.isclass.station and @Root.$EmpireShips.indexof.{$Seller}">
+              <transfer_money from="faction.player" to="faction.ownerless" amount="$Order.price"/>
+              <raise_lua_event name="'x4coop.empire_trade'"/>
+            </do_if>
+            <do_if value="@$Buyer.isclass.ship and $Buyer.isplayerowned and $Buyer != player.occupiedship and not @$Buyer.commander.isclass.station and @Root.$EmpireShips.indexof.{$Buyer}">
+              <transfer_money from="faction.ownerless" to="faction.player" amount="$Order.price"/>
+              <raise_lua_event name="'x4coop.empire_trade'"/>
+            </do_if>
+          </actions>
+        </cue>
+
         <cue name="OnNpcClear" instantiate="true">
           <conditions>
             <event_ui_triggered screen="'x4coop'" control="'npc_clear'"/>
