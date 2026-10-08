@@ -32,7 +32,7 @@ Wire format (one message per pipe write, '|' separated, also used by the Python 
   S|seq|t|sector_macro|ship_macro|x|y|z|yaw|pitch|roll|vx|vy|vz|name[|idcode|hull|shield]   snapshot (sender clock t in s)
   P|t / Q|t                                                            ping / pong (RTT)
   M|name|text                                                          chat line
-  R|role, L|world|role|ship, K|ship, D|ship|hull, F|ship                shared world (see that section)
+  R|role, L|world|role|ship|protocol, K|ship, D|ship|hull, F|ship       shared world (see that section)
   X|savedir|path, X|share|dir|file (game to its bridge), X|received|file (bridge to game)   save handoff
   B|t|sector|radius|complete|code,macro,owner,hull,x,y,z,yaw,pitch,roll,vx,vy,vz;...   host's nearby ships
   W|text, N|text                                                       bridge welcome / notice
@@ -53,6 +53,9 @@ ffi.cdef[[
 	UniverseID GetContextByClass(UniverseID componentid, const char* classname, bool includeself);
 	const char* GetObjectIDCode(UniverseID objectid);
 	const char* GetSaveFolderPath(void);
+	bool IsSaveListLoadingComplete(void);
+	bool IsSaveValid(const char* filename);
+	void ReloadSaveList(void);
 	UIPosRot GetObjectPositionInSector(UniverseID objectid);
 	const char* GetPlayerName(void);
 	UniverseID GetPlayerID(void);
@@ -96,11 +99,16 @@ local config = {
 	pipe = "x4_coop",
 }
 
+-- Bump when messages change meaning, so two different builds refuse to link instead of misreading each
+-- other. Builds before this check send no version and count as 1.
+local PROTOCOL = 3
+
 local SETTINGS_KEY = { mode = "$x4coop_mode", backend = "$x4coop_backend" }
 local PIPES_MODULE = "extensions.sn_mod_support_apis.ui.named_pipes.Interface"
 
 local S = {}  -- all runtime state, rebuilt by reset()
-local kept_role = nil  -- "host"/"join" from the bridge; it only says so when the pipe connects
+local kept_role = nil     -- "host"/"join" from the bridge; it only says so when the pipe connects
+local kept_partner = nil  -- the bridge's last "partner connected/silent", for the same reason
 
 local function log(fmt, ...)
 	DebugError("[x4coop] " .. string.format(fmt, ...))
@@ -319,7 +327,8 @@ local function reset()
 		npc = { sent_radius = nil, members = {}, ents = {}, prev = {}, last_send = -1e9, received = 0, driven = 0,
 			found = {}, mirrors = {}, mirror_of = {}, pending = {}, unmatched = {}, removed = {}, removed_count = 0,
 			dead = {}, my_hits = {}, last_sweep = -1e9 },
-		net = { api = nil, status = "idle", reading = false, connected = false, retry_at = 0, last_ping = -1e9, rtt = nil },
+		net = { api = nil, status = "idle", reading = false, connected = false, retry_at = 0, last_ping = -1e9, rtt = nil,
+			partner = kept_partner },
 	}
 end
 reset()
@@ -619,6 +628,7 @@ on_pipe_message = function(msg)
 			notify("bridge disconnected")
 		end
 		N.reading, N.connected, N.retry_at, N.partner = false, false, now + 3, nil
+		kept_partner = nil
 		N.status = "bridge not running (start bridge/x4_coop_bridge.py)"
 		return
 	end
@@ -651,6 +661,7 @@ on_pipe_message = function(msg)
 	elseif kind == "X" then
 		if f[2] == "received" then
 			S.net.shared_save = true
+			C.ReloadSaveList()
 			notify("the host's save arrived (it is now your quicksave): /x4coop loadshared to load it")
 		end
 	elseif kind == "N" or kind == "W" then
@@ -660,6 +671,7 @@ on_pipe_message = function(msg)
 		end
 		local text = clean_text(f[2], 200)
 		if text == "partner connected" then N.partner = true elseif text == "partner silent" then N.partner = false end
+		kept_partner = N.partner
 		notify("%s", text)
 	elseif kind == "R" or kind == "L" or kind == "K" or kind == "D" or kind == "F" or kind == "B" then
 		if config.mode == "net" then on_world_message(kind, f, now) end
@@ -986,11 +998,15 @@ local function on_npc_mirror()
 	local list = S.player and GetNPCBlackboard(S.player, "$x4coop_mirrors")
 	if S.player then SetNPCBlackboard(S.player, "$x4coop_mirrors", nil) end
 	if type(list) ~= "table" then return end
+	local now = getElapsedTime()
 	for _, v in ipairs(list) do
 		if type(v) == "table" and type(v[1]) == "string" and v[2] then
 			local id = to64(v[2])
+			local created = v[3] == 1 or v[3] == true
 			N.pending[v[1]] = nil
-			if v[3] == 1 or v[3] == true then
+			if created and (not N.ents[v[1]] or (N.dead[v[1]] and now - N.dead[v[1]] < NPC_DEAD_HOLD)) then
+				request("obj_remove", { lua_id(id) })  -- answered too late: the host stopped reporting it
+			elseif created then
 				N.mirrors[v[1]] = { id = id }
 				local local_code = C.GetObjectIDCode(id)
 				if local_code ~= nil then N.mirror_of[ffi.string(local_code)] = v[1] end
@@ -1095,10 +1111,23 @@ local function npc_tick(now, dt)
 	-- Joiner: drive our ships for the host's. Ones the host stopped mentioning go back to their own AI;
 	-- stand-ins for them are removed.
 	local driven, requested = 0, 0
+	for code, at in pairs(N.pending) do
+		if now - at > 10 then N.pending[code] = nil end  -- md never answered (e.g. a ship model we lack)
+	end
 	local stand_ins = npc_count(N.mirrors) + npc_count(N.pending)
+	local own_ship = C.GetPlayerOccupiedShipID()
 	for code, E in pairs(N.ents) do
 		local id = npc_local(code)
-		if now - (E.seen or 0) > 2 or (N.dead[code] and now - N.dead[code] < NPC_DEAD_HOLD) then
+		-- A far copy md found for us may dock meanwhile: then leave it in its dock.
+		if id and N.found[code] and now - (E.dock_check or 0) >= 1 then
+			E.dock_check = now
+			if GetComponentData(id, "isdocked") then
+				N.found[code], id = nil, nil
+			end
+		end
+		if id == own_ship then
+			-- e.g. just after /x4coop takeship, while the scan still lists our new ship: never move it
+		elseif now - (E.seen or 0) > 2 or (N.dead[code] and now - N.dead[code] < NPC_DEAD_HOLD) then
 			N.ents[code] = nil
 			local mirror = N.mirrors[code]
 			if mirror then
@@ -1203,6 +1232,9 @@ local function update_link(now)
 		state = "no world id: load the host's latest save"
 	elseif not K.heard_at or now - K.heard_at > 6 then
 		state = "waiting for partner"
+	elseif K.partner_protocol ~= PROTOCOL then
+		state = string.format("different mod versions (yours %d, theirs %d): give both PCs the same build",
+			PROTOCOL, K.partner_protocol or 1)
 	elseif K.partner_world ~= K.world then
 		state = "different worlds: the joiner must load the host's save made after co-op started"
 	elseif K.partner_role == K.role then
@@ -1229,7 +1261,7 @@ send_link = function(now)
 	local K = S.link
 	update_link(now)
 	if K.role then
-		net_send(string.format("L|%s|%s|%s", world_id() or "-", K.role, own_idcode() or "-"))
+		net_send(string.format("L|%s|%s|%s|%d", world_id() or "-", K.role, own_idcode() or "-", PROTOCOL))
 	end
 end
 
@@ -1249,6 +1281,7 @@ on_world_message = function(kind, f, now)
 	elseif kind == "L" then
 		if (f[3] == "host" or f[3] == "join") and type(f[2]) == "string" and f[2]:match("^[%w%-]+$") then
 			K.partner_world, K.partner_role, K.heard_at = f[2], f[3], now
+			K.partner_protocol = tonumber(f[5]) or 1
 			K.partner_ship = (f[4] or ""):match(IDCODE_PATTERN) and f[4] or nil
 			update_link(now)
 		end
@@ -1287,7 +1320,8 @@ local function on_world_event(_, param)
 	if not valid_world_ref(f[2], f[3], f[4]) then return end
 	f[2] = S.npc.mirror_of[f[2]] or f[2]  -- a stand-in we made: use the host's code for it
 	local now = getElapsedTime()
-	if (f[1] == "D" or f[1] == "A") and config.fire_fx == 1 and now - (K.last_fire or -1e9) >= 0.5 then
+	local enemy = f[1] == "A" or (f[1] == "D" and f[6] == "1")  -- never make a proxy shoot at friends
+	if enemy and config.fire_fx == 1 and now - (K.last_fire or -1e9) >= 0.5 then
 		-- You are firing at (A) or hitting (D) f[2]: your proxy on the other side (or your ghost here) fires at it too.
 		K.last_fire = now
 		if config.mode == "ghost" then
@@ -1497,9 +1531,13 @@ end
 local function load_shared()
 	if not S.net.shared_save then
 		notify("no save from the host yet: they type /x4coop share")
+	elseif not C.IsSaveListLoadingComplete() then
+		notify("the game is still reading its save list; try again in a moment")
+	elseif not C.IsSaveValid("quicksave") then
+		notify("the game says the received save can't be loaded (different game version or DLCs?)")
 	else
 		notify("loading the host's save")
-		LoadGame("quicksave")
+		S.load_at = getElapsedTime() + 0.1  -- like the game's menu: load on a later frame, not inside the command
 	end
 end
 
@@ -1583,6 +1621,11 @@ end
 -- Frame loop
 
 local function tick(now, dt)
+	if S.load_at and now >= S.load_at then
+		S.load_at = nil
+		LoadGame("quicksave")
+		return
+	end
 	local player = C.GetPlayerID()
 	if player == 0 then
 		if S.player then reset() end

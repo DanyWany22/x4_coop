@@ -31,6 +31,9 @@ local SC = {
 	                 role = "host", own_world = "abc123", partner_world = "abc123", npc_test = "host" },
 	npc_join     = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
 	                 role = "join", own_world = "abc123", partner_world = "abc123", npc_test = "join" },
+	world_oldmod = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
+	                 role = "join", own_world = "abc123", partner_world = "abc123", world_test = "mismatch", partner_protocol = "",
+	                 want_check = "different mod versions" },
 	net_missing  = { true_conv = { order = "YXZ", sy = 1, sp = 1, sr = 1 }, mode = "net", setpos = "radians", duration = 8, pipes = false, expect_no_proxy = true },
 	sector_jump  = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = 1 }, mode = "ghost", setpos = "radians", duration = 30, jump_at = 18 },
 	net_restart  = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = 1 }, mode = "net", setpos = "radians", duration = 30, pipes = true, partner_restart_at = 16 },
@@ -179,6 +182,9 @@ C = {
 	IsGamePaused = function() return false end,
 	CanTeleportPlayerTo = function(id) return objects[id] and "granted" or "no such ship" end,
 	GetSaveFolderPath = function() return "C:/fake/Egosoft/X4/1/save" end,
+	IsSaveListLoadingComplete = function() return true end,
+	IsSaveValid = function(name) return name == "quicksave" end,
+	ReloadSaveList = function() end,
 	TeleportPlayerTo = function(id) teleports[#teleports + 1] = id; return true end,
 	IsComponentOperational = function(id) return objects[id] ~= nil and not (id == PLAYER and player_ship_lost) end,
 }
@@ -359,7 +365,8 @@ if sc.pipes then
 				for part in (msg .. "|"):gmatch("([^|]*)|") do f[#f + 1] = part end
 				pipe_writes[#pipe_writes + 1] = msg
 				if f[1] == "L" then
-					local reply = string.format("L|%s|%s|HOS-001", sc.partner_world or f[2], f[3] == "host" and "join" or "host")
+					local reply = string.format("L|%s|%s|HOS-001|%s", sc.partner_world or f[2], f[3] == "host" and "join" or "host",
+						sc.partner_protocol or f[5])
 					partner_queue[#partner_queue + 1] = { at = clock + 2 * ONE_WAY, msg = reply }
 				elseif f[1] == "M" then
 					partner_queue[#partner_queue + 1] = { at = clock + 2 * ONE_WAY, msg = "M|Echo|you said: " .. tostring(f[3]) }
@@ -531,7 +538,8 @@ while clock < sc.duration do
 	end
 	if sc.fire_test and not fire_sent and clock > 12 then
 		fire_sent = true
-		handlers["x4coop.world"]("x4coop.world", "D|TGT-001|ship_arg_s_fighter_01_a_macro|cluster_01_sector001_macro|80")
+		handlers["x4coop.world"]("x4coop.world", "D|TGT-001|ship_arg_s_fighter_01_a_macro|cluster_01_sector001_macro|80|1")
+		handlers["x4coop.world"]("x4coop.world", "D|FRIEND-1|ship_arg_s_fighter_01_a_macro|cluster_01_sector001_macro|90|0")
 		handlers["x4coop.world"]("x4coop.world", "A|TGT-001|ship_arg_s_fighter_01_a_macro|cluster_01_sector001_macro")  -- throttled
 	end
 	if sc.fire_test and not miss_sent and clock > 14 then
@@ -557,7 +565,7 @@ while clock < sc.duration do
 		world_sent = true
 		local sector = "cluster_01_sector001_macro"
 		handlers["x4coop.world"]("x4coop.world", "K|ABC-123|ship_arg_s_fighter_01_a_macro|" .. sector)
-		handlers["x4coop.world"]("x4coop.world", "D|ABC-124|ship_arg_s_fighter_01_a_macro|" .. sector .. "|57.5LF")
+		handlers["x4coop.world"]("x4coop.world", "D|ABC-124|ship_arg_s_fighter_01_a_macro|" .. sector .. "|57.5LF|1")
 		handlers["x4coop.world"]("x4coop.world", "D|ABC-124|ship_arg_s_fighter_01_a_macro|" .. sector .. "|50")  -- throttled
 		handlers["x4coop.world"]("x4coop.world", "K|bad id;|ship_arg_s_fighter_01_a_macro|" .. sector)
 		for _, msg in ipairs({
@@ -688,7 +696,7 @@ end
 local check_line = said:match("check: ([^/]*)") or "(none)"
 say("check said: %s", check_line)
 local want_check = sc.expect_no_proxy and "Mod Support APIs" or (sc.mode == "ghost" and "mode is ghost")
-	or (sc.world_test == "linked" and "all good") or (sc.world_test == "mismatch" and "different worlds") or nil
+	or sc.want_check or (sc.world_test == "linked" and "all good") or (sc.world_test == "mismatch" and "different worlds") or nil
 local ok = (not want_check or check_line:find(want_check, 1, true) ~= nil) and lua_errors == 0 and ok_status and proxy_id == nil and max_proxies <= 1
 for _, sector in ipairs(spawn_sectors) do
 	if not SECTORS[500] or (sector ~= SECTORS[500] and sector ~= SECTORS[501]) then
@@ -756,7 +764,7 @@ if sc.world_test then
 		ok = ok and said:find("new co-op world", 1, true) ~= nil and type(blackboard["$x4coop_world"]) == "string"
 	end
 	if sc.world_test == "mismatch" then
-		ok = ok and said:find("different worlds", 1, true) ~= nil and #sent_k == 0 and #sent_d == 0 and #world_requests == 0
+		ok = ok and said:find(sc.want_check or "different worlds", 1, true) ~= nil and #sent_k == 0 and #sent_d == 0 and #world_requests == 0
 	end
 end
 if sc.npc_test then

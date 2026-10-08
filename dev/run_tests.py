@@ -117,6 +117,11 @@ def test_codec():
     first = a.seal("K|ABC-1|m|s")
     check("codec: signed message accepted", b.open(first) == "K|ABC-1|m|s")
     check("codec: replay rejected", b.open(first) is None and b.last_reject == "replayed")
+    m2, m3 = a.seal("S|2"), a.seal("S|3")
+    check("codec: reordered datagrams each accepted once",
+          b.open(m3) == "S|3" and b.open(m2) == "S|2" and b.open(m2) is None)
+    good = __import__("gzip").compress(b"x" * 100000)
+    check("bridge: gzip completeness check", bridge.gzip_complete(good) and not bridge.gzip_complete(good[:-10]))
     tampered = first.replace(b"ABC-1", b"ABC-2")
     check("codec: tampered message rejected", bridge.Codec("s3cret").open(tampered) is None)
     old = bridge.Codec("s3cret")

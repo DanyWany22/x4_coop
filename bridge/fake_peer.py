@@ -108,7 +108,8 @@ def main(argv=None):
                     # Pretend to be the other half of the same world: same world id, the opposite role.
                     f = msg.split("|")
                     if len(f) >= 3:
-                        send(f"L|{f[1]}|{'join' if f[2] == 'host' else 'host'}|FAK-001", now)
+                        version = f[4] if len(f) >= 5 else ""
+                        send(f"L|{f[1]}|{'join' if f[2] == 'host' else 'host'}|FAK-001|{version}", now)
                     continue
                 if msg.startswith(("K|", "D|")):
                     print(f"world event from player: {msg}", flush=True)

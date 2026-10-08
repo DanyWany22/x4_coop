@@ -30,6 +30,7 @@ import socket
 import sys
 import threading
 import time
+import zlib
 from ctypes import wintypes
 
 MAGIC = b"X4C1 "
@@ -178,12 +179,13 @@ class Codec:
 
     MAX_SKEW_S = 60      # sender's clock may differ from ours by this much
     MAX_SESSIONS = 16    # remembered senders (each restart of a bridge is a new session)
+    WINDOW = 256         # a datagram may arrive this many counters late (UDP reorders) and still count once
 
     def __init__(self, password=""):
         self.key = hashlib.sha256(password.encode("utf-8")).digest() if password else None
         self.session = os.urandom(4).hex()
         self.counter = 0
-        self.seen = {}           # session -> highest counter accepted
+        self.seen = {}           # session -> (highest counter accepted, set of accepted counters in the window)
         self.last_reject = ""
 
     def _tag(self, data):
@@ -218,12 +220,17 @@ class Codec:
             if abs(time.time() - stamp) > self.MAX_SKEW_S:
                 self.last_reject = "too old, or the two PCs' clocks differ by over a minute"
                 return None
-            if counter <= self.seen.get(session, 0):
+            top, recent = self.seen.get(session, (0, set()))
+            if counter <= top - self.WINDOW or counter in recent:
                 self.last_reject = "replayed"
                 return None
             if session not in self.seen and len(self.seen) >= self.MAX_SESSIONS:
                 self.seen.pop(next(iter(self.seen)))
-            self.seen[session] = counter
+            recent.add(counter)
+            top = max(top, counter)
+            if len(recent) > 2 * self.WINDOW:
+                recent = {c for c in recent if c > top - self.WINDOW}
+            self.seen[session] = (top, recent)
         return data.decode("utf-8", "replace")
 
 
@@ -248,6 +255,21 @@ OFFER_TTL_S = 120          # host: how long the partner has to fetch it
 GZIP_MAGIC = b"\x1f\x8b"
 
 
+def gzip_complete(data):
+    """True if data is a whole gzip stream: inflates to the end and the trailer's CRC and size match."""
+    if not data.startswith(GZIP_MAGIC):
+        return False
+    d = zlib.decompressobj(16 + zlib.MAX_WBITS)
+    try:
+        for i in range(0, len(data), 1 << 20):
+            d.decompress(data[i:i + (1 << 20)], 1 << 16)
+            while d.unconsumed_tail:
+                d.decompress(d.unconsumed_tail, 1 << 16)
+    except zlib.error:
+        return False
+    return d.eof
+
+
 class SaveShare:
     """
     Hands the host's save to the joiner's bridge (the shared world starts from the host's save).
@@ -262,12 +284,15 @@ class SaveShare:
     loop never stalls.
     """
 
-    def __init__(self, codec, port):
-        self.codec, self.port = codec, port
+    def __init__(self, codec, port, role):
+        self.codec, self.port, self.role = codec, port, role
         self.save_dir = None
         self.pending = None
         self.offer = None
         self.events = queue.Queue()  # ("game", message) or ("log", text)
+        self.prepared = queue.Queue()  # host: (path, data or None) from the checking thread
+        self.checking = False
+        self.fetching = threading.Lock()
 
     def _proof(self, token):
         return hmac.new(self.codec.key, b"fetch:" + token.encode(), hashlib.sha256).hexdigest().encode()
@@ -300,12 +325,20 @@ class SaveShare:
             if now - p["asked"] > SHARE_WAIT_S:
                 self.pending = None
                 self._say("the save to share did not appear; try /x4coop share again")
-            elif st and st.st_mtime >= p["asked"] - 1:
+            elif st and st.st_mtime >= p["asked"] - 1 and not self.checking:
                 if st.st_size != p["size"]:
                     p["size"], p["since"] = st.st_size, now
-                elif now - p["since"] >= 1.5:  # finished writing
-                    self.pending = None
-                    self._offer(p["path"], partner, send_udp)
+                elif now - p["since"] >= 1.5:  # stopped growing: is it really complete?
+                    self.checking = True
+                    threading.Thread(target=self._check, args=(p["path"],), daemon=True).start()
+        while not self.prepared.empty():
+            path, data = self.prepared.get()
+            self.checking = False
+            if self.pending and data is not None:
+                self.pending = None
+                self._offer(data, partner, send_udp)
+            elif self.pending:
+                self.pending["since"] = now  # not complete yet: look again in a moment
         o = self.offer
         if o:
             if now > o["deadline"]:
@@ -322,15 +355,20 @@ class SaveShare:
             self._close_offer()
             threading.Thread(target=self._serve, args=(conn, o), daemon=True).start()
 
-    def _offer(self, path, partner, send_udp):
+    def _check(self, path):
+        try:
+            with open(path, "rb") as fh:
+                data = fh.read(MAX_SAVE_BYTES + 1)
+        except OSError:
+            data = b""
+        ok = len(data) <= MAX_SAVE_BYTES and gzip_complete(data)
+        self.prepared.put((path, data if ok else None))
+
+    def _offer(self, data, partner, send_udp):
         if not partner:
             self._say("no partner to send the save to")
             return
-        with open(path, "rb") as fh:
-            data = fh.read(MAX_SAVE_BYTES + 1)
-        if len(data) > MAX_SAVE_BYTES or not data.startswith(GZIP_MAGIC):
-            self._say("that save is too big or not a game save")
-            return
+        self._close_offer()  # a new share replaces an unfetched one
         listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
             listener.bind(("0.0.0.0", self.port))
@@ -362,7 +400,9 @@ class SaveShare:
             if not hmac.compare_digest(line.strip(), self._proof(offer["token"])):
                 self.events.put(("log", "save fetch refused: wrong proof"))
                 return
-            conn.sendall(offer["data"])
+            view = memoryview(offer["data"])
+            for i in range(0, len(view), 1 << 20):
+                conn.sendall(view[i:i + (1 << 20)])  # the 30 s timeout applies per 1 MB chunk
             self._say(f"save sent to your partner ({len(offer['data']) / 1e6:.1f} MB)")
         except OSError as e:
             self._say(f"sending the save failed: {e}")
@@ -375,12 +415,14 @@ class SaveShare:
             size, sha, token = int(f[2]), f[3], f[4]
         except (IndexError, ValueError):
             return
-        if not (0 < size <= MAX_SAVE_BYTES and len(sha) == 64 and len(token) == 32):
+        if not (0 < size <= MAX_SAVE_BYTES and len(sha) == 64 and len(token) == 32) or self.role != "join":
             return
         if not self.codec.key:
             self._say("the host offered a save, but receiving one needs a password on both bridges")
         elif not self.save_dir:
             self._say("the host offered a save, but this bridge doesn't know your save folder yet (is X4 connected?)")
+        elif not self.fetching.acquire(blocking=False):
+            self._say("still fetching the previous save from the host")
         else:
             threading.Thread(target=self._fetch, args=(host, size, sha, token, self.save_dir), daemon=True).start()
 
@@ -397,7 +439,7 @@ class SaveShare:
                     chunks.append(chunk)
                     got += len(chunk)
             data = b"".join(chunks)
-            if len(data) != size or hashlib.sha256(data).hexdigest() != sha or not data.startswith(GZIP_MAGIC):
+            if len(data) != size or hashlib.sha256(data).hexdigest() != sha or not gzip_complete(data):
                 self._say("the host's save arrived damaged; ask them to /x4coop share again")
                 return
             target = os.path.join(save_dir, "quicksave.xml.gz")
@@ -413,6 +455,8 @@ class SaveShare:
             self.events.put(("game", "X|received|quicksave"))
         except OSError as e:
             self._say(f"fetching the host's save failed: {e}")
+        finally:
+            self.fetching.release()
 
 
 def run(args):
@@ -433,7 +477,7 @@ def run(args):
     sock.bind(("0.0.0.0", port))
     sock.setblocking(False)
     port = sock.getsockname()[1]
-    share = SaveShare(codec, port)
+    share = SaveShare(codec, port, role)
 
     game = GamePipe(args.pipe)
     log(f"UDP port {port}; " + (f"partner {peer[0]}:{peer[1]}" if peer else "waiting for a partner to join")
@@ -533,7 +577,7 @@ def run(args):
                 tell_game("N|partner connected")
             if msg == "H":
                 continue
-            if msg.startswith("X|offer|") and not hosting:
+            if msg.startswith("X|offer|") and role == "join":
                 share.on_offer(msg.split("|"), peer)
                 continue
             if msg[:1] not in FROM_PARTNER or msg[1:2] != "|":

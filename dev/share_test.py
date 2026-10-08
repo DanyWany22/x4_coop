@@ -78,7 +78,13 @@ def main():
 
         host.write("X|share|" + host_dir + "|quicksave.xml.gz")
         time.sleep(0.3)
-        save = gzip.compress(os.urandom(3 * 1024 * 1024))  # what SaveGame writes, a moment later
+        save = gzip.compress(os.urandom(3 * 1024 * 1024))  # what SaveGame writes, a moment later...
+        with open(os.path.join(host_dir, "quicksave.xml.gz"), "wb") as fh:
+            fh.write(save[: len(save) // 2])               # ...first half, then a pause longer than 1.5 s
+        deadline = time.time() + 3
+        while time.time() < deadline:
+            host.pump(), joiner.pump(), time.sleep(0.05)
+        offered_early = any(m.startswith("N|offering") for m in host.got)
         with open(os.path.join(host_dir, "quicksave.xml.gz"), "wb") as fh:
             fh.write(save)
 
@@ -91,9 +97,21 @@ def main():
         with open(os.path.join(join_dir, "quicksave.xml.gz"), "rb") as fh:
             arrived = fh.read()
         backups = glob.glob(os.path.join(join_dir, "quicksave.xml.gz.bak-*"))
-        old = gzip.decompress(open(backups[0], "rb").read()) if backups else b""
+        old = gzip.decompress(open(sorted(backups)[0], "rb").read()) if backups else b""
+        # share again right away: the new offer replaces the old one, and the second copy arrives too
+        joiner.got.clear()
+        host.write("X|share|" + host_dir + "|quicksave.xml.gz")
+        time.sleep(0.3)
+        os.utime(os.path.join(host_dir, "quicksave.xml.gz"))
+        deadline = time.time() + 30
+        while time.time() < deadline and not joiner.saw("X|received|quicksave"):
+            host.pump(), joiner.pump(), time.sleep(0.05)
+        reshared = joiner.saw("X|received|quicksave")
+        backups = glob.glob(os.path.join(join_dir, "quicksave.xml.gz.bak-*"))
         checks = {
-            "joiner told": joiner.saw("X|received|quicksave"),
+            "half-written save not offered": not offered_early,
+            "second share works": reshared,
+            "joiner told": True,
             "file identical": arrived == save,
             "old quicksave backed up": old == b"the joiner's old quicksave",
             "host told it was sent": any("save sent to your partner" in m for m in host.got),

@@ -93,6 +93,15 @@
                 <set_value name="Root.$Proxy" exact="$Ship"/>
                 <cancel_all_orders object="$Ship"/>
                 <set_object_min_hull object="$Ship" exact="100"/>
+                <do_if value="@$Args.{12} == 1 and not @$Ship.pilot.exists">
+                  <!-- firing needs a pilot (x4coop.proxy.fire); this one leaves again on release -->
+                  <create_control_entity object="$Ship" post="controlpost.aipilot">
+                    <select race="race.drone" tags="tag.aipilot"/>
+                  </create_control_entity>
+                  <do_if value="@$Ship.pilot.exists">
+                    <append_to_list name="Root.$AddedPilots" exact="[$Ship, $Ship.pilot]"/>
+                  </do_if>
+                </do_if>
                 <warp object="$Ship" sector="$Sector">
                   <position x="$Args.{3}" y="$Args.{4}" z="$Args.{5}"/>
                   <rotation yaw="$Args.{6} * 57.29577951308232deg" pitch="$Args.{7} * 57.29577951308232deg" roll="$Args.{8} * 57.29577951308232deg"/>
@@ -360,7 +369,7 @@
           <actions>
             <set_value name="$Obj" exact="event.param"/>
             <do_if value="@$Obj.isclass.ship and @$Obj.isoperational and @$Obj.sector and not Root.$AllProxies.indexof.{$Obj} and not @Root.$Adopted.indexof.{$Obj}">
-              <raise_lua_event name="'x4coop.world'" param="'D|%s|%s|%s|%s'.[$Obj.idcode, $Obj.macro.id, $Obj.sector.macro.id, $Obj.hullpercentage]"/>
+              <raise_lua_event name="'x4coop.world'" param="'D|%s|%s|%s|%s|%s'.[$Obj.idcode, $Obj.macro.id, $Obj.sector.macro.id, $Obj.hullpercentage, if $Obj.hasrelation.enemy.{faction.player} then 1 else 0]"/>
             </do_if>
           </actions>
         </cue>
@@ -375,13 +384,15 @@
             <create_group groupname="$Weapons"/>
             <set_value name="$Ship" exact="null"/>
             <set_value name="$NextReport" exact="0s"/>
+            <set_value name="$NextRefresh" exact="0s"/>
           </actions>
           <cues>
             <cue name="WeaponWatchRefresh" instantiate="true" checkinterval="2s">
               <conditions>
-                <check_value value="player.occupiedship != WeaponWatch.$Ship"/>
+                <check_value value="player.occupiedship != WeaponWatch.$Ship or player.age ge @WeaponWatch.$NextRefresh"/>
               </conditions>
               <actions>
+                <set_value name="WeaponWatch.$NextRefresh" exact="player.age + 10s"/>
                 <clear_group group="WeaponWatch.$Weapons"/>
                 <set_value name="WeaponWatch.$Ship" exact="player.occupiedship"/>
                 <do_if value="@player.occupiedship.isoperational">
@@ -392,7 +403,7 @@
             <cue name="OnPlayerWeaponFired" instantiate="true">
               <conditions>
                 <event_weapon_fired group="WeaponWatch.$Weapons"/>
-                <check_value value="player.age ge WeaponWatch.$NextReport and @player.target.isclass.ship and @player.target.isoperational"/>
+                <check_value value="player.age ge WeaponWatch.$NextReport and @player.target.isclass.ship and @player.target.isoperational and player.target.hasrelation.enemy.{faction.player} and @player.target.distanceto.{player.occupiedship} lt 5km"/>
               </conditions>
               <actions>
                 <set_value name="WeaponWatch.$NextReport" exact="player.age + 0.4s"/>
@@ -499,7 +510,7 @@
             <do_if value="$Sector and @$Macro.isclass.ship">
               <find_ship name="$Candidates" space="$Sector" macro="$Macro" multiple="true"/>
               <do_for_each name="$Candidate" in="$Candidates">
-                <do_if value="not $Own and $Candidate.idcode == $Args.{1} and $Candidate != player.occupiedship and not Root.$AllProxies.indexof.{$Candidate} and not @Root.$Adopted.indexof.{$Candidate} and not Root.$Mirrors.indexof.{$Candidate}">
+                <do_if value="not $Own and $Candidate.idcode == $Args.{1} and $Candidate != player.occupiedship and not @$Candidate.dock and $Candidate.parent.isclass.space and not $Candidate.ismasstraffic and not Root.$AllProxies.indexof.{$Candidate} and not @Root.$Adopted.indexof.{$Candidate} and not Root.$Mirrors.indexof.{$Candidate}">
                   <set_value name="$Own" exact="$Candidate"/>
                 </do_if>
               </do_for_each>
@@ -662,6 +673,18 @@
             <do_if value="not Root.$Adopted?">
               <set_value name="Root.$Adopted" exact="[]"/>
             </do_if>
+            <do_if value="not Root.$AddedPilots?">
+              <set_value name="Root.$AddedPilots" exact="[]"/>
+            </do_if>
+            <do_for_each name="$Added" in="Root.$AddedPilots">
+              <do_if value="$Added.{2}.exists and $Added.{1}.exists">
+                <dismiss_control_entity actor="$Added.{2}" object="$Added.{1}"/>
+              </do_if>
+              <do_if value="$Added.{2}.exists">
+                <destroy_object object="$Added.{2}"/>
+              </do_if>
+            </do_for_each>
+            <set_value name="Root.$AddedPilots" exact="[]"/>
             <do_for_each name="$OldProxy" in="Root.$Adopted">
               <do_if value="$OldProxy.exists">
                 <set_object_min_hull object="$OldProxy" exact="0"/>
