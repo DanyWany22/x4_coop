@@ -101,6 +101,7 @@ local config = {
 	unlocks = 1,              -- shared world: research, blueprints and licences either player gains are both players'
 	timewarp_sync = 1,        -- SETA: both games run at the same speed
 	owners = 1,               -- shared world: ships claimed, boarded or captured change owner in both worlds
+	new_ships = 1,            -- shared world: ships either player buys appear in both worlds
 	ghost_latency = 0.12,     -- s, simulated one-way latency in ghost mode
 	ghost_jitter = 0.03,      -- s, extra random delay per snapshot
 	ghost_loss = 0.0,         -- 0..1, fraction of snapshots dropped
@@ -347,6 +348,8 @@ local function reset()
 		warp = { on = false, active = false, factor = 1, want = nil, want_at = 0 },
 		reliable = { out = {}, seen = {}, seq = 0 },
 		owners_on = false,
+		newships_on = false,
+		alias = { loaded = false, into = {}, out = {} },
 		net = { api = nil, status = "idle", reading = false, connected = false, retry_at = 0, last_ping = -1e9, rtt = nil,
 			partner = kept_partner },
 	}
@@ -705,6 +708,7 @@ local relations_receive -- faction relations (V), defined with the credits
 local unlocks_receive   -- research, blueprints, licences (U), defined with the credits
 local warp_receive      -- the partner's SETA (Z), defined with the credits
 local owners_receive    -- ownership changes (O), defined with the credits
+local newships_receive  -- the partner's new ships (Y), defined with the credits
 local send_link
 
 local function net_send(msg)
@@ -796,6 +800,8 @@ on_pipe_message = function(msg)
 		if config.mode == "net" then warp_receive(f, now) end
 	elseif kind == "O" then
 		if config.mode == "net" then owners_receive(f, now) end
+	elseif kind == "Y" then
+		if config.mode == "net" then newships_receive(f, now) end
 	elseif kind == "M" then
 		local text = clean_text(f[3], 200)
 		if text ~= "" then
@@ -1085,6 +1091,39 @@ local function proxy_tick(now, dt)
 	end
 end
 
+-- Ships bought after the shared save exist in both worlds under different ID codes. This pairs them
+-- (partner's code <-> ours) and is kept in the save (player blackboard "$x4coop_alias"); every message that names
+-- a ship goes through alias_in (partner's code -> ours) or alias_out (ours -> partner's).
+local function alias_table()
+	local A = S.alias
+	if not A.loaded and S.player then
+		A.loaded = true
+		local saved = GetNPCBlackboard(S.player, "$x4coop_alias")
+		for theirs, ours in tostring(saved or ""):gmatch("([%w%-]+)=([%w%-]+)") do
+			A.into[theirs], A.out[ours] = ours, theirs
+		end
+	end
+	return A
+end
+
+local function alias_in(code)
+	return code and alias_table().into[code] or code
+end
+
+local function alias_out(code)
+	return code and alias_table().out[code] or code
+end
+
+local function alias_add(theirs, ours)
+	local A = alias_table()
+	A.into[theirs], A.out[ours] = ours, theirs
+	if S.player then
+		local parts = {}
+		for t, o in pairs(A.into) do parts[#parts + 1] = t .. "=" .. o end
+		SetNPCBlackboard(S.player, "$x4coop_alias", table.concat(parts, ";"))
+	end
+end
+
 -------------------------------------------------------------------------------
 -- NPC bubble (shared world): regional authority. Each game is the truth for the ships near its own
 -- player, which it simulates in full; where both players are, the host is. Both games list the ships near
@@ -1223,7 +1262,7 @@ local function npc_send(now)
 			end
 			prev[code] = { t = now, x = p.x, y = p.y, z = p.z }
 			entries[#entries + 1] = string.format("%s,%s,%s,%.1f,%.2f,%.2f,%.2f,%.5f,%.5f,%.5f,%.2f,%.2f,%.2f",
-				code, m.macro, tostring(m.owner or "ownerless"), tonumber(m.hull) or 100, p.x, p.y, p.z, p.yaw, p.pitch, p.roll, vx, vy, vz)
+				alias_out(code), m.macro, tostring(m.owner or "ownerless"), tonumber(m.hull) or 100, p.x, p.y, p.z, p.yaw, p.pitch, p.roll, vx, vy, vz)
 		end
 	end
 	-- "complete" tells the partner it may remove ships we don't list; md says whether the list was cut off.
@@ -1242,7 +1281,7 @@ local function npc_receive(f, now)
 		if taken >= NPC_MAX then break end
 		local v = {}
 		for field in entry:gmatch("[^,]+") do v[#v + 1] = field end
-		local code, macro, owner, hull = v[1], v[2], v[3], tonumber(v[4])
+		local code, macro, owner, hull = alias_in(v[1]), v[2], v[3], tonumber(v[4])
 		if #v == 13 and #code <= 16 and code:match("^[%w%-]+$") and #macro <= 80 and macro:match("^[%w_]+$")
 			and #owner <= 40 and owner:match("^[%w_]+$") and hull and hull >= 0 and hull <= 100
 			and not (N.dead[code] and now - N.dead[code] < NPC_DEAD_HOLD) and partner_rules(code) then
@@ -1281,7 +1320,7 @@ local function on_area_death(_, param)
 	if not (npc_enabled() and q and now - q.t < 1.5) or (N.dead[code] and now - N.dead[code] < NPC_DEAD_HOLD) then return end
 	N.dead[code] = now
 	N.area_deaths = (N.area_deaths or 0) + 1
-	net_send(table.concat({ "K", code, macro, sector }, "|"))
+	net_send(table.concat({ "K", alias_out(code), macro, sector }, "|"))
 end
 
 -- Drop what we follow for one partner ship: its stand-in goes, our own copy returns to its own AI.
@@ -1725,6 +1764,7 @@ end
 
 on_world_message = function(kind, f, now)
 	local K = S.link
+	if kind == "K" or kind == "D" or kind == "F" then f[2] = alias_in(f[2]) end
 	if kind == "R" then
 		if (f[2] == "host" or f[2] == "join") and K.role ~= f[2] then
 			K.role, kept_role = f[2], f[2]
@@ -1772,7 +1812,7 @@ local function on_world_event(_, param)
 	local K = S.link
 	local f = split(tostring(param or ""))
 	if not valid_world_ref(f[2], f[3], f[4]) then return end
-	f[2] = S.npc.mirror_of[f[2]] or f[2]  -- a stand-in we made: use the host's code for it
+	f[2] = alias_out(S.npc.mirror_of[f[2]] or f[2])  -- a stand-in we made: the host's code; a ship paired: the partner's
 	local now = getElapsedTime()
 	local enemy = f[1] == "A" or (f[1] == "D" and f[6] == "1")  -- never make a proxy shoot at friends
 	if enemy and config.fire_fx == 1 and now - (K.last_fire or -1e9) >= 0.5 then
@@ -2240,7 +2280,7 @@ end
 
 -------------------------------------------------------------------------------
 -- Reliable one-off messages: "<kind>|msg|id|fields..." is sent every TRADE_RETRY seconds until the partner
--- answers "<kind>|ack|id"; the receiver handles each id once. Used for ownership (O) and new ships (N).
+-- answers "<kind>|ack|id"; the receiver handles each id once. Used for ownership (O) and new ships (Y).
 
 local function reliable_send(kind, fields)
 	local Q = S.reliable
@@ -2287,6 +2327,7 @@ end
 -------------------------------------------------------------------------------
 -- Ownership (shared faction): a ship that becomes, or stops being, the player's in one world does in the other
 -- too (md OnOwnerChanged reports; OnOwner applies: claims, boarding, captures).
+-- (New ships, Y, follow below.)
 
 local function owners_enabled()
 	return config.mode == "net" and S.link.linked and config.owners == 1
@@ -2298,7 +2339,7 @@ local function on_owner()
 	if type(list) ~= "table" or not owners_enabled() then return end
 	for _, v in ipairs(list) do
 		if type(v) == "table" and valid_world_ref(v[1], v[2], v[3]) and type(v[4]) == "string" and v[4]:match("^[%w_]+$") then
-			reliable_send("O", { v[1], v[2], v[3], v[4] })
+			reliable_send("O", { alias_out(v[1]), v[2], v[3], v[4] })
 			notify("ship %s is now %s's: telling your partner", v[1], v[4])
 		end
 	end
@@ -2308,7 +2349,7 @@ owners_receive = function(f, now)
 	if not owners_enabled() then return end
 	reliable_receive("O", f, now, function(m)
 		if valid_world_ref(m[4], m[5], m[6]) and m[7] and m[7]:match("^[%w_]+$") then
-			request("owner", { m[4], m[5], m[6], m[7] })
+			request("owner", { alias_in(m[4]), m[5], m[6], m[7] })
 			notify("from your partner: ship %s is now %s's", m[4], m[7])
 		end
 	end)
@@ -2319,6 +2360,68 @@ local function owners_tick()
 	if on ~= S.owners_on then
 		S.owners_on = on
 		request("owners", { on and 1 or 0 })
+	end
+end
+
+-------------------------------------------------------------------------------
+-- New ships (shared faction): a ship either player has built (bought) after the shared save appears in the other
+-- world too (md OnShipBuilt reports, OnNewShip makes it: same model, shipyard, name and equipment), and the two
+-- are paired from then on (alias_add), so kills, hits, nearby sync and ownership name the right ship.
+
+local function newships_enabled()
+	return config.mode == "net" and S.link.linked and config.new_ships == 1
+end
+
+local function on_ship_built()
+	local list = S.player and GetNPCBlackboard(S.player, "$x4coop_builtships")
+	if S.player then SetNPCBlackboard(S.player, "$x4coop_builtships", nil) end
+	if type(list) ~= "table" or not newships_enabled() then return end
+	for _, v in ipairs(list) do
+		if type(v) == "table" and valid_world_ref(v[1], v[2], v[3]) then
+			local wares = {}
+			for _, w in ipairs(type(v[6]) == "table" and v[6] or {}) do
+				if type(w) == "string" and w:match("^[%w_]+$") then wares[#wares + 1] = w end
+			end
+			local yard = type(v[4]) == "string" and v[4]:match("^[%w%-]+$") and v[4] or ""
+			local name = clean_text(v[5], 40)
+			reliable_send("Y", { v[1], v[2], v[3], yard, name, table.concat(wares, ",") })
+			notify("your new ship %s: making it in your partner's world too", name)
+		end
+	end
+end
+
+newships_receive = function(f, now)
+	if not newships_enabled() then return end
+	reliable_receive("Y", f, now, function(m)
+		local code, macro, sector, yard, name, wares = m[4], m[5], m[6], m[7] or "", m[8] or "", m[9] or ""
+		if not valid_world_ref(code, macro, sector) then return end
+		local yard_id = yard ~= "" and S.econ.by_code[yard]
+		local args = { code, macro, sector, yard_id and lua_id(yard_id) or "", clean_text(name, 40) }
+		for w in wares:gmatch("[^,]+") do
+			if w:match("^[%w_]+$") and #args < 80 then args[#args + 1] = w end
+		end
+		request("newship", args)
+	end)
+end
+
+local function on_newship_made()
+	local list = S.player and GetNPCBlackboard(S.player, "$x4coop_newships")
+	if S.player then SetNPCBlackboard(S.player, "$x4coop_newships", nil) end
+	if type(list) ~= "table" then return end
+	for _, v in ipairs(list) do
+		local code = type(v) == "table" and v[2] and C.GetObjectIDCode(to64(v[2]))
+		if code ~= nil and type(v[1]) == "string" then
+			alias_add(v[1], ffi.string(code))
+			notify("your partner's new ship (%s) is in your world now, as %s", v[1], ffi.string(code))
+		end
+	end
+end
+
+local function newships_tick()
+	local on = newships_enabled()
+	if on ~= S.newships_on then
+		S.newships_on = on
+		request("new_ships", { on and 1 or 0 })
 	end
 end
 
@@ -2587,6 +2690,7 @@ local function tick(now, dt)
 	warp_tick(now)
 	reliable_tick(now)
 	owners_tick()
+	newships_tick()
 end
 
 local function on_update()
@@ -2621,6 +2725,8 @@ local function init()
 	RegisterEvent("x4coop.unlock", on_unlock)
 	RegisterEvent("x4coop.timewarp", on_timewarp)
 	RegisterEvent("x4coop.owner", on_owner)
+	RegisterEvent("x4coop.ship_built", on_ship_built)
+	RegisterEvent("x4coop.newship_made", on_newship_made)
 	RegisterEvent("x4coop.empire_trade", on_empire_trade)
 	RegisterEvent("x4coop.npc_mirror", on_npc_mirror)
 

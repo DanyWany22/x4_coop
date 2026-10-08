@@ -223,6 +223,13 @@ the joiner causes are sent to the host and counted there:
 
 `/x4coop set relations 0` turns it off.
 
+**New ships:** a ship either of you buys appears in the other's world too: the same model, name and
+equipment, docked at the same shipyard. Equipment may sit in different slots, because the game builds the
+copy's loadout from the list of equipment. The two copies have different ID codes, so each game remembers
+which of its ships is which of the partner's, and kills, hits, nearby sync and ownership reach the right
+ship. That pairing is kept in the save. `/x4coop set new_ships 0` turns it off. Stations either of you
+builds don't copy across yet.
+
 **Ships changing owner:** a ship that one of you claims, boards or captures becomes the player's in the
 other world too (and one the player loses is lost in both). `/x4coop set owners 0` turns it off.
 
@@ -403,7 +410,7 @@ game's own schema (`libraries/md.xsd`, `libraries/common.xsd`).
 
 Messages (one text line each): `S` snapshot (position, rotation, velocity, ship, hull, shield),
 `P`/`Q` ping, `M` chat, `L` world link, `K` kill, `D` hit, `F` firing at, `B` nearby ships (both
-ways), `E` station stock (host to joiner), `T` a joiner's trade, `V` relations, `U` research/blueprints/licences, `Z` SETA, `O` ownership, `C` credits given; `R`/`W`/`N`/`X` are between a game and
+ways), `E` station stock (host to joiner), `T` a joiner's trade, `V` relations, `U` research/blueprints/licences, `Z` SETA, `O` ownership, `Y` new ships, `C` credits given; `R`/`W`/`N`/`X` are between a game and
 its own bridge.
 
 Self-calibration: on first contact the proxy is nudged and read back (does `SetObjectSectorPos`
@@ -412,8 +419,8 @@ axis vectors. In-game results so far: degrees, YXZ+--.
 
 ## Known limitations
 
-* Ships in the shared world match by ID code; a ship bought by one player after the shared save
-  only exists on their side (it shows up as a stand-in on the joiner's side when near the host).
+* Ships in the shared world match by ID code. Ships bought after the shared save are copied to the
+  other world and paired with their copy, but stations built after it exist only on the builder's side.
 * Proxies are player-owned (friendly, but listed in your property).
 * No highway or travel-drive visuals for the partner; they reappear when they leave the highway.
 * The bridge's encryption uses Python's standard library only: scrypt for the key, a SHAKE-256
@@ -441,7 +448,8 @@ python extensions/x4_coop/dev/run_tests.py [--quick]
   relations both ways (the host's followed; a joiner's change counted once and never undone in flight),
   research, blueprints and licences both ways (sent until confirmed, added once), SETA both ways
   (followed; turned off for both when one side can't follow), ownership changes both ways (sent
-  until confirmed, applied once),
+  until confirmed, applied once), new ships both ways (made once, paired, kills and hits on them
+  translated both ways),
   hostile messages, guest ship, save handoff commands. Errors are measured against ground truth:
   the partner within ~2–3 m and ~2° (95th percentile) at 220–300 m/s; NPC copies within ~3.5 m.
 * Bridge: password codec (encryption, replay, tamper, stale, other versions), reconnects, chat, wrong password, partner

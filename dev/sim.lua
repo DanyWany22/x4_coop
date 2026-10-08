@@ -45,6 +45,8 @@ local SC = {
 	                 role = "join", own_world = "abc123", partner_world = "abc123", warp_test = true },
 	owners       = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
 	                 role = "join", own_world = "abc123", partner_world = "abc123", owner_test = true },
+	newships     = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
+	                 role = "join", own_world = "abc123", partner_world = "abc123", newship_test = true },
 	credits      = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
 	                 role = "join", own_world = "abc123", partner_world = "abc123", credits_test = true },
 	npc_apart_join = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
@@ -282,6 +284,7 @@ rel_actions, rel_reads, rel_changes_seen, rel_named = {}, 0, {}, {}
 unlock_requests, unlock_switch, unlock_sends = {}, {}, {}
 sim_warp, warp_requests = { active = false, factor = 1, blocked = false }, {}
 owner_requests, owner_switch = {}, {}
+newship_requests, newship_made_id, newship_first_sent = {}, nil, nil
 function GetPlayerMoney() return player_money end
 function SetNPCBlackboard(_, key, v) blackboard[key] = v end
 function ExecuteDebugCommand(cmd, param) say("  ego command /%s %s", cmd, tostring(param)) end
@@ -393,6 +396,17 @@ function AddUITriggeredEvent(screen, control, args)
 			rel_actions[#rel_actions + 1] = string.format("add:%s%+.4f", id, change)
 		end
 		queue("x4coop.relation_applied", tag)
+	elseif control == "newship" then
+		newship_requests[#newship_requests + 1] = table.concat(args, ":")
+		local id = next_id
+		next_id = next_id + 1
+		objects[id] = { sector = sector_by_macro(args[3]) or 500, x = 0, y = 0, z = 0, yaw = 0, pitch = 0, roll = 0, macro = args[2],
+			idcode = "LOC-" .. id, playerowned = true, newship = true }
+		newship_made_id = id
+		blackboard["$x4coop_newships"] = { { args[1], id } }
+		queue("x4coop.newship_made")
+	elseif control == "new_ships" then
+		-- md only remembers the switch; nothing to simulate
 	elseif control == "owners" then
 		owner_switch[#owner_switch + 1] = tostring(args[1])
 	elseif control == "owner" then
@@ -508,6 +522,9 @@ if sc.pipes then
 					partner_queue[#partner_queue + 1] = { at = clock + 2 * ONE_WAY, msg = reply }
 				elseif f[1] == "M" then
 					partner_queue[#partner_queue + 1] = { at = clock + 2 * ONE_WAY, msg = "M|Echo|you said: " .. tostring(f[3]) }
+				elseif f[1] == "Y" and f[2] == "msg" then
+					newship_first_sent = newship_first_sent or msg
+					partner_queue[#partner_queue + 1] = { at = clock + 2 * ONE_WAY, msg = "Y|ack|" .. f[3] }
 				elseif f[1] == "O" and f[2] == "msg" then
 					partner_queue[#partner_queue + 1] = { at = clock + 2 * ONE_WAY, msg = "O|ack|" .. f[3] }
 				elseif f[1] == "U" and f[2] == "add" then
@@ -707,6 +724,24 @@ local function owner_script()
 	while owner_steps[1] and clock >= owner_steps[1][1] do table.remove(owner_steps, 1)[2]() end
 end
 
+local newship_steps = {
+	{ 10, function()  -- we bought a ship
+		blackboard["$x4coop_builtships"] = { { "NEW-1", SHIP_MACRO, SECTORS[500], "", "Kestrel",
+			{ "weapon_gen_s_laser_01_mk1", "shield_gen_s_standard_01_mk1" } } }
+		queue("x4coop.ship_built")
+	end },
+	{ 11, function() pipe_reader("Y|msg|0f0f|THR-9|" .. SHIP_MACRO .. "|" .. SECTORS[500] .. "||Raven|weapon_gen_m_laser_01_mk1") end },
+	{ 13, function() pipe_reader("Y|msg|0f0f|THR-9|" .. SHIP_MACRO .. "|" .. SECTORS[500] .. "||Raven|weapon_gen_m_laser_01_mk1") end },
+	{ 16, function() pipe_reader("K|THR-9|" .. SHIP_MACRO .. "|" .. SECTORS[500]) end },     -- the partner kills it
+	{ 18, function()                                                                       -- we hit our copy of it
+		handlers["x4coop.world"]("x4coop.world", "D|LOC-" .. tostring(newship_made_id) .. "|" .. SHIP_MACRO .. "|" .. SECTORS[500] .. "|50|1")
+	end },
+}
+local function newship_script()
+	if not sc.newship_test or not pipe_reader then return end
+	while newship_steps[1] and clock >= newship_steps[1][1] do table.remove(newship_steps, 1)[2]() end
+end
+
 local function credit_script()
 	if not sc.credits_test or not pipe_reader then return end
 	while credit_steps[1] and clock >= credit_steps[1][1] do
@@ -833,6 +868,7 @@ while clock < sc.duration do
 	unlock_script()
 	warp_script()
 	owner_script()
+	newship_script()
 	if sc.partner_restart_at and clock >= sc.partner_restart_at and partner_clock_offset == 1000 then
 		partner_clock_offset = -500
 		say("t=%.1f partner restarted their game (clock jumped back)", clock)
@@ -994,7 +1030,7 @@ while clock < sc.duration do
 	end
 	local count = 0
 	for id, o in pairs(objects) do  -- proxies only: not the player, scenario ships (400+), the parked ship or stand-ins
-		if id ~= PLAYER and id < 400 and id ~= PARKED and not o.mirror and not o.guest then count = count + 1 end
+		if id ~= PLAYER and id < 400 and id ~= PARKED and not o.mirror and not o.guest and not o.newship then count = count + 1 end
 	end
 	max_proxies = math.max(max_proxies, count)
 end
@@ -1310,6 +1346,23 @@ if sc.owner_test then
 		table.concat(owner_requests, ", "), acks)
 	ok = ok and ours == 1 and table.concat(owner_requests, ", ") == "NPC-1:" .. SHIP_MACRO .. ":" .. SECTORS[500] .. ":player"
 		and acks == 2 and owner_switch[1] == "1"
+end
+if sc.newship_test then
+	local ours, acks, kills = 0, 0, table.concat(world_requests, " ")
+	for _, w in ipairs(pipe_writes) do
+		if w:match("^Y|msg|%x+|NEW%-1|") then ours = ours + 1 end
+		if w == "Y|ack|0f0f" then acks = acks + 1 end
+	end
+	local made = newship_made_id and ("LOC-" .. newship_made_id) or "?"
+	local sent = table.concat(pipe_writes, "\n")
+	say("newships: ours sent %d time(s): %s; partner's made %d time(s) as %s (acks %d); alias saved: %s; their kill -> %s; our hit sent as THR-9: %s",
+		ours, (newship_first_sent or ""):sub(1, 120), #newship_requests, made, acks, tostring(blackboard["$x4coop_alias"]),
+		kills:sub(1, 120), tostring(sent:find("D|THR-9|", 1, true) ~= nil))
+	ok = ok and ours == 1 and (newship_first_sent or ""):find("|Kestrel|weapon_gen_s_laser_01_mk1,shield_gen_s_standard_01_mk1", 1, true) ~= nil
+		and #newship_requests == 1 and newship_requests[1]:find("THR-9:" .. SHIP_MACRO .. ":" .. SECTORS[500] .. "::Raven:weapon_gen_m_laser_01_mk1", 1, true) == 1
+		and acks == 2 and tostring(blackboard["$x4coop_alias"]):find("THR-9=" .. made, 1, true) ~= nil
+		and kills:find("world_kill:" .. made .. ",", 1, true) ~= nil
+		and sent:find("D|THR-9|", 1, true) ~= nil and sent:find("D|" .. made .. "|", 1, true) == nil
 end
 if sc.credits_test then
 	local acks = 0

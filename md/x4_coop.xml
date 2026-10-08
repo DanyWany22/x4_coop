@@ -1128,6 +1128,99 @@
           </actions>
         </cue>
 
+        <!--
+          New ships (shared faction): a ship either player has built (bought) appears in the other world too.
+          OnShipBuilt reports one: appended to player.entity.$x4coop_builtships as [idcode, ship macro, sector macro,
+          shipyard idcode or '', name, [equipment ware ids]], then 'x4coop.ship_built'. OnNewShip (param3: [partner's
+          idcode, ship macro, sector macro, shipyard or '', name, ware id, ware id, ...]) makes ours: docked at the same
+          shipyard if we have it, with the same name and equipment; reply appended to player.entity.$x4coop_newships
+          as [partner's idcode, ship], then 'x4coop.newship_made'. 'new_ships' (param3: [1 or 0]) turns reporting on.
+          Ships made here with create_ship don't raise event_player_built_ship, so nothing comes back.
+        -->
+        <cue name="OnNewShipsConfig" instantiate="true">
+          <conditions>
+            <event_ui_triggered screen="'x4coop'" control="'new_ships'"/>
+          </conditions>
+          <actions>
+            <set_value name="Root.$NewShipsOn" exact="event.param3.{1}"/>
+          </actions>
+        </cue>
+
+        <cue name="OnShipBuilt" instantiate="true">
+          <conditions>
+            <event_player_built_ship/>
+            <check_value value="@Root.$NewShipsOn == 1 and @event.param.isclass.ship and @event.param.sector"/>
+          </conditions>
+          <actions>
+            <set_value name="$Ship" exact="event.param"/>
+            <set_value name="$Wares" exact="[]"/>
+            <set_value name="$Equipment" exact="@$Ship.loadout.wares"/>
+            <do_if value="$Equipment">
+              <do_for_each name="$Ware" in="$Equipment">
+                <append_to_list name="$Wares" exact="$Ware.id"/>
+              </do_for_each>
+            </do_if>
+            <set_value name="$Yard" exact="@$Ship.dock.container"/>
+            <do_if value="not player.entity.$x4coop_builtships?">
+              <set_value name="player.entity.$x4coop_builtships" exact="[]"/>
+            </do_if>
+            <append_to_list name="player.entity.$x4coop_builtships" exact="[$Ship.idcode, $Ship.macro.id, $Ship.sector.macro.id, if $Yard then $Yard.idcode else '', $Ship.knownname, $Wares]"/>
+            <raise_lua_event name="'x4coop.ship_built'"/>
+          </actions>
+        </cue>
+
+        <cue name="OnNewShip" instantiate="true">
+          <conditions>
+            <event_ui_triggered screen="'x4coop'" control="'newship'"/>
+          </conditions>
+          <actions>
+            <set_value name="$Args" exact="event.param3"/>
+            <set_value name="$Macro" exact="@macro.{$Args.{2}}"/>
+            <find_sector name="$Sector" macro="@macro.{$Args.{3}}"/>
+            <set_value name="$Yard" exact="$Args.{4}"/>
+            <set_value name="$Ship" exact="null"/>
+            <do_if value="@$Macro.isclass.ship and $Sector">
+              <do_if value="@$Yard.isoperational">
+                <create_ship name="$Ship" macro="$Macro" dock="$Yard">
+                  <owner exact="faction.player" overridenpc="true"/>
+                  <pilot>
+                    <select race="[race.argon, race.paranid, race.teladi]" tags="tag.aipilot"/>
+                  </pilot>
+                </create_ship>
+              </do_if>
+              <do_if value="not $Ship">
+                <create_ship name="$Ship" macro="$Macro" sector="$Sector">
+                  <owner exact="faction.player" overridenpc="true"/>
+                  <pilot>
+                    <select race="[race.argon, race.paranid, race.teladi]" tags="tag.aipilot"/>
+                  </pilot>
+                  <safepos x="0" y="0" z="0"/>
+                </create_ship>
+              </do_if>
+            </do_if>
+            <do_if value="@$Ship.isoperational">
+              <set_value name="$Wares" exact="[]"/>
+              <do_all exact="$Args.count - 5" counter="$k">
+                <do_if value="@ware.{$Args.{5 + $k}}">
+                  <append_to_list name="$Wares" exact="ware.{$Args.{5 + $k}}"/>
+                </do_if>
+              </do_all>
+              <do_if value="$Wares.count gt 0">
+                <generate_loadout result="$Loadout" macro="$Macro" wares="$Wares"/>
+                <apply_loadout object="$Ship" loadout="$Loadout"/>
+              </do_if>
+              <do_if value="$Args.{5} != ''">
+                <set_object_name object="$Ship" name="$Args.{5}"/>
+              </do_if>
+              <do_if value="not player.entity.$x4coop_newships?">
+                <set_value name="player.entity.$x4coop_newships" exact="[]"/>
+              </do_if>
+              <append_to_list name="player.entity.$x4coop_newships" exact="[$Args.{1}, $Ship]"/>
+              <raise_lua_event name="'x4coop.newship_made'"/>
+            </do_if>
+          </actions>
+        </cue>
+
         <cue name="OnNpcClear" instantiate="true">
           <conditions>
             <event_ui_triggered screen="'x4coop'" control="'npc_clear'"/>
