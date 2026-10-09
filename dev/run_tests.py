@@ -12,6 +12,7 @@ Offline checks for X4 Co-op. No game session needed; run after every change:
    traces, compared by x4_coop_trace_report.py)
 """
 import glob
+import re
 import socket
 import subprocess
 import sys
@@ -51,6 +52,17 @@ def test_md_schema(tmp):
         for path in paths:
             ok = schema.validate(etree.parse(str(path)))
             check(f"{folder} schema: {path.name}", ok, "; ".join(f"line {e.line}: {e.message}" for e in schema.error_log)[:500])
+
+
+def test_unique_names():
+    md = (MOD / "md" / "x4_coop.xml").read_text(encoding="utf-8")
+    names = re.findall(r'<(?:cue|library) name="(\w+)"', md)
+    twice = sorted({n for n in names if names.count(n) > 1})
+    check("md: every cue and library name is used once", not twice, ", ".join(twice))
+    lua = (MOD / "ui" / "x4_coop.lua").read_text(encoding="utf-8")
+    events = re.findall(r'RegisterEvent\("([^"]+)"', lua)
+    twice = sorted({n for n in events if events.count(n) > 1})
+    check("lua: every game event is registered once", not twice, ", ".join(twice))
 
 
 def test_lua(tmp):
@@ -194,6 +206,7 @@ def main():
     with tempfile.TemporaryDirectory() as tmp:
         test_md_schema(tmp)
         test_lua(tmp)
+    test_unique_names()
     test_codec()
     test_profile()
     test_bridge()

@@ -55,6 +55,10 @@ local SC = {
 	                 role = "join", own_world = "abc123", partner_world = "abc123", foot_test = true },
 	stations     = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
 	                 role = "join", own_world = "abc123", partner_world = "abc123", station_test = true },
+	galaxy_join  = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
+	                 role = "join", own_world = "abc123", partner_world = "abc123", galaxy_test = "join" },
+	galaxy_host  = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
+	                 role = "host", own_world = "abc123", partner_world = "abc123", galaxy_test = "host" },
 	crew         = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
 	                 role = "join", own_world = "abc123", partner_world = "abc123", crew_test = true },
 	rename       = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
@@ -395,6 +399,7 @@ deploy_requests = {}
 knowledge_requests = {}
 rename_requests = {}
 crew_requests = {}
+galaxy_requests = {}
 if sc.crew_test then blackboard["$x4coop_alias"] = "PSH-9=LSH-9" end
 if sc.rename_test then blackboard["$x4coop_alias"] = "PSH-9=LSH-9" end
 if sc.knowledge_test then blackboard["$x4coop_alias"] = "PST-7=LST-201" end
@@ -746,6 +751,20 @@ function AddUITriggeredEvent(screen, control, args)
 		manager_requests[#manager_requests + 1] = tostring(args[1])
 	elseif control == "station_sync" then
 		-- md only remembers the switch
+	elseif control == "world_station" or control == "world_sectors" or control == "world_want" or control == "world_gone" then
+		galaxy_requests[#galaxy_requests + 1] = control .. ":" .. sim_args(args)
+	elseif control == "world_layout" then
+		local mods = {}
+		for _, m in ipairs(args[#args]) do
+			local nums = {}
+			for i = 2, 7 do nums[#nums + 1] = tostring(m[i]) end
+			mods[#mods + 1] = m[1] .. "=" .. table.concat(nums, ",")
+		end
+		local head = {}
+		for i = 1, #args - 1 do head[#head + 1] = tostring(args[i]) end
+		galaxy_requests[#galaxy_requests + 1] = "world_layout:" .. table.concat(head, ":") .. ":" .. table.concat(mods, ";")
+	elseif control == "world_sync" then
+		-- md only remembers the switch
 	elseif control == "crew" then
 		crew_requests[#crew_requests + 1] = sim_args(args)
 	elseif control == "crew_sync" then
@@ -912,6 +931,8 @@ if sc.pipes then
 				elseif f[1] == "X" and f[2] == "profile_get" then
 					partner_queue[#partner_queue + 1] = { at = clock + 0.05,
 						msg = "X|profile|" .. f[3] .. "|" .. (sim_profiles[f[3]] or "none") }
+				elseif f[1] == "g" and f[2] == "msg" then
+					partner_queue[#partner_queue + 1] = { at = clock + 2 * ONE_WAY, msg = "g|ack|" .. f[3] }
 				elseif f[1] == "w" and f[2] == "msg" then
 					partner_queue[#partner_queue + 1] = { at = clock + 2 * ONE_WAY, msg = "w|ack|" .. f[3] }
 				elseif f[1] == "l" and f[2] == "msg" then
@@ -1497,6 +1518,42 @@ local function crew_script()
 	while crew_steps[1] and clock >= crew_steps[1][1] do table.remove(crew_steps, 1)[2]() end
 end
 
+local ST_W = "station_gen_factory_base_01_macro"
+local galaxy_steps = {
+	-- joiner: the host's summaries, sector owners, a layout, a station destroyed in the host's world
+	{ 6, function()
+		if sc.galaxy_test ~= "join" then return end
+		pipe_reader("g|st|4|NPC-1|" .. ST_W .. "|argon|" .. SECTORS[500] .. "|1000.0|0.0|2000.0|0.0|0.0|0.0|12|0|10.0|0.0|-30.0")
+		pipe_reader("g|st|4|BAD-1|" .. ST_W .. "|argon|" .. SECTORS[500] .. "|1000.0|0.0|2000.0|0.0|0.0|0.0|12|0|x|0.0|-30.0")
+		pipe_reader("g|sec|" .. SECTORS[500] .. "=argon,cluster_02_sector001_macro=xenon,bad sector=argon")
+	end },
+	{ 8, function()
+		if sc.galaxy_test ~= "join" then return end
+		pipe_reader("g|msg|0a91|layout|NPC-2|" .. ST_W .. "|teladi|" .. SECTORS[500] .. "|0.0|0.0|0.0|90.0|0.0|0.0|"
+			.. "prod_gen_energycells_macro:0:0:0:0:0:0;dockarea_arg_m_station_01_macro:0:0:300:0:0:0;bad")
+	end },
+	{ 10, function() if sc.galaxy_test == "join" then pipe_reader("g|msg|0a92|gone|NPC-3|" .. ST_W .. "|" .. SECTORS[500]) end end },
+	-- host: its md's reports, and the joiner asking for a layout
+	{ 6.5, function()
+		if sc.galaxy_test ~= "host" then return end
+		blackboard["$x4coop_galaxy"] = { { "st", 3, "NPC-1", ST_W, "argon", SECTORS[500], 1000, 0, 2000, 0, 0, 0, 12, 0, 10, 0, -30 },
+			{ "sectors", { SECTORS[500], "argon" }, { "cluster_02_sector001_macro", "" } },
+			{ "gone", "NPC-4", ST_W, SECTORS[500] } }
+		queue("x4coop.galaxy")
+	end },
+	{ 9, function() if sc.galaxy_test == "host" then pipe_reader("g|msg|0a93|want|NPC-1|" .. ST_W .. "|" .. SECTORS[500]) end end },
+	{ 9.5, function()
+		if sc.galaxy_test ~= "host" then return end
+		blackboard["$x4coop_galaxy_layouts"] = { { "NPC-1", ST_W, "argon", SECTORS[500], 1000, 0, 2000, 0, 0, 0,
+			{ { "prod_gen_energycells_macro", 0, 0, 0, 0, 0, 0 }, { "dockarea_arg_m_station_01_macro", 0, 0, 300, 0, 0, 0 } } } }
+		queue("x4coop.galaxy_layout")
+	end },
+}
+local function galaxy_script()
+	if not sc.galaxy_test or not pipe_reader then return end
+	while galaxy_steps[1] and clock >= galaxy_steps[1][1] do table.remove(galaxy_steps, 1)[2]() end
+end
+
 local function credit_script()
 	if not sc.credits_test or not pipe_reader then return end
 	while credit_steps[1] and clock >= credit_steps[1][1] do
@@ -1640,6 +1697,7 @@ while clock < sc.duration do
 	knowledge_script()
 	rename_script()
 	crew_script()
+	galaxy_script()
 	if sc.partner_restart_at and clock >= sc.partner_restart_at and partner_clock_offset == 1000 then
 		partner_clock_offset = -500
 		say("t=%.1f partner restarted their game (clock jumped back)", clock)
@@ -2188,6 +2246,34 @@ if sc.foot_test then
 		and tostring(foot_status_seen):find("on foot at Harbour Bar Station", 1, true) ~= nil
 		and said:find("is on foot at Harbour Bar Station", 1, true) ~= nil
 		and said:find("is back aboard a ship", 1, true) ~= nil
+end
+if sc.galaxy_test then
+	local sent = {}
+	for _, w in ipairs(pipe_writes) do
+		local id, rest = w:match("^g|msg|(%x+)|(.*)$")
+		if id then sent[id] = rest end
+	end
+	local list = {}
+	for _, rest in pairs(sent) do list[#list + 1] = rest end
+	table.sort(list)
+	local plain = {}
+	for _, w in ipairs(pipe_writes) do if w:sub(1, 5) == "g|st|" or w:sub(1, 6) == "g|sec|" then plain[#plain + 1] = w end end
+	local s = SECTORS[500]
+	say("world: sent %s / %s", table.concat(list, " / "), table.concat(plain, " / "))
+	say("world: md %s", table.concat(galaxy_requests, " / "))
+	if sc.galaxy_test == "join" then
+		ok = ok and #list == 0 and #plain == 0
+			and table.concat(galaxy_requests, " / ") == "world_station:NPC-1:" .. ST_W .. ":argon:" .. s .. ":1000:0:2000:0:0:0:12:0:10:0:-30:4:NPC-1"
+				.. " / world_sectors:" .. s .. ":argon:cluster_02_sector001_macro:xenon"
+				.. " / world_layout:NPC-2:" .. ST_W .. ":teladi:" .. s .. ":0:0:0:90:0:0:NPC-2:prod_gen_energycells_macro=0,0,0,0,0,0;dockarea_arg_m_station_01_macro=0,0,300,0,0,0"
+				.. " / world_gone:NPC-3:" .. ST_W .. ":" .. s
+	else
+		ok = ok and table.concat(list, " / ") == "gone|NPC-4|" .. ST_W .. "|" .. s
+				.. " / layout|NPC-1|" .. ST_W .. "|argon|" .. s .. "|1000.0|0.0|2000.0|0.0|0.0|0.0|prod_gen_energycells_macro:0.0:0.0:0.0:0.0:0.0:0.0;dockarea_arg_m_station_01_macro:0.0:0.0:300.0:0.0:0.0:0.0"
+			and table.concat(plain, " / ") == "g|st|3|NPC-1|" .. ST_W .. "|argon|" .. s .. "|1000.0|0.0|2000.0|0.0|0.0|0.0|12.0|0.0|10.0|0.0|-30.0"
+				.. " / g|sec|" .. s .. "=argon,cluster_02_sector001_macro="
+			and table.concat(galaxy_requests, " / ") == "world_want:NPC-1:" .. ST_W .. ":" .. s
+	end
 end
 if sc.crew_test then
 	local sent = {}

@@ -365,6 +365,12 @@ inventory in a small file next to your saves (`x4coop_profile_<world>.txt`, ever
 them back each time you load the host's save. The first time you join a world, you keep what you had when
 you typed `/x4coop loadshared`. `/x4coop set joiner_profile 0` turns it off.
 
+**The wider world (host to joiner):** the stations of every other faction are the host's: the host's game goes
+round all of them, a few each second, and the joiner's game follows each one's owner, builds any it doesn't
+have from the host's layout, adds and removes modules where the host's differ, and removes stations the host
+doesn't have. Sector owners follow the host's too. A station destroyed in either world is destroyed in the
+other. `/x4coop set world_sync 0` turns it off.
+
 Away from both of you, the two worlds still drift apart (far-away NPC ships, what they carry). The host's world
 is the real one: next session, share again.
 
@@ -473,6 +479,7 @@ change a value that already exists; it can't create anything.
 | satellites, beacons, probes, mines, laser towers | `create_object`, `destroy_object` | yes |
 | sectors and stations discovered, stations scanned, factions met | `set_known`, `set_object_scanned`, `set_faction_known` | yes |
 | crew and marines (numbers, skills), pilots' skills | `transfer_people`, `remove_npc_template`, `set_skill` | yes |
+| other factions' stations and sector owners (host to joiner) | `create_station`, `create_module`, `set_owner`, `destroy_object` | yes |
 | station trade settings, limits, prices, rules, name | the station menus' own functions (Lua) | yes |
 | station accounts and budgets | `transfer_money`, the account menu's own functions (Lua) | yes |
 | ownership (claims, boarding, captures) | `set_owner` | yes |
@@ -538,7 +545,7 @@ game's own schema (`libraries/md.xsd`, `libraries/common.xsd`).
 
 Messages (one text line each): `S` snapshot (position, rotation, velocity, ship, hull, shield),
 `P`/`Q` ping, `M` chat, `L` world link, `K` kill, `D` hit, `F` firing at, `B` nearby ships (both
-ways), `E` station stock (host to joiner), `T` a joiner's trade, `V` relations, `U` research/blueprints/licences, `Z` SETA, `O` ownership, `Y` new ships, `G` orders, `J` behaviours and queues, `I` on foot, `b` station modules, `s` station settings, `c` assignments, `r` trade rules, `a` station accounts, `m` missions, `e` station modules removed/wrecked/repaired, `q` ship upgrades, `p` deployables, `n` map knowledge, `l` ship renames, `w` crews, `C` credits given; `R`/`W`/`N`/`X` are between a game and
+ways), `E` station stock (host to joiner), `T` a joiner's trade, `V` relations, `U` research/blueprints/licences, `Z` SETA, `O` ownership, `Y` new ships, `G` orders, `J` behaviours and queues, `I` on foot, `b` station modules, `s` station settings, `c` assignments, `r` trade rules, `a` station accounts, `m` missions, `e` station modules removed/wrecked/repaired, `q` ship upgrades, `p` deployables, `n` map knowledge, `l` ship renames, `w` crews, `g` the wider world (host to joiner), `C` credits given; `R`/`W`/`N`/`X` are between a game and
 its own bridge.
 
 Self-calibration: on first contact the proxy is nudged and read back (does `SetObjectSectorPos`
@@ -588,7 +595,8 @@ python extensions/x4_coop/dev/run_tests.py [--quick]
   own wallet and inventory (asked for after loading, brought along the first time, kept every 30 s and before
   loading), ship upgrades and module equipment both ways (wares counted, sent once, translated, applied
   once), map knowledge both ways (sectors, stations with how much is revealed, factions; checked and
-  translated), crews both ways (counts and skills checked, translated, applied once), ship renames both ways (only the empire's ships, cleaned, applied once), deployables both ways (placed at the same spot once, paired, removed when gone), missions both ways (new, changed and ended ones sent once, alerts and guidance left out, ones
+  translated), the wider world (summaries sent by the host only, checked; layouts asked for, sent, parsed;
+  sector owners; stations destroyed both ways), crews both ways (counts and skills checked, translated, applied once), ship renames both ways (only the empire's ships, cleaned, applied once), deployables both ways (placed at the same spot once, paired, removed when gone), missions both ways (new, changed and ended ones sent once, alerts and guidance left out, ones
   both worlds have not shown twice, ended ones dropped by the list), research, blueprints and licences both ways (sent until confirmed, added once), SETA both ways
   (followed; turned off for both when one side can't follow), ownership changes both ways (sent
   until confirmed, applied once), new ships both ways (made once, paired, kills and hits on them

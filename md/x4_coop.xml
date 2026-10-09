@@ -2442,6 +2442,266 @@
           </actions>
         </cue>
 
+        <!--
+          The wider world (host to joiner): the stations of every other faction are the host's, and so are sector
+          owners. 'world_sync' (param3: [1 or 0, 'host' or 'join']) turns it on.
+          Host: WorldWatch goes round all such stations, eight a second (Root.$WorldRound counts the rounds), and
+          reports each one's summary: player.entity.$x4coop_galaxy gets ['st', round, idcode, macro, owner id,
+          sector macro, x, y, z, yaw, pitch, roll, modules, wrecks, sum of module x, y, z]; at the start of a
+          round ['sectors', [sector macro, owner id], ...]. On request it reports a station's whole layout
+          (OnWorldWant: player.entity.$x4coop_galaxy_layouts gets [idcode, macro, owner id, sector macro, x, y, z,
+          yaw, pitch, roll, [[module macro, x, y, z, yaw, pitch, roll], ...]]).
+          Joiner: OnWorldStation (param3: a summary, our idcode first, then the round and the host's idcode)
+          follows the owner, and asks for the layout of a station it doesn't have or whose modules differ
+          (player.entity.$x4coop_galaxy_want: [host idcode, macro, sector macro]); OnWorldLayout makes the station
+          or its modules match (a station made here is reported for pairing: $x4coop_galaxy_made); a station the
+          host hasn't mentioned for two whole rounds is removed (WorldSweep). OnWorldSectors follows sector owners.
+          Both: a station destroyed in either world (WorldWatch.$Stations) is reported (['gone', idcode, macro,
+          sector macro]) and OnWorldGone destroys it in the other; ones this world removed itself aren't reported.
+        -->
+        <cue name="OnWorldSyncConfig" instantiate="true">
+          <conditions>
+            <event_ui_triggered screen="'x4coop'" control="'world_sync'"/>
+          </conditions>
+          <actions>
+            <set_value name="Root.$WorldSyncOn" exact="event.param3.{1}"/>
+            <set_value name="Root.$WorldRole" exact="event.param3.{2}"/>
+          </actions>
+        </cue>
+
+        <cue name="WorldWatch">
+          <actions>
+            <create_group groupname="$Stations"/>
+          </actions>
+          <cues>
+            <cue name="WorldHostRound" instantiate="true" checkinterval="1s">
+              <conditions>
+                <check_value value="@Root.$WorldSyncOn == 1 and Root.$WorldRole == 'host'"/>
+              </conditions>
+              <actions>
+                <do_if value="not Root.$WorldQueue? or Root.$WorldQueue.count == 0">
+                  <find_station name="Root.$WorldQueue" space="player.galaxy" multiple="true"/>
+                  <set_value name="Root.$WorldRound" exact="@Root.$WorldRound + 1"/>
+                  <clear_group group="WorldWatch.$Stations"/>
+                  <add_to_group groupname="WorldWatch.$Stations" list="Root.$WorldQueue"/>
+                  <set_value name="$Entry" exact="['sectors']"/>
+                  <find_sector name="$Sectors" multiple="true"/>
+                  <do_for_each name="$Sector" in="$Sectors">
+                    <append_to_list name="$Entry" exact="[$Sector.macro.id, if $Sector.owner then $Sector.owner.id else '']"/>
+                  </do_for_each>
+                  <include_actions ref="WorldReport"/>
+                </do_if>
+                <do_all exact="[8, Root.$WorldQueue.count].min">
+                  <set_value name="$S" exact="Root.$WorldQueue.{1}"/>
+                  <remove_value name="Root.$WorldQueue.{1}"/>
+                  <do_if value="@$S.exists and @$S.sector and $S.owner and $S.owner != faction.player">
+                    <include_actions ref="StationSignature"/>
+                    <set_value name="$P" exact="$S.relativeposition.{$S.sector}"/>
+                    <set_value name="$R" exact="$S.relativerotation.{$S.sector}"/>
+                    <set_value name="$Entry" exact="['st', Root.$WorldRound, $S.idcode, $S.macro.id, $S.owner.id, $S.sector.macro.id, $P.x / 1m, $P.y / 1m, $P.z / 1m, $R.yaw / 1deg, $R.pitch / 1deg, $R.roll / 1deg, $Sig.{1}, $Sig.{2}, $Sig.{3}, $Sig.{4}, $Sig.{5}]"/>
+                    <include_actions ref="WorldReport"/>
+                  </do_if>
+                </do_all>
+              </actions>
+            </cue>
+
+            <cue name="WorldJoinGroup" instantiate="true" checkinterval="60s">
+              <conditions>
+                <check_value value="@Root.$WorldSyncOn == 1 and Root.$WorldRole == 'join'"/>
+              </conditions>
+              <actions>
+                <find_station name="$All" space="player.galaxy" multiple="true"/>
+                <clear_group group="WorldWatch.$Stations"/>
+                <add_to_group groupname="WorldWatch.$Stations" list="$All"/>
+              </actions>
+            </cue>
+
+            <cue name="WorldStationGone" instantiate="true">
+              <conditions>
+                <event_object_destroyed group="WorldWatch.$Stations"/>
+                <check_value value="@Root.$WorldSyncOn == 1 and @event.object.sector and not @Root.$WorldQuiet.indexof.{event.object}"/>
+              </conditions>
+              <actions>
+                <set_value name="$Entry" exact="['gone', event.object.idcode, event.object.macro.id, event.object.sector.macro.id]"/>
+                <include_actions ref="WorldReport"/>
+              </actions>
+            </cue>
+          </cues>
+        </cue>
+
+        <cue name="OnWorldStation" instantiate="true">
+          <conditions>
+            <event_ui_triggered screen="'x4coop'" control="'world_station'"/>
+          </conditions>
+          <actions>
+            <set_value name="$W" exact="event.param3"/>
+            <set_value name="$Round" exact="$W.{16}"/>
+            <do_if value="not Root.$WorldSeen?">
+              <set_value name="Root.$WorldSeen" exact="table[]"/>
+              <set_value name="Root.$WorldFirstRound" exact="$Round"/>
+              <set_value name="Root.$WorldLastRound" exact="$Round"/>
+            </do_if>
+            <do_if value="$Round gt Root.$WorldLastRound">
+              <set_value name="Root.$WorldLastRound" exact="$Round"/>
+              <include_actions ref="WorldSweep"/>
+            </do_if>
+            <set_value name="$A" exact="[$W.{1}, $W.{2}, $W.{4}]"/>
+            <include_actions ref="FindContainer"/>
+            <set_value name="$Want" exact="false"/>
+            <do_if value="not $Container">
+              <set_value name="$Want" exact="true"/>
+            </do_if>
+            <do_elseif value="$Container.owner != faction.player">
+              <set_value name="$S" exact="$Container"/>
+              <set_value name="Root.$WorldSeen.{$S}" exact="$Round"/>
+              <do_if value="@faction.{$W.{3}} and $S.owner != faction.{$W.{3}}">
+                <set_owner object="$S" faction="faction.{$W.{3}}"/>
+              </do_if>
+              <include_actions ref="StationSignature"/>
+              <set_value name="$Slack" exact="2 * [$W.{11}, 1].max"/>
+              <do_if value="$Sig.{1} != $W.{11} or $Sig.{2} != $W.{12} or ($Sig.{3} - $W.{13}) * ($Sig.{3} - $W.{13}) gt $Slack * $Slack or ($Sig.{4} - $W.{14}) * ($Sig.{4} - $W.{14}) gt $Slack * $Slack or ($Sig.{5} - $W.{15}) * ($Sig.{5} - $W.{15}) gt $Slack * $Slack">
+                <set_value name="$Want" exact="true"/>
+              </do_if>
+            </do_elseif>
+            <do_if value="$Want">
+              <do_if value="not player.entity.$x4coop_galaxy_want?">
+                <set_value name="player.entity.$x4coop_galaxy_want" exact="[]"/>
+              </do_if>
+              <append_to_list name="player.entity.$x4coop_galaxy_want" exact="[$W.{17}, $W.{2}, $W.{4}]"/>
+              <raise_lua_event name="'x4coop.galaxy_want'"/>
+            </do_if>
+          </actions>
+        </cue>
+
+        <cue name="OnWorldWant" instantiate="true">
+          <conditions>
+            <event_ui_triggered screen="'x4coop'" control="'world_want'"/>
+          </conditions>
+          <actions>
+            <set_value name="$A" exact="event.param3"/>
+            <include_actions ref="FindContainer"/>
+            <do_if value="@$Container.isclass.station and $Container.owner != faction.player">
+              <set_value name="$S" exact="$Container"/>
+              <set_value name="$Modules" exact="[]"/>
+              <do_for_each name="$Mod" in="$S.modules.all.list">
+                <set_value name="$MP" exact="$Mod.relativeposition.{$S}"/>
+                <set_value name="$MR" exact="$Mod.relativerotation.{$S}"/>
+                <append_to_list name="$Modules" exact="[$Mod.macro.id, $MP.x / 1m, $MP.y / 1m, $MP.z / 1m, $MR.yaw / 1deg, $MR.pitch / 1deg, $MR.roll / 1deg]"/>
+              </do_for_each>
+              <set_value name="$P" exact="$S.relativeposition.{$S.sector}"/>
+              <set_value name="$R" exact="$S.relativerotation.{$S.sector}"/>
+              <do_if value="not player.entity.$x4coop_galaxy_layouts?">
+                <set_value name="player.entity.$x4coop_galaxy_layouts" exact="[]"/>
+              </do_if>
+              <append_to_list name="player.entity.$x4coop_galaxy_layouts" exact="[$S.idcode, $S.macro.id, $S.owner.id, $S.sector.macro.id, $P.x / 1m, $P.y / 1m, $P.z / 1m, $R.yaw / 1deg, $R.pitch / 1deg, $R.roll / 1deg, $Modules]"/>
+              <raise_lua_event name="'x4coop.galaxy_layout'"/>
+            </do_if>
+          </actions>
+        </cue>
+
+        <cue name="OnWorldLayout" instantiate="true">
+          <conditions>
+            <event_ui_triggered screen="'x4coop'" control="'world_layout'"/>
+          </conditions>
+          <actions>
+            <set_value name="$L" exact="event.param3"/>
+            <set_value name="$A" exact="[$L.{1}, $L.{2}, $L.{4}]"/>
+            <include_actions ref="FindContainer"/>
+            <set_value name="$S" exact="$Container"/>
+            <do_if value="not $S and @macro.{$L.{2}}.isclass.station and @faction.{$L.{3}}">
+              <find_sector name="$Sector" macro="@macro.{$L.{4}}"/>
+              <do_if value="$Sector">
+                <create_station name="$S" macro="macro.{$L.{2}}" sector="$Sector" owner="faction.{$L.{3}}" state="componentstate.operational">
+                  <position x="$L.{5}" y="$L.{6}" z="$L.{7}"/>
+                  <rotation yaw="$L.{8} * 1deg" pitch="$L.{9} * 1deg" roll="$L.{10} * 1deg"/>
+                </create_station>
+                <do_if value="@$S.exists">
+                  <do_if value="not player.entity.$x4coop_galaxy_made?">
+                    <set_value name="player.entity.$x4coop_galaxy_made" exact="[]"/>
+                  </do_if>
+                  <append_to_list name="player.entity.$x4coop_galaxy_made" exact="[$L.{11}, $S]"/>
+                  <raise_lua_event name="'x4coop.galaxy_made'"/>
+                  <add_to_group groupname="WorldWatch.$Stations" object="$S"/>
+                </do_if>
+              </do_if>
+            </do_if>
+            <do_if value="@$S.exists and $S.owner != faction.player">
+              <do_if value="Root.$WorldSeen?">
+                <set_value name="Root.$WorldSeen.{$S}" exact="Root.$WorldLastRound"/>
+              </do_if>
+              <!-- each module of the layout: ours of that macro within 5 m, or made; the rest of ours go -->
+              <set_value name="$Matched" exact="[]"/>
+              <do_for_each name="$M" in="$L.{12}">
+                <set_value name="$Found" exact="null"/>
+                <do_for_each name="$Mod" in="$S.modules.all.list">
+                  <do_if value="not $Found and $Mod.macro.id == $M.{1} and not $Matched.indexof.{$Mod}">
+                    <set_value name="$MP" exact="$Mod.relativeposition.{$S}"/>
+                    <set_value name="$DX" exact="$MP.x / 1m - $M.{2}"/>
+                    <set_value name="$DY" exact="$MP.y / 1m - $M.{3}"/>
+                    <set_value name="$DZ" exact="$MP.z / 1m - $M.{4}"/>
+                    <do_if value="$DX * $DX + $DY * $DY + $DZ * $DZ lt 25">
+                      <set_value name="$Found" exact="$Mod"/>
+                    </do_if>
+                  </do_if>
+                </do_for_each>
+                <do_if value="$Found">
+                  <append_to_list name="$Matched" exact="$Found"/>
+                </do_if>
+                <do_elseif value="@macro.{$M.{1}}">
+                  <create_module name="$New" macro="macro.{$M.{1}}" object="$S">
+                    <position x="$M.{2}" y="$M.{3}" z="$M.{4}"/>
+                    <rotation yaw="$M.{5} * 1deg" pitch="$M.{6} * 1deg" roll="$M.{7} * 1deg"/>
+                  </create_module>
+                  <do_if value="@$New.exists">
+                    <append_to_list name="$Matched" exact="$New"/>
+                    <generate_loadout result="$Loadouts" macro="$S.macro" module="$New.macro" faction="$S.owner" level="0.7"/>
+                    <do_if value="@$Loadouts.{1}">
+                      <apply_loadout object="$New" loadout="$Loadouts.{1}"/>
+                    </do_if>
+                  </do_if>
+                </do_elseif>
+              </do_for_each>
+              <do_for_each name="$Mod" in="$S.modules.all.list">
+                <do_if value="not $Matched.indexof.{$Mod}">
+                  <set_value name="$Found" exact="$Mod"/>
+                  <set_value name="$Recreate" exact="null"/>
+                  <include_actions ref="QueueModuleRemoval"/>
+                </do_if>
+              </do_for_each>
+            </do_if>
+          </actions>
+        </cue>
+
+        <cue name="OnWorldGone" instantiate="true">
+          <conditions>
+            <event_ui_triggered screen="'x4coop'" control="'world_gone'"/>
+          </conditions>
+          <actions>
+            <set_value name="$A" exact="event.param3"/>
+            <include_actions ref="FindContainer"/>
+            <do_if value="@$Container.isclass.station and $Container.owner != faction.player">
+              <set_value name="$S" exact="$Container"/>
+              <include_actions ref="WorldRemoveStation"/>
+            </do_if>
+          </actions>
+        </cue>
+
+        <cue name="OnWorldSectors" instantiate="true">
+          <conditions>
+            <event_ui_triggered screen="'x4coop'" control="'world_sectors'"/>
+          </conditions>
+          <actions>
+            <do_all exact="event.param3.count / 2" counter="$i">
+              <set_value name="$Macro" exact="event.param3.{$i * 2 - 1}"/>
+              <set_value name="$Owner" exact="event.param3.{$i * 2}"/>
+              <find_sector name="$Sector" macro="@macro.{$Macro}"/>
+              <do_if value="$Sector and $Owner != '' and @faction.{$Owner} and $Sector.owner != faction.{$Owner}">
+                <set_owner object="$Sector" faction="faction.{$Owner}"/>
+              </do_if>
+            </do_all>
+          </actions>
+        </cue>
+
         <cue name="OnNpcClear" instantiate="true">
           <conditions>
             <event_ui_triggered screen="'x4coop'" control="'npc_clear'"/>
@@ -2696,6 +2956,62 @@
             <set_value name="$Pilot" exact="@$Ship.assignedpilot"/>
             <do_for_each name="$Skill" in="$SkillTypes">
               <append_to_list name="$Crew" exact="if $Pilot then $Pilot.skill.{$Skill} else -1"/>
+            </do_for_each>
+          </actions>
+        </library>
+
+        <library name="StationSignature">
+          <actions>
+            <!-- $S: $Sig = [modules, wrecks, sum of the modules' x, y, z (m)], to compare layouts cheaply -->
+            <set_value name="$Sig" exact="[0, 0, 0, 0, 0]"/>
+            <do_for_each name="$Mod" in="$S.modules.all.list">
+              <set_value name="$MP" exact="$Mod.relativeposition.{$S}"/>
+              <set_value name="$Sig.{1}" exact="$Sig.{1} + 1"/>
+              <do_if value="$Mod.iswreck">
+                <set_value name="$Sig.{2}" exact="$Sig.{2} + 1"/>
+              </do_if>
+              <set_value name="$Sig.{3}" exact="$Sig.{3} + $MP.x / 1m"/>
+              <set_value name="$Sig.{4}" exact="$Sig.{4} + $MP.y / 1m"/>
+              <set_value name="$Sig.{5}" exact="$Sig.{5} + $MP.z / 1m"/>
+            </do_for_each>
+          </actions>
+        </library>
+
+        <library name="WorldReport">
+          <actions>
+            <do_if value="not player.entity.$x4coop_galaxy?">
+              <set_value name="player.entity.$x4coop_galaxy" exact="[]"/>
+            </do_if>
+            <append_to_list name="player.entity.$x4coop_galaxy" exact="$Entry"/>
+            <raise_lua_event name="'x4coop.galaxy'"/>
+          </actions>
+        </library>
+
+        <library name="WorldRemoveStation">
+          <actions>
+            <!-- $S goes without being reported back -->
+            <do_if value="not Root.$WorldQuiet?">
+              <set_value name="Root.$WorldQuiet" exact="[]"/>
+            </do_if>
+            <append_to_list name="Root.$WorldQuiet" exact="$S"/>
+            <do_for_each name="$Mod" in="$S.modules.all.list">
+              <destroy_object object="$Mod" explosion="false"/>
+            </do_for_each>
+            <destroy_object object="$S" explosion="false"/>
+          </actions>
+        </library>
+
+        <library name="WorldSweep">
+          <actions>
+            <!-- joiner: stations of other factions the host hasn't mentioned for two whole rounds aren't in its world -->
+            <find_station name="$All" space="player.galaxy" multiple="true"/>
+            <do_for_each name="$S" in="$All">
+              <do_if value="$S.owner and $S.owner != faction.player">
+                <set_value name="$Last" exact="if Root.$WorldSeen.{$S}? then Root.$WorldSeen.{$S} else Root.$WorldFirstRound"/>
+                <do_if value="$Last lt Root.$WorldLastRound - 2">
+                  <include_actions ref="WorldRemoveStation"/>
+                </do_if>
+              </do_if>
             </do_for_each>
           </actions>
         </library>

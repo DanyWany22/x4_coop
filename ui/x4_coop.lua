@@ -123,6 +123,7 @@ local config = {
 	knowledge_sync = 1,       -- shared world: sectors and stations discovered, stations scanned, factions met
 	rename_sync = 1,          -- shared world: ships renamed in either world get the same name in both
 	crew_sync = 1,            -- shared world: ships' crew and marines (numbers, skills) and pilots' skills
+	world_sync = 1,           -- shared world: other factions' stations and sector owners follow the host's world
 	ghost_latency = 0.12,     -- s, simulated one-way latency in ghost mode
 	ghost_jitter = 0.03,      -- s, extra random delay per snapshot
 	ghost_loss = 0.0,         -- 0..1, fraction of snapshots dropped
@@ -383,6 +384,7 @@ local function reset()
 		knowledge = { on = false, sent = 0, applied = 0 },
 		renames = { sent = 0, applied = 0 },
 		crew = { on = false, sent = 0, applied = 0 },
+		world = { key = nil, asked = {}, gone = 0, wanted = 0, layouts = 0, summaries = 0, built = 0 },
 		rules = { next = 0, base = nil, shared = {}, alias = { loaded = false, into = {}, out = {} }, sent = 0, applied = 0 },
 		ssettings = { list = {}, idx = 0, next = 0, ids = {}, base = {}, settle = {}, out = {}, expect = {}, sent = 0, applied = 0 },
 		foot = { on = false, walking = false, last = nil, gone_left = 0, gone_at = -1e9, partner = nil, avatar_on = false },
@@ -882,6 +884,8 @@ on_pipe_message = function(msg)
 		if config.mode == "net" then Receive.l(f, now) end
 	elseif kind == "w" then
 		if config.mode == "net" then Receive.w(f, now) end
+	elseif kind == "g" then
+		if config.mode == "net" then Receive.g(f, now) end
 	elseif kind == "M" then
 		local text = clean_text(f[3], 200)
 		if text ~= "" then
@@ -4483,6 +4487,192 @@ end
 Feature.on_crew = on_crew
 Feature.crew_tick = crew_tick
 
+-------------------------------------------------------------------------------
+-- The wider world (host to joiner): every other faction's stations, as they are in the host's world (built,
+-- expanded, changing owner), and sector owners. The host's md goes round all stations, eight a second, and Lua sends
+-- each one's summary ("g|st|round|station|macro|owner|sector|x|y|z|yaw|pitch|roll|modules|wrecks|sum x|sum y|sum z",
+-- not confirmed: the next round sends it again) and, each round, the sector owners ("g|sec|sector=owner,..."). The
+-- joiner's md follows owners and asks for the layout of a station it lacks or whose modules differ ("want"); the host
+-- answers with the layout ("layout": station, then "module:x:y:z:yaw:pitch:roll;..."), and the joiner's md makes it
+-- match, removing what the host doesn't have. A station destroyed in either world goes in the other ("gone").
+-- "g|msg|id|want|station|macro|sector", "g|msg|id|layout|...", "g|msg|id|gone|station|macro|sector", sent reliably.
+
+local WORLD_ASK_AGAIN = 120   -- s before asking for the same station's layout again
+local WORLD_SECTORS = 40      -- sectors per "g|sec" message
+
+local function world_enabled()
+	return config.mode == "net" and S.link.linked and config.world_sync == 1
+end
+
+local function world_number(v)
+	return tonumber(v) and string.format("%.1f", tonumber(v)) or nil
+end
+
+local function on_world()
+	local list = S.player and GetNPCBlackboard(S.player, "$x4coop_galaxy")
+	if S.player then SetNPCBlackboard(S.player, "$x4coop_galaxy", nil) end
+	if type(list) ~= "table" or not world_enabled() then return end
+	for _, v in ipairs(list) do
+		if type(v) ~= "table" then
+		elseif v[1] == "st" and S.link.role == "host" and valid_world_ref(v[3], v[4], v[6]) and type(v[5]) == "string"
+			and v[5]:match("^[%w_]+$") and tonumber(v[2]) then
+			local fields = { "g", "st", string.format("%d", tonumber(v[2])), alias_out(v[3]), v[4], v[5], v[6] }
+			for i = 7, 17 do
+				local n = world_number(v[i])
+				if not n then fields = nil break end
+				fields[#fields + 1] = n
+			end
+			if fields then net_send(table.concat(fields, "|")) end
+		elseif v[1] == "sectors" and S.link.role == "host" then
+			local batch = {}
+			for i = 2, #v do
+				local e = v[i]
+				if type(e) == "table" and type(e[1]) == "string" and e[1]:match("^[%w_]+$") and type(e[2]) == "string"
+					and e[2]:match("^[%w_]*$") then
+					batch[#batch + 1] = e[1] .. "=" .. e[2]
+					if #batch == WORLD_SECTORS then
+						net_send("g|sec|" .. table.concat(batch, ","))
+						batch = {}
+					end
+				end
+			end
+			if #batch > 0 then net_send("g|sec|" .. table.concat(batch, ",")) end
+		elseif v[1] == "gone" and valid_world_ref(v[2], v[3], v[4]) then
+			reliable_send("g", { "gone", alias_out(v[2]), v[3], v[4] })
+			S.world.gone = S.world.gone + 1
+		end
+	end
+end
+
+local function on_world_want()  -- joiner: ask for these stations' layouts
+	local list = S.player and GetNPCBlackboard(S.player, "$x4coop_galaxy_want")
+	if S.player then SetNPCBlackboard(S.player, "$x4coop_galaxy_want", nil) end
+	if type(list) ~= "table" or not world_enabled() then return end
+	local W, now = S.world, getElapsedTime()
+	for _, v in ipairs(list) do
+		if type(v) == "table" and valid_world_ref(v[1], v[2], v[3]) and now - (W.asked[v[1]] or -1e9) >= WORLD_ASK_AGAIN then
+			W.asked[v[1]] = now
+			reliable_send("g", { "want", v[1], v[2], v[3] })
+			W.wanted = W.wanted + 1
+		end
+	end
+end
+
+local function on_world_layout()  -- host: send these stations' layouts
+	local list = S.player and GetNPCBlackboard(S.player, "$x4coop_galaxy_layouts")
+	if S.player then SetNPCBlackboard(S.player, "$x4coop_galaxy_layouts", nil) end
+	if type(list) ~= "table" or not world_enabled() then return end
+	for _, v in ipairs(list) do
+		local ok = type(v) == "table" and valid_world_ref(v[1], v[2], v[4]) and type(v[3]) == "string" and v[3]:match("^[%w_]+$")
+			and type(v[11]) == "table"
+		local fields = ok and { "layout", alias_out(v[1]), v[2], v[3], v[4] }
+		for i = 5, 10 do
+			local n = ok and world_number(v[i])
+			ok = ok and n ~= nil
+			if ok then fields[#fields + 1] = n end
+		end
+		if ok then
+			local modules = {}
+			for _, m in ipairs(v[11]) do
+				if type(m) == "table" and type(m[1]) == "string" and m[1]:match("^[%w_]+$") then
+					local parts = { m[1] }
+					for i = 2, 7 do parts[#parts + 1] = world_number(m[i]) or "0" end
+					modules[#modules + 1] = table.concat(parts, ":")
+				end
+			end
+			fields[#fields + 1] = table.concat(modules, ";")
+			reliable_send("g", fields)
+			S.world.layouts = S.world.layouts + 1
+		end
+	end
+end
+
+local function on_world_made()  -- joiner: a station made from the host's layout is paired with the host's
+	local list = S.player and GetNPCBlackboard(S.player, "$x4coop_galaxy_made")
+	if S.player then SetNPCBlackboard(S.player, "$x4coop_galaxy_made", nil) end
+	if type(list) ~= "table" then return end
+	for _, v in ipairs(list) do
+		local code = type(v) == "table" and v[2] and C.GetObjectIDCode(to64(v[2]))
+		if code ~= nil and type(v[1]) == "string" then alias_add(v[1], ffi.string(code)) end
+	end
+end
+
+Receive.g = function(f, now)
+	if not world_enabled() then return end
+	local W = S.world
+	if f[2] == "st" then
+		if S.link.role ~= "join" or not (valid_world_ref(f[4], f[5], f[7]) and type(f[6]) == "string" and f[6]:match("^[%w_]+$")) then return end
+		local args = { alias_in(f[4]), f[5], f[6], f[7] }
+		for i = 8, 18 do
+			local n = tonumber(f[i])
+			if not n then return end
+			args[#args + 1] = n
+		end
+		args[#args + 1] = tonumber(f[3]) or 0
+		args[#args + 1] = f[4]
+		request("world_station", args)
+		W.summaries = W.summaries + 1
+		return
+	elseif f[2] == "sec" then
+		if S.link.role ~= "join" then return end
+		local args = {}
+		for entry in tostring(f[3] or ""):gmatch("[^,]+") do
+			local sector, owner = entry:match("^([%w_]+)=([%w_]*)$")
+			if sector then
+				args[#args + 1] = sector
+				args[#args + 1] = owner
+			end
+		end
+		if #args > 0 then request("world_sectors", args) end
+		return
+	end
+	reliable_receive("g", f, now, function(m)
+		if m[4] == "want" and S.link.role == "host" and valid_world_ref(m[5], m[6], m[7]) then
+			request("world_want", { alias_in(m[5]), m[6], m[7] })
+		elseif m[4] == "gone" and valid_world_ref(m[5], m[6], m[7]) then
+			request("world_gone", { alias_in(m[5]), m[6], m[7] })
+		elseif m[4] == "layout" and S.link.role == "join" and valid_world_ref(m[5], m[6], m[8])
+			and type(m[7]) == "string" and m[7]:match("^[%w_]+$") then
+			local args = { alias_in(m[5]), m[6], m[7], m[8] }
+			for i = 9, 14 do
+				local n = tonumber(m[i])
+				if not n then return end
+				args[#args + 1] = n
+			end
+			args[#args + 1] = m[5]
+			local modules = {}
+			for entry in tostring(m[15] or ""):gmatch("[^;]+") do
+				local parts = {}
+				for p in entry:gmatch("[^:]+") do parts[#parts + 1] = p end
+				local mod = #parts == 7 and parts[1]:match("^[%w_]+$") and { parts[1] }
+				for i = 2, 7 do
+					local n = mod and tonumber(parts[i])
+					if n then mod[#mod + 1] = n else mod = nil end
+				end
+				if mod and #modules < 400 then modules[#modules + 1] = mod end
+			end
+			args[#args + 1] = modules
+			request("world_layout", args)
+			W.built = W.built + 1
+		end
+	end)
+end
+
+local function world_tick()
+	local on = world_enabled() and (S.link.role == "host" or S.link.role == "join")
+	local key = on and S.link.role or "off"
+	if key ~= S.world.key then
+		S.world.key = key
+		request("world_sync", { on and 1 or 0, on and S.link.role or "" })
+	end
+end
+
+Feature.on_world = on_world
+Feature.on_world_want = on_world_want
+Feature.on_world_layout = on_world_layout
+Feature.on_world_made = on_world_made
+Feature.world_tick = world_tick
+
 end
 
 -------------------------------------------------------------------------------
@@ -4538,6 +4728,9 @@ local function status_text()
 			and string.format(" | station settings sent %d, applied %d", S.ssettings.sent, S.ssettings.applied) or "")
 		.. ((S.rules.sent + S.rules.applied > 0)
 			and string.format(" | trade rules sent %d, applied %d", S.rules.sent, S.rules.applied) or "")
+		.. ((S.world.summaries + S.world.layouts + S.world.gone > 0)
+			and string.format(" | world: stations checked %d, layouts asked %d / sent %d / built %d, destroyed sent %d",
+				S.world.summaries, S.world.wanted, S.world.layouts, S.world.built, S.world.gone) or "")
 		.. ((S.crew.sent + S.crew.applied > 0)
 			and string.format(" | crews sent %d, applied %d", S.crew.sent, S.crew.applied) or "")
 		.. ((S.knowledge.sent + S.knowledge.applied > 0)
@@ -4801,6 +4994,7 @@ local function tick(now, dt)
 	Feature.knowledge_tick()
 	Feature.renames_tick()
 	Feature.crew_tick()
+	Feature.world_tick()
 end
 
 local function on_update()
@@ -4847,6 +5041,10 @@ local function init()
 	RegisterEvent("x4coop.deploy_made", Feature.on_deploy_made)
 	RegisterEvent("x4coop.knowledge", Feature.on_knowledge)
 	RegisterEvent("x4coop.crew", Feature.on_crew)
+	RegisterEvent("x4coop.galaxy", Feature.on_world)
+	RegisterEvent("x4coop.galaxy_want", Feature.on_world_want)
+	RegisterEvent("x4coop.galaxy_layout", Feature.on_world_layout)
+	RegisterEvent("x4coop.galaxy_made", Feature.on_world_made)
 	RegisterEvent("x4coop.commands", Feature.on_commands)
 	RegisterEvent("x4coop.command_missing", Feature.on_command_missing)
 	RegisterEvent("x4coop.empire_trade", Feature.on_empire_trade)
