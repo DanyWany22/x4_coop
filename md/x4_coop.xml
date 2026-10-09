@@ -1221,6 +1221,47 @@
           </actions>
         </cue>
 
+        <!--
+          Orders: find the objects an order from the partner names, by ID code (ships, stations) or macro (sectors).
+          param3: [request id, [kind, idcode, macro, sector macro], ...]. Reply: player.entity.$x4coop_resolved =
+          [request id, [index, object or null], ...], then 'x4coop.resolved'.
+        -->
+        <cue name="OnResolve" instantiate="true">
+          <conditions>
+            <event_ui_triggered screen="'x4coop'" control="'resolve'"/>
+          </conditions>
+          <actions>
+            <set_value name="$In" exact="event.param3"/>
+            <set_value name="$Out" exact="[$In.{1}]"/>
+            <do_all exact="$In.count - 1" counter="$i">
+              <set_value name="$Ref" exact="$In.{$i + 1}"/>
+              <set_value name="$Found" exact="null"/>
+              <do_if value="$Ref.{1} == 'sector'">
+                <find_sector name="$Found" macro="@macro.{$Ref.{3}}"/>
+              </do_if>
+              <do_elseif value="$Ref.{1} == 'ship'">
+                <set_value name="$Args" exact="[$Ref.{2}, $Ref.{3}, $Ref.{4}]"/>
+                <include_actions ref="FindWorldShip"/>
+                <set_value name="$Found" exact="$Target"/>
+              </do_elseif>
+              <do_elseif value="$Ref.{1} == 'station'">
+                <find_sector name="$StationSector" macro="@macro.{$Ref.{4}}"/>
+                <do_if value="$StationSector">
+                  <find_station name="$Candidates" space="$StationSector" multiple="true"/>
+                  <do_for_each name="$Candidate" in="$Candidates">
+                    <do_if value="not $Found and $Candidate.idcode == $Ref.{2}">
+                      <set_value name="$Found" exact="$Candidate"/>
+                    </do_if>
+                  </do_for_each>
+                </do_if>
+              </do_elseif>
+              <append_to_list name="$Out" exact="[$i, $Found]"/>
+            </do_all>
+            <set_value name="player.entity.$x4coop_resolved" exact="$Out"/>
+            <raise_lua_event name="'x4coop.resolved'"/>
+          </actions>
+        </cue>
+
         <cue name="OnNpcClear" instantiate="true">
           <conditions>
             <event_ui_triggered screen="'x4coop'" control="'npc_clear'"/>

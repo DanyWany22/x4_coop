@@ -230,6 +230,13 @@ which of its ships is which of the partner's, and kills, hits, nearby sync and o
 ship. That pairing is kept in the save. `/x4coop set new_ships 0` turns it off. Stations either of you
 builds don't copy across yet.
 
+**Orders:** an order either of you gives one of the empire's ships from the map or the right-click menu
+(fly to, attack, dock, follow, protect, mine, explore, collect, salvage, withdraw and the rest) is
+carried out in the other world too. If it replaced the ship's whole queue there, it does here as well.
+Orders that name something the other world can't find, such as a drop, a lockbox or a gate, stay on
+your side; the log says so. Orders built step by step in the ship's behaviour panel aren't shared yet.
+`/x4coop set orders 0` turns it off.
+
 **Ships changing owner:** a ship that one of you claims, boards or captures becomes the player's in the
 other world too (and one the player loses is lost in both). `/x4coop set owners 0` turns it off.
 
@@ -351,9 +358,10 @@ change a value that already exists; it can't create anything.
 | time acceleration (SETA) | `set_timewarp_factor`, `toggle_timewarp` | yes |
 | inventory items | `add_inventory` | not yet |
 | ownership (claims, boarding, captures) | `set_owner` | yes |
-| orders, missions | `create_order`, `create_mission` | not yet |
+| orders given from the menus | the UI's own `CreateOrder` (Lua) | yes |
+| missions | `create_mission` | not yet |
 
-All of these, except `SetObjectSectorPos` and `shoot_at`, are Mission Director commands from the
+All of these, except `SetObjectSectorPos`, `CreateOrder` and `shoot_at`, are Mission Director commands from the
 game's own schema (`libraries/md.xsd`, `libraries/common.xsd`).
 
 * **What scripts can't set:** the game clock, and small per-frame details such as weapon heat on
@@ -410,7 +418,7 @@ game's own schema (`libraries/md.xsd`, `libraries/common.xsd`).
 
 Messages (one text line each): `S` snapshot (position, rotation, velocity, ship, hull, shield),
 `P`/`Q` ping, `M` chat, `L` world link, `K` kill, `D` hit, `F` firing at, `B` nearby ships (both
-ways), `E` station stock (host to joiner), `T` a joiner's trade, `V` relations, `U` research/blueprints/licences, `Z` SETA, `O` ownership, `Y` new ships, `C` credits given; `R`/`W`/`N`/`X` are between a game and
+ways), `E` station stock (host to joiner), `T` a joiner's trade, `V` relations, `U` research/blueprints/licences, `Z` SETA, `O` ownership, `Y` new ships, `G` orders, `C` credits given; `R`/`W`/`N`/`X` are between a game and
 its own bridge.
 
 Self-calibration: on first contact the proxy is nudged and read back (does `SetObjectSectorPos`
@@ -449,7 +457,8 @@ python extensions/x4_coop/dev/run_tests.py [--quick]
   research, blueprints and licences both ways (sent until confirmed, added once), SETA both ways
   (followed; turned off for both when one side can't follow), ownership changes both ways (sent
   until confirmed, applied once), new ships both ways (made once, paired, kills and hits on them
-  translated both ways),
+  translated both ways), orders both ways (encoded, shared once, objects found again, queue cleared
+  when it was; ones naming a drop stay local),
   hostile messages, guest ship, save handoff commands. Errors are measured against ground truth:
   the partner within ~2–3 m and ~2° (95th percentile) at 220–300 m/s; NPC copies within ~3.5 m.
 * Bridge: password codec (encryption, replay, tamper, stale, other versions), reconnects, chat, wrong password, partner

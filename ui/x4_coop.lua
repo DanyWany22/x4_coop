@@ -57,6 +57,9 @@ ffi.cdef[[
 	bool IsSaveValid(const char* filename);
 	void ReloadSaveList(void);
 	UIPosRot GetObjectPositionInSector(UniverseID objectid);
+	bool IsComponentClass(UniverseID componentid, const char* classname);
+	uint32_t GetNumOrders(UniverseID controllableid);
+	bool RemoveAllOrders2(UniverseID controllableid, bool onlytrade, bool onlypriority);
 	uint32_t GetNumAllFactions(bool includehidden);
 	uint32_t GetAllFactions(const char** result, uint32_t resultlen, bool includehidden);
 	const char* GetPlayerName(void);
@@ -102,6 +105,7 @@ local config = {
 	timewarp_sync = 1,        -- SETA: both games run at the same speed
 	owners = 1,               -- shared world: ships claimed, boarded or captured change owner in both worlds
 	new_ships = 1,            -- shared world: ships either player buys appear in both worlds
+	orders = 1,               -- shared world: orders given to empire ships are carried out in both worlds
 	ghost_latency = 0.12,     -- s, simulated one-way latency in ghost mode
 	ghost_jitter = 0.03,      -- s, extra random delay per snapshot
 	ghost_loss = 0.0,         -- 0..1, fraction of snapshots dropped
@@ -349,6 +353,7 @@ local function reset()
 		reliable = { out = {}, seen = {}, seq = 0 },
 		owners_on = false,
 		newships_on = false,
+		orders = { seq = 0, waiting = {}, applied = 0 },
 		alias = { loaded = false, into = {}, out = {} },
 		net = { api = nil, status = "idle", reading = false, connected = false, retry_at = 0, last_ping = -1e9, rtt = nil,
 			partner = kept_partner },
@@ -709,6 +714,7 @@ local unlocks_receive   -- research, blueprints, licences (U), defined with the 
 local warp_receive      -- the partner's SETA (Z), defined with the credits
 local owners_receive    -- ownership changes (O), defined with the credits
 local newships_receive  -- the partner's new ships (Y), defined with the credits
+local orders_receive    -- orders given to empire ships (G), defined with the credits
 local send_link
 
 local function net_send(msg)
@@ -802,6 +808,8 @@ on_pipe_message = function(msg)
 		if config.mode == "net" then owners_receive(f, now) end
 	elseif kind == "Y" then
 		if config.mode == "net" then newships_receive(f, now) end
+	elseif kind == "G" then
+		if config.mode == "net" then orders_receive(f, now) end
 	elseif kind == "M" then
 		local text = clean_text(f[3], 200)
 		if text ~= "" then
@@ -2280,7 +2288,7 @@ end
 
 -------------------------------------------------------------------------------
 -- Reliable one-off messages: "<kind>|msg|id|fields..." is sent every TRADE_RETRY seconds until the partner
--- answers "<kind>|ack|id"; the receiver handles each id once. Used for ownership (O) and new ships (Y).
+-- answers "<kind>|ack|id"; the receiver handles each id once. Used for ownership (O), new ships (Y) and orders (G).
 
 local function reliable_send(kind, fields)
 	local Q = S.reliable
@@ -2422,6 +2430,226 @@ local function newships_tick()
 	if on ~= S.newships_on then
 		S.newships_on = on
 		request("new_ships", { on and 1 or 0 })
+	end
+end
+
+-------------------------------------------------------------------------------
+-- Orders (shared faction): an order the player gives an empire ship is carried out in the partner's world too.
+-- The menus give orders through the global CreateOrder(ship, order id, params, ...); we wrap it, and encode the
+-- order: ships and stations by ID code, sectors by macro, positions as sector macro plus x, y, z, wares and
+-- numbers as they are ("G|msg|id|ship|order|clear|args|params", sent until confirmed). The partner's game finds
+-- the same objects (md OnResolve) and calls the original CreateOrder, so nothing comes back; "clear" means the
+-- order replaced the ship's whole queue. Orders naming something the other world can't find (a drop, a lockbox,
+-- a gate) aren't sent. Orders set up in the behaviour panel (C.CreateOrder plus parameters) aren't covered.
+
+local original_create_order       -- vanilla's CreateOrder, once wrapped
+local ORDER_ARGS = 10             -- CreateOrder's arguments after (ship, order id, params)
+
+local function component_ref(v)
+	-- [kind, idcode, macro, sector macro] the partner can find again; false for a component it can't; nil if v isn't one
+	if not ((type(v) == "number" or type(v) == "userdata" or type(v) == "cdata") and IsValidComponent(v)) then return nil end
+	local id = to64(v)
+	local kind = (C.IsComponentClass(id, "sector") and "sector") or (C.IsComponentClass(id, "ship") and "ship")
+		or (C.IsComponentClass(id, "station") and "station")
+	local macro = GetComponentData(id, "macro")
+	if not kind or type(macro) ~= "string" then return false end
+	if kind == "sector" then return { "sector", "-", macro, macro } end
+	local code, sector = C.GetObjectIDCode(id), C.GetContextByClass(id, "sector", false)
+	local sector_macro = sector ~= 0 and GetComponentData(to64(sector), "macro")
+	if code == nil or type(sector_macro) ~= "string" then return false end
+	return { kind, alias_out(ffi.string(code)), macro, sector_macro }
+end
+
+local function encode_atom(v)
+	if v == nil then return "z" end
+	local t = type(v)
+	if t == "boolean" then return v and "b1" or "b0" end
+	if t == "string" then return v:match("^[%w_%-%.]+$") and ("s" .. v) or nil end
+	local ref = component_ref(v)
+	if ref then return "o" .. table.concat(ref, "~") end
+	if ref == false then return nil end
+	if t == "number" then return string.format("n%.6g", v) end
+	if t == "table" then
+		local sector = component_ref(v[1])
+		if sector and sector[1] == "sector" and type(v[2]) == "table" and tonumber(v[2][1]) and tonumber(v[2][2]) and tonumber(v[2][3]) then
+			return string.format("p%s~%.2f~%.2f~%.2f", sector[3], v[2][1], v[2][2], v[2][3])
+		end
+		local items = {}
+		for i, x in ipairs(v) do
+			local a = type(x) ~= "table" and encode_atom(x)
+			if not a then return nil end
+			items[i] = a
+		end
+		return "L[" .. table.concat(items, ",") .. "]"
+	end
+	return nil
+end
+
+local function orders_enabled()
+	return config.mode == "net" and S.link.linked and config.orders == 1
+end
+
+-- The player gave an order through a menu (our CreateOrder wrapper): tell the partner.
+local function on_player_order(ship, order, params, ...)
+	if not orders_enabled() or type(order) ~= "string" or not order:match("^[%w_]+$") then return end
+	local ship64 = to64(ship)
+	if ship64 == S.proxy.id or not GetComponentData(ship64, "isplayerowned") then return end
+	local ship_atom = encode_atom(ship)
+	if not ship_atom or ship_atom:sub(1, 5) ~= "oship" then return end
+	local keys, encoded = {}, {}
+	for k in pairs(type(params) == "table" and params or {}) do keys[#keys + 1] = k end
+	table.sort(keys)
+	for _, k in ipairs(keys) do
+		local a = type(k) == "string" and k:match("^[%w_]+$") and encode_atom(params[k])
+		if not a then
+			log("order %s for %s not shared: its %s names something your partner's world can't find", order,
+				ship_atom, tostring(k))
+			return
+		end
+		encoded[#encoded + 1] = k .. "=" .. a
+	end
+	local args = {}
+	for i = 1, ORDER_ARGS do
+		local a = encode_atom((select(i, ...)))
+		if not a then return end
+		args[i] = a
+	end
+	local clear = C.GetNumOrders(ship64) <= 1 and "1" or "0"
+	reliable_send("G", { ship_atom, order, clear, table.concat(args, ";"), table.concat(encoded, ";") })
+end
+
+local function install_order_hook()
+	if original_create_order or type(CreateOrder) ~= "function" then return end
+	original_create_order = CreateOrder
+	CreateOrder = function(ship, order, params, ...)
+		local results = { original_create_order(ship, order, params, ...) }
+		local ok, err = pcall(on_player_order, ship, order, params, ...)
+		if not ok then log("sharing an order failed: %s", tostring(err)) end
+		return unpack(results)
+	end
+end
+
+-- Partner's order: the atoms decoded, the objects to look up listed in refs.
+local function decode_atom(a, refs)
+	local tag, rest = a:sub(1, 1), a:sub(2)
+	if tag == "z" then return { none = true } end
+	if tag == "b" then return { value = rest == "1" } end
+	if tag == "s" and rest:match("^[%w_%-%.]+$") then return { value = rest } end
+	if tag == "n" and tonumber(rest) then return { value = tonumber(rest) } end
+	if tag == "o" then
+		local kind, code, macro, sector = rest:match("^(%a+)~([%w%-]+)~([%w_]+)~([%w_]+)$")
+		if not kind then return nil end
+		refs[#refs + 1] = { kind, kind == "sector" and "-" or alias_in(code), macro, sector }
+		return { ref = #refs }
+	end
+	if tag == "p" then
+		local sector, x, y, z = rest:match("^([%w_]+)~(%-?[%d%.]+)~(%-?[%d%.]+)~(%-?[%d%.]+)$")
+		if not sector then return nil end
+		refs[#refs + 1] = { "sector", "-", sector, sector }
+		return { pos = #refs, xyz = { tonumber(x), tonumber(y), tonumber(z) } }
+	end
+	if tag == "L" and rest:match("^%[.*%]$") then
+		local items = {}
+		for item in rest:sub(2, -2):gmatch("[^,]+") do
+			local d = decode_atom(item, refs)
+			if not d or d.list then return nil end
+			items[#items + 1] = d
+		end
+		return { list = items }
+	end
+	return nil
+end
+
+local function materialize(d, found)
+	if d.none then return nil, true end
+	if d.list then
+		local out = {}
+		for i, item in ipairs(d.list) do
+			local v, ok = materialize(item, found)
+			if not ok then return nil, false end
+			out[i] = v
+		end
+		return out, true
+	end
+	if d.ref then
+		local c = found[d.ref]
+		return c and ConvertStringToLuaID(tostring(c)), c ~= nil
+	end
+	if d.pos then
+		local c = found[d.pos]
+		return c and { ConvertStringToLuaID(tostring(c)), d.xyz }, c ~= nil
+	end
+	return d.value, true
+end
+
+orders_receive = function(f, now)
+	if not orders_enabled() then return end
+	reliable_receive("G", f, now, function(m)
+		local refs = {}
+		local ship, order, clear = decode_atom(m[4] or "", refs), m[5], m[6] == "1"
+		if not (ship and ship.ref and refs[ship.ref][1] == "ship" and order and order:match("^[%w_]+$")) then return end
+		local args, params = {}, {}
+		for a in (m[7] or ""):gmatch("[^;]+") do
+			local d = decode_atom(a, refs)
+			if not d then return end
+			args[#args + 1] = d
+		end
+		for kv in (m[8] or ""):gmatch("[^;]+") do
+			local k, a = kv:match("^([%w_]+)=(.+)$")
+			local d = k and decode_atom(a, refs)
+			if not d then return end
+			params[k] = d
+		end
+		local O = S.orders
+		O.seq = O.seq + 1
+		O.waiting[O.seq] = { ship = ship, order = order, clear = clear, args = args, params = params, at = now }
+		local request_args = { O.seq }
+		for _, r in ipairs(refs) do request_args[#request_args + 1] = r end
+		request("resolve", request_args)
+	end)
+end
+
+-- md found the objects of a partner's order: carry it out.
+local function on_resolved()
+	local list = S.player and GetNPCBlackboard(S.player, "$x4coop_resolved")
+	if S.player then SetNPCBlackboard(S.player, "$x4coop_resolved", nil) end
+	if type(list) ~= "table" then return end
+	local O = S.orders
+	local w = O.waiting[tonumber(list[1]) or -1]
+	if not w then return end
+	O.waiting[tonumber(list[1])] = nil
+	local found = {}
+	for i = 2, #list do
+		local v = list[i]
+		if type(v) == "table" and tonumber(v[1]) and v[2] then found[tonumber(v[1])] = v[2] end
+	end
+	local ship = found[w.ship.ref]
+	local params, ok = {}, ship ~= nil
+	for k, d in pairs(w.params) do
+		local v, good = materialize(d, found)
+		ok = ok and good
+		params[k] = v
+	end
+	local args, n = {}, #w.args
+	for i, d in ipairs(w.args) do
+		local v, good = materialize(d, found)
+		ok = ok and good
+		args[i] = v
+	end
+	if not ok or not original_create_order then
+		log("partner's order %s skipped: its ship or target isn't in this world", w.order)
+		return
+	end
+	if w.clear then C.RemoveAllOrders2(to64(ship), false, false) end
+	original_create_order(to64(ship), w.order, params, unpack(args, 1, n))
+	O.applied = O.applied + 1
+	log("partner's order %s carried out here for %s", w.order, ffi.string(C.GetObjectIDCode(to64(ship)) or ""))
+end
+
+local function orders_tick(now)
+	if orders_enabled() then install_order_hook() end
+	for k, w in pairs(S.orders.waiting) do
+		if now - w.at > 10 then S.orders.waiting[k] = nil end  -- md never answered
 	end
 end
 
@@ -2691,6 +2919,7 @@ local function tick(now, dt)
 	reliable_tick(now)
 	owners_tick()
 	newships_tick()
+	orders_tick(now)
 end
 
 local function on_update()
@@ -2727,6 +2956,7 @@ local function init()
 	RegisterEvent("x4coop.owner", on_owner)
 	RegisterEvent("x4coop.ship_built", on_ship_built)
 	RegisterEvent("x4coop.newship_made", on_newship_made)
+	RegisterEvent("x4coop.resolved", on_resolved)
 	RegisterEvent("x4coop.empire_trade", on_empire_trade)
 	RegisterEvent("x4coop.npc_mirror", on_npc_mirror)
 

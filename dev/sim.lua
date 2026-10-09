@@ -47,6 +47,8 @@ local SC = {
 	                 role = "join", own_world = "abc123", partner_world = "abc123", owner_test = true },
 	newships     = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
 	                 role = "join", own_world = "abc123", partner_world = "abc123", newship_test = true },
+	orders       = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
+	                 role = "join", own_world = "abc123", partner_world = "abc123", order_test = true },
 	credits      = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
 	                 role = "join", own_world = "abc123", partner_world = "abc123", credits_test = true },
 	npc_apart_join = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
@@ -143,6 +145,14 @@ local HOST_STOCK = {  -- the host's stations; STN-9 doesn't exist in the joiner'
 	["STN-3"] = { energycells = 100, water = 2500, ice = 0 }, ["STN-4"] = {}, ["STN-5"] = { claytronics = 75 },
 	["STN-9"] = { energycells = 1 },
 }
+if sc.order_test then
+	for i = 1, 4 do  -- the empire's ships near us
+		objects[400 + i] = { sector = 500, x = 1000 + 300 * i, y = 0, z = -2000, yaw = 0, pitch = 0, roll = 0, macro = SHIP_MACRO,
+			idcode = "NPC-" .. i, playerowned = true }
+	end
+	objects[701] = { sector = 500, x = 50000, y = 0, z = 0, yaw = 0, pitch = 0, roll = 0, macro = "station_gen_factory_base_01_macro",
+		idcode = "STN-1", station = true, cargo = {} }
+end
 if sc.econ_test then
 	local mine = sc.econ_test == "host" and HOST_STOCK or {  -- the joiner's world drifted
 		["STN-1"] = { energycells = 4900, foodrations = 340 }, ["STN-2"] = { hullparts = 800, silicon = 120 },
@@ -237,6 +247,15 @@ C = {
 	GetSaveFolderPath = function() return "C:/fake/Egosoft/X4/1/save" end,
 	IsSaveListLoadingComplete = function() return true end,
 	GetNumAllFactions = function() return 4 end,
+	IsComponentClass = function(id, cls)
+		local o = objects[id]
+		if cls == "sector" then return SECTORS[id] ~= nil end
+		if cls == "station" then return o ~= nil and o.station == true end
+		if cls == "ship" then return o ~= nil and not o.station and not o.drop end
+		return false
+	end,
+	GetNumOrders = function(id) return order_counts[id] or 0 end,
+	RemoveAllOrders2 = function(id) cleared_orders[#cleared_orders + 1] = id; order_counts[id] = 0; return true end,
 	GetAllFactions = function(buf, n)
 		for i, id in ipairs({ "argon", "teladi", "player", "xenon" }) do buf[i - 1] = id end
 		return 4
@@ -277,6 +296,12 @@ function GetComponentData(id, key)
 	end
 end
 function GetNPCBlackboard(_, key) return blackboard[key] end
+created_orders, cleared_orders, order_counts, replaying = {}, {}, {}, false
+function IsValidComponent(id) return objects[id] ~= nil or SECTORS[id] ~= nil end
+function CreateOrder(ship, order, params, ...)  -- the game's; our mod wraps it
+	order_counts[ship] = (order_counts[ship] or 0) + 1
+	created_orders[#created_orders + 1] = { ship = ship, order = order, params = params, args = { ... }, replay = not sim_player_ordering }
+end
 player_money, money_requests, empire_requests, partner_gives_acked = 100000, {}, {}, {}
 HOST_RELATIONS = { argon = 0.3, teladi = -0.2, xenon = -1 }
 our_relations = sc.rel_test == "join" and { argon = 0.1, teladi = -0.2, xenon = -1 } or { argon = 0.3, teladi = -0.2, xenon = -1 }
@@ -407,6 +432,20 @@ function AddUITriggeredEvent(screen, control, args)
 		queue("x4coop.newship_made")
 	elseif control == "new_ships" then
 		-- md only remembers the switch; nothing to simulate
+	elseif control == "resolve" then
+		local out = { args[1] }
+		for i = 2, #args do
+			local ref, found = args[i], nil
+			if ref[1] == "sector" then found = sector_by_macro(ref[3])
+			else
+				for id, o in pairs(objects) do
+					if o.idcode == ref[2] and (sector_by_macro(ref[4]) == o.sector) then found = id end
+				end
+			end
+			out[#out + 1] = { i - 1, found }
+		end
+		blackboard["$x4coop_resolved"] = out
+		queue("x4coop.resolved")
 	elseif control == "owners" then
 		owner_switch[#owner_switch + 1] = tostring(args[1])
 	elseif control == "owner" then
@@ -522,6 +561,8 @@ if sc.pipes then
 					partner_queue[#partner_queue + 1] = { at = clock + 2 * ONE_WAY, msg = reply }
 				elseif f[1] == "M" then
 					partner_queue[#partner_queue + 1] = { at = clock + 2 * ONE_WAY, msg = "M|Echo|you said: " .. tostring(f[3]) }
+				elseif f[1] == "G" and f[2] == "msg" then
+					partner_queue[#partner_queue + 1] = { at = clock + 2 * ONE_WAY, msg = "G|ack|" .. f[3] }
 				elseif f[1] == "Y" and f[2] == "msg" then
 					newship_first_sent = newship_first_sent or msg
 					partner_queue[#partner_queue + 1] = { at = clock + 2 * ONE_WAY, msg = "Y|ack|" .. f[3] }
@@ -742,6 +783,37 @@ local function newship_script()
 	while newship_steps[1] and clock >= newship_steps[1][1] do table.remove(newship_steps, 1)[2]() end
 end
 
+local order_steps = {
+	{ 10, function()  -- the player orders NPC-1 to fly somewhere (its queue held only this order afterwards)
+		sim_player_ordering = true
+		order_counts[401] = 0
+		CreateOrder(401, "MoveWait", { destination = { 500, { 100, 0, 200 } } }, false, false, false, nil, nil, nil, true)
+		sim_player_ordering = false
+	end },
+	{ 12, function()  -- ... NPC-2 to attack NPC-3, after other orders
+		sim_player_ordering = true
+		order_counts[402] = 2
+		CreateOrder(402, "Attack", { destination = 403 }, false, false, false)
+		sim_player_ordering = false
+	end },
+	{ 13, function()  -- ... NPC-4 to collect a drop: the partner's world can't name it
+		sim_player_ordering = true
+		objects[650] = { sector = 500, x = 0, y = 0, z = 0, yaw = 0, pitch = 0, roll = 0, macro = "drop_macro", drop = true }
+		CreateOrder(404, "Collect", { destination = 650 }, false, false, false)
+		sim_player_ordering = false
+	end },
+	{ 15, function()  -- the partner orders NPC-1 to dock at STN-1, replacing its queue
+		pipe_reader("G|msg|00c1|oship~NPC-1~" .. SHIP_MACRO .. "~" .. SECTORS[500] .. "|DockAndWait|1|b0;b0;b0;z;z;z;b1|destination=ostation~STN-1~station_gen_factory_base_01_macro~" .. SECTORS[500])
+	end },
+	{ 17, function()  -- sent again: carried out once
+		pipe_reader("G|msg|00c1|oship~NPC-1~" .. SHIP_MACRO .. "~" .. SECTORS[500] .. "|DockAndWait|1|b0;b0;b0;z;z;z;b1|destination=ostation~STN-1~station_gen_factory_base_01_macro~" .. SECTORS[500])
+	end },
+}
+local function order_script()
+	if not sc.order_test or not pipe_reader then return end
+	while order_steps[1] and clock >= order_steps[1][1] do table.remove(order_steps, 1)[2]() end
+end
+
 local function credit_script()
 	if not sc.credits_test or not pipe_reader then return end
 	while credit_steps[1] and clock >= credit_steps[1][1] do
@@ -869,6 +941,7 @@ while clock < sc.duration do
 	warp_script()
 	owner_script()
 	newship_script()
+	order_script()
 	if sc.partner_restart_at and clock >= sc.partner_restart_at and partner_clock_offset == 1000 then
 		partner_clock_offset = -500
 		say("t=%.1f partner restarted their game (clock jumped back)", clock)
@@ -1363,6 +1436,21 @@ if sc.newship_test then
 		and acks == 2 and tostring(blackboard["$x4coop_alias"]):find("THR-9=" .. made, 1, true) ~= nil
 		and kills:find("world_kill:" .. made .. ",", 1, true) ~= nil
 		and sent:find("D|THR-9|", 1, true) ~= nil and sent:find("D|" .. made .. "|", 1, true) == nil
+end
+if sc.order_test then
+	local sent = {}
+	for _, w in ipairs(pipe_writes) do if w:sub(1, 6) == "G|msg|" then sent[#sent + 1] = w end end
+	local replays = {}
+	for _, c in ipairs(created_orders) do if c.replay then replays[#replays + 1] = c end end
+	local r = replays[1]
+	say("orders: shared %d: %s / %s; carried out from the partner: %d (%s for %s, destination %s); queue cleared %d time(s)",
+		#sent, (sent[1] or ""):sub(1, 140), (sent[2] or ""):sub(1, 140), #replays, r and r.order or "-", r and tostring(r.ship) or "-",
+		r and tostring(r.params.destination) or "-", #cleared_orders)
+	ok = ok and #sent == 2
+		and sent[1]:find("|oship~NPC-1~" .. SHIP_MACRO .. "~" .. SECTORS[500] .. "|MoveWait|1|b0;b0;b0;z;z;z;b1;z;z;z|destination=p" .. SECTORS[500] .. "~100.00~0.00~200.00", 1, true) ~= nil
+		and sent[2]:find("|Attack|0|", 1, true) ~= nil and sent[2]:find("destination=oship~NPC-3~", 1, true) ~= nil
+		and #replays == 1 and r.order == "DockAndWait" and r.ship == 401 and r.params.destination == 701 and r.args[7] == true
+		and #cleared_orders == 1 and cleared_orders[1] == 401
 end
 if sc.credits_test then
 	local acks = 0
