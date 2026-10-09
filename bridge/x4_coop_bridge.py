@@ -53,7 +53,7 @@ STATS_EVERY_S = 30.0
 MAX_PACKETS_PER_S = 200  # a partner sends ~22/s; anything far above that is dropped
 TRACE_HEX_BYTES = 64     # telemetry: bytes of each datagram shown in hex (--trace-bytes; 0 = all)
 TRACE_DROPS_PER_S = 10   # telemetry: rejected/ignored/flooded datagrams recorded per second at most
-FROM_PARTNER = set("SPQMLKDFBECTVUZOYG")  # message kinds a partner may send; R, W and N only come from this bridge
+FROM_PARTNER = set("SPQMLKDFBECTVUZOYGJ")  # message kinds a partner may send; R, W and N only come from this bridge
 
 # Win32 named pipe API through ctypes, mirroring the parameters SirNukes' own server uses.
 PIPE_ACCESS_DUPLEX = 0x3
@@ -222,7 +222,7 @@ GAME_FIELDS = {  # field names of the game's messages (see ui/x4_coop.lua), for 
     "D": "code macro sector hull enemy", "K": "code macro sector", "F": "code macro sector",
     "L": "world role ship protocol", "M": "name text", "P": "t", "Q": "t", "R": "role",
     "B": "t sector radius complete ships", "H": "host pid os t echo hold",
-    "E": "what pass index count station wares trades", "C": "what id amount name", "T": "what id station ware change", "V": "what relations ids", "U": "what id kind item extra", "Z": "what active factor note", "O": "what id code macro sector owner", "Y": "what id code macro sector shipyard name wares", "G": "what id ship order clear args params",
+    "E": "what pass index count station wares trades", "C": "what id amount name", "T": "what id station ware change", "V": "what relations ids", "U": "what id kind item extra", "Z": "what active factor note", "O": "what id code macro sector owner", "Y": "what id code macro sector shipyard name wares", "G": "what id ship order clear args params", "J": "what id ship default queue",
 }
 
 

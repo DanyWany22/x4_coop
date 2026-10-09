@@ -49,6 +49,8 @@ local SC = {
 	                 role = "join", own_world = "abc123", partner_world = "abc123", newship_test = true },
 	orders       = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
 	                 role = "join", own_world = "abc123", partner_world = "abc123", order_test = true },
+	behaviour    = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
+	                 role = "join", own_world = "abc123", partner_world = "abc123", behaviour_test = true },
 	credits      = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
 	                 role = "join", own_world = "abc123", partner_world = "abc123", credits_test = true },
 	npc_apart_join = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
@@ -145,6 +147,14 @@ local HOST_STOCK = {  -- the host's stations; STN-9 doesn't exist in the joiner'
 	["STN-3"] = { energycells = 100, water = 2500, ice = 0 }, ["STN-4"] = {}, ["STN-5"] = { claytronics = 75 },
 	["STN-9"] = { energycells = 1 },
 }
+if sc.behaviour_test then
+	for i = 1, 4 do  -- the empire's ships near us
+		objects[400 + i] = { sector = 500, x = 1000 + 300 * i, y = 0, z = -2000, yaw = 0, pitch = 0, roll = 0, macro = SHIP_MACRO,
+			idcode = "NPC-" .. i, playerowned = true }
+	end
+	objects[701] = { sector = 500, x = 50000, y = 0, z = 0, yaw = 0, pitch = 0, roll = 0, macro = "station_gen_factory_base_01_macro",
+		idcode = "STN-1", station = true, cargo = {} }
+end
 if sc.order_test then
 	for i = 1, 4 do  -- the empire's ships near us
 		objects[400 + i] = { sector = 500, x = 1000 + 300 * i, y = 0, z = -2000, yaw = 0, pitch = 0, roll = 0, macro = SHIP_MACRO,
@@ -247,6 +257,19 @@ C = {
 	GetSaveFolderPath = function() return "C:/fake/Egosoft/X4/1/save" end,
 	IsSaveListLoadingComplete = function() return true end,
 	GetNumAllFactions = function() return 4 end,
+	GetDefaultOrder = function(buf, ship)
+		local d = (order_book[ship] or {}).default
+		if not d then return false end
+		buf.orderdef = d.def
+		return true
+	end,
+	GetOrders = function(buf, n, ship)
+		local q = (order_book[ship] or {}).queue or {}
+		for i, o in ipairs(q) do buf[i - 1] = { orderdef = o.def, istemporder = o.temp == true } end
+		return #q
+	end,
+	EnableOrder = function(ship, idx) behaviour_calls[#behaviour_calls + 1] = "enable:" .. ship .. ":" .. idx; return true end,
+	EnablePlannedDefaultOrder = function(ship) behaviour_calls[#behaviour_calls + 1] = "enabledefault:" .. ship; return true end,
 	IsComponentClass = function(id, cls)
 		local o = objects[id]
 		if cls == "sector" then return SECTORS[id] ~= nil end
@@ -254,8 +277,13 @@ C = {
 		if cls == "ship" then return o ~= nil and not o.station and not o.drop end
 		return false
 	end,
-	GetNumOrders = function(id) return order_counts[id] or 0 end,
+	GetNumOrders = function(id) return order_counts[id] or #(((order_book or {})[id] or {}).queue or {}) end,
 	RemoveAllOrders2 = function(id) cleared_orders[#cleared_orders + 1] = id; order_counts[id] = 0; return true end,
+	CreateOrder = function(ship, def, default)
+		behaviour_calls[#behaviour_calls + 1] = (default and "createdefault:" or "create:") .. ship .. ":" .. def
+		order_counts[ship] = (order_counts[ship] or 0) + 1
+		return order_counts[ship]
+	end,
 	GetAllFactions = function(buf, n)
 		for i, id in ipairs({ "argon", "teladi", "player", "xenon" }) do buf[i - 1] = id end
 		return 4
@@ -296,6 +324,27 @@ function GetComponentData(id, key)
 	end
 end
 function GetNPCBlackboard(_, key) return blackboard[key] end
+-- orders as the game keeps them: per ship a default order and a queue, each { def, params = { {name, type, value} } }
+order_book = {
+	[401] = { default = { def = "TradeRoutine", params = {
+			{ name = "warebasket", type = "list", value = { "energycells", "water" } },
+			{ name = "range", type = "number", value = 3 },
+			{ name = "internalstate", type = "internal", value = 5 } } },
+		queue = { { def = "MoveWait", params = { { name = "destination", type = "position", value = { 500, { 10, 0, 20 } } } } },
+			{ def = "TradePerform", temp = true, params = {} } } },
+	[402] = { queue = { { def = "Attack", params = { { name = "destination", type = "object", value = 403 } } } } },
+}
+behaviour_calls, set_param_calls = {}, {}
+function GetOrderParams(ship, which)
+	local book = order_book[ship] or {}
+	local order = which == "default" and book.default or (book.queue or {})[which]
+	return order and order.params or {}
+end
+function SetOrderParam(ship, order, param, index, value)
+	set_param_calls[#set_param_calls + 1] = string.format("%s:%s:%s:%s", tostring(ship), tostring(order), tostring(param), tostring(value))
+end
+Menus = { { name = "MapMenu", infoSubmenuObject = 0,
+	buttonDefaultOrderConfirm = function() behaviour_calls[#behaviour_calls + 1] = "confirm" end } }
 created_orders, cleared_orders, order_counts, replaying = {}, {}, {}, false
 function IsValidComponent(id) return objects[id] ~= nil or SECTORS[id] ~= nil end
 function CreateOrder(ship, order, params, ...)  -- the game's; our mod wraps it
@@ -561,6 +610,8 @@ if sc.pipes then
 					partner_queue[#partner_queue + 1] = { at = clock + 2 * ONE_WAY, msg = reply }
 				elseif f[1] == "M" then
 					partner_queue[#partner_queue + 1] = { at = clock + 2 * ONE_WAY, msg = "M|Echo|you said: " .. tostring(f[3]) }
+				elseif f[1] == "J" and f[2] == "msg" then
+					partner_queue[#partner_queue + 1] = { at = clock + 2 * ONE_WAY, msg = "J|ack|" .. f[3] }
 				elseif f[1] == "G" and f[2] == "msg" then
 					partner_queue[#partner_queue + 1] = { at = clock + 2 * ONE_WAY, msg = "G|ack|" .. f[3] }
 				elseif f[1] == "Y" and f[2] == "msg" then
@@ -814,6 +865,27 @@ local function order_script()
 	while order_steps[1] and clock >= order_steps[1][1] do table.remove(order_steps, 1)[2]() end
 end
 
+local behaviour_steps = {
+	{ 10, function()  -- the player confirms NPC-1's behaviour in the map's panel
+		Menus[1].infoSubmenuObject = 401
+		Menus[1].buttonDefaultOrderConfirm(1)
+	end },
+	{ 10.5, function() Menus[1].buttonDefaultOrderConfirm(1) end },   -- and again: still one snapshot, after the last edit
+	{ 13, function() SetOrderParam(402, 1, 1, nil, 403) end },       -- edits a parameter of NPC-2's queued order
+	{ 17, function()  -- the partner set up NPC-3: patrol by default, then dock at STN-1
+		pipe_reader("J|msg|00d1|oship~NPC-3~" .. SHIP_MACRO .. "~" .. SECTORS[500] .. "|Patrol:1=osector~-~" .. SECTORS[500] .. "~"
+			.. SECTORS[500] .. ";2=n5000|DockAndWait:1=ostation~STN-1~station_gen_factory_base_01_macro~" .. SECTORS[500])
+	end },
+	{ 19, function()  -- sent again: rebuilt once
+		pipe_reader("J|msg|00d1|oship~NPC-3~" .. SHIP_MACRO .. "~" .. SECTORS[500] .. "|Patrol:1=osector~-~" .. SECTORS[500] .. "~"
+			.. SECTORS[500] .. ";2=n5000|DockAndWait:1=ostation~STN-1~station_gen_factory_base_01_macro~" .. SECTORS[500])
+	end },
+}
+local function behaviour_script()
+	if not sc.behaviour_test or not pipe_reader then return end
+	while behaviour_steps[1] and clock >= behaviour_steps[1][1] do table.remove(behaviour_steps, 1)[2]() end
+end
+
 local function credit_script()
 	if not sc.credits_test or not pipe_reader then return end
 	while credit_steps[1] and clock >= credit_steps[1][1] do
@@ -942,6 +1014,7 @@ while clock < sc.duration do
 	owner_script()
 	newship_script()
 	order_script()
+	behaviour_script()
 	if sc.partner_restart_at and clock >= sc.partner_restart_at and partner_clock_offset == 1000 then
 		partner_clock_offset = -500
 		say("t=%.1f partner restarted their game (clock jumped back)", clock)
@@ -1451,6 +1524,24 @@ if sc.order_test then
 		and sent[2]:find("|Attack|0|", 1, true) ~= nil and sent[2]:find("destination=oship~NPC-3~", 1, true) ~= nil
 		and #replays == 1 and r.order == "DockAndWait" and r.ship == 401 and r.params.destination == 701 and r.args[7] == true
 		and #cleared_orders == 1 and cleared_orders[1] == 401
+end
+if sc.behaviour_test then
+	local sent = {}
+	for _, w in ipairs(pipe_writes) do if w:sub(1, 6) == "J|msg|" then sent[#sent + 1] = w end end
+	local calls = table.concat(behaviour_calls, " ")
+	local sets = table.concat(set_param_calls, " ")
+	say("behaviour: shared %d: %s / %s", #sent, (sent[1] or ""):sub(1, 200), (sent[2] or ""):sub(1, 120))
+	say("behaviour: rebuilt from the partner: %s; params set: %s", calls, sets)
+	ok = ok and #sent == 2
+		and sent[1]:find("|oship~NPC-1~" .. SHIP_MACRO .. "~" .. SECTORS[500] .. "|TradeRoutine:1=L[senergycells,swater];2=n3|MoveWait:1=p" .. SECTORS[500] .. "~10.00~0.00~20.00", 1, true) ~= nil
+		and sent[1]:find("TradePerform", 1, true) == nil and sent[1]:find("internalstate", 1, true) == nil
+		and sent[2]:find("|oship~NPC-2~", 1, true) ~= nil and sent[2]:find("|-|Attack:1=oship~NPC-3~", 1, true) ~= nil
+		and calls:find("createdefault:403:Patrol", 1, true) ~= nil and calls:find("enabledefault:403", 1, true) ~= nil
+		and calls:find("create:403:DockAndWait", 1, true) ~= nil and calls:find("enable:403:", 1, true) ~= nil
+		and select(2, calls:gsub("enabledefault:403", "")) == 1          -- sent twice, rebuilt once
+		and sets:find("403:planneddefault:1:500", 1, true) ~= nil and sets:find("403:planneddefault:2:5000", 1, true) ~= nil
+		and sets:find(":1:701", 1, true) ~= nil
+		and #cleared_orders >= 1
 end
 if sc.credits_test then
 	local acks = 0

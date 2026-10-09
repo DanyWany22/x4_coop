@@ -106,6 +106,7 @@ local config = {
 	owners = 1,               -- shared world: ships claimed, boarded or captured change owner in both worlds
 	new_ships = 1,            -- shared world: ships either player buys appear in both worlds
 	orders = 1,               -- shared world: orders given to empire ships are carried out in both worlds
+	behaviours = 1,           -- shared world: default behaviours and order queues edited in the map, in both worlds
 	ghost_latency = 0.12,     -- s, simulated one-way latency in ghost mode
 	ghost_jitter = 0.03,      -- s, extra random delay per snapshot
 	ghost_loss = 0.0,         -- 0..1, fraction of snapshots dropped
@@ -354,6 +355,7 @@ local function reset()
 		owners_on = false,
 		newships_on = false,
 		orders = { seq = 0, waiting = {}, applied = 0 },
+		behave = { dirty = {}, map_hooked = false, sent = 0, rebuilt = 0 },
 		alias = { loaded = false, into = {}, out = {} },
 		net = { api = nil, status = "idle", reading = false, connected = false, retry_at = 0, last_ping = -1e9, rtt = nil,
 			partner = kept_partner },
@@ -715,6 +717,7 @@ local warp_receive      -- the partner's SETA (Z), defined with the credits
 local owners_receive    -- ownership changes (O), defined with the credits
 local newships_receive  -- the partner's new ships (Y), defined with the credits
 local orders_receive    -- orders given to empire ships (G), defined with the credits
+local behaviours_receive -- default behaviours and order queues (J), defined with the credits
 local send_link
 
 local function net_send(msg)
@@ -810,6 +813,8 @@ on_pipe_message = function(msg)
 		if config.mode == "net" then newships_receive(f, now) end
 	elseif kind == "G" then
 		if config.mode == "net" then orders_receive(f, now) end
+	elseif kind == "J" then
+		if config.mode == "net" then behaviours_receive(f, now) end
 	elseif kind == "M" then
 		local text = clean_text(f[3], 200)
 		if text ~= "" then
@@ -2288,7 +2293,8 @@ end
 
 -------------------------------------------------------------------------------
 -- Reliable one-off messages: "<kind>|msg|id|fields..." is sent every TRADE_RETRY seconds until the partner
--- answers "<kind>|ack|id"; the receiver handles each id once. Used for ownership (O), new ships (Y) and orders (G).
+-- answers "<kind>|ack|id"; the receiver handles each id once. Used for ownership (O), new ships (Y), orders (G) and
+-- behaviours (J).
 
 local function reliable_send(kind, fields)
 	local Q = S.reliable
@@ -2609,6 +2615,220 @@ orders_receive = function(f, now)
 	end)
 end
 
+-------------------------------------------------------------------------------
+-- Behaviours and order queues (shared faction). Orders edited in the map (the behaviour panel's default orders,
+-- the order queue: new, reorder, remove, parameters, trade loops, formation...) are set up with C functions we
+-- can't see, so instead: when the player touches a ship's orders (the map menu's order functions, or the
+-- global SetOrderParam), we wait until they stop, then send that ship's whole setup: its default behaviour and
+-- its queue, each order with its parameters ("J|msg|id|ship|default|queue"; temporary orders the AI made itself
+-- and internal parameters left out). The partner's game finds the same objects (md OnResolve) and rebuilds its
+-- copy's default behaviour and queue with the original functions, so nothing comes back.
+
+local BEHAVIOUR_QUIET = 1.5       -- s after the player's last edit of a ship's orders before it is sent
+local MAP_ORDER_FUNCTIONS = {     -- the map menu's functions that change the orders of the ship whose panel is open
+	"buttonNewOrder", "buttonOrderUp", "buttonOrderDown", "buttonRemoveOrder", "buttonStartOrders", "buttonDeleteAllOrders",
+	"buttonDefaultOrderConfirm", "buttonSetOrderParam", "buttonConfirmTradeLoop", "buttonRemoveOrderSyncPoint",
+	"buttonRemoveAssignment", "buttonConfirmPlannedDefaultOrderActive", "buttonExtendOrder", "removeOrder",
+	"removeExtendedOrder", "setOrderParamFromMode", "dropdownChangeOverrideOrder", "dropdownBehaviourFormation",
+}
+
+local behaviour_ffi        -- true once the order structs and functions are declared here
+local original_set_order_param
+
+local function behaviours_enabled()
+	return config.mode == "net" and S.link.linked and config.behaviours == 1
+end
+
+local function declare_order_ffi()
+	if behaviour_ffi == nil then
+		behaviour_ffi = pcall(ffi.cdef, [[
+			typedef struct {
+				size_t queueidx;
+				const char* state;
+				const char* statename;
+				const char* orderdef;
+				size_t actualparams;
+				bool enabled;
+				bool isinfinite;
+				bool issyncpointreached;
+				bool istemporder;
+			} Order;
+			bool GetDefaultOrder(Order* result, UniverseID controllableid);
+			uint32_t GetOrders(Order* result, uint32_t resultlen, UniverseID controllableid);
+			uint32_t CreateOrder(UniverseID controllableid, const char* orderid, bool default);
+			bool EnableOrder(UniverseID controllableid, size_t idx);
+			bool EnablePlannedDefaultOrder(UniverseID controllableid, bool checkonly);
+		]]) and pcall(function() assert(C.GetDefaultOrder and C.GetOrders and C.EnablePlannedDefaultOrder) end)
+	end
+	return behaviour_ffi
+end
+
+local function mark_orders_edited(ship)
+	if not behaviours_enabled() or ship == nil then return end
+	local id = to64(ship)
+	if id == 0 or id == S.proxy.id or not GetComponentData(id, "isplayerowned") or not C.IsComponentClass(id, "ship") then return end
+	S.behave.dirty[tostring(id)] = { id = id, at = getElapsedTime() }
+end
+
+local function install_behaviour_hooks()
+	if not original_set_order_param and type(SetOrderParam) == "function" then
+		original_set_order_param = SetOrderParam
+		SetOrderParam = function(object, ...)
+			local results = { original_set_order_param(object, ...) }
+			pcall(mark_orders_edited, object)
+			return unpack(results)
+		end
+	end
+	if not S.behave.map_hooked and type(Menus) == "table" then
+		for _, menu in ipairs(Menus) do
+			if type(menu) == "table" and menu.name == "MapMenu" then
+				for _, name in ipairs(MAP_ORDER_FUNCTIONS) do
+					local original = menu[name]
+					if type(original) == "function" then
+						menu[name] = function(...)
+							local results = { original(...) }
+							pcall(mark_orders_edited, menu.infoSubmenuObject)
+							return unpack(results)
+						end
+					end
+				end
+				S.behave.map_hooked = true
+			end
+		end
+	end
+end
+
+-- An order's parameters as "index=atom;...", leaving out internal ones; nil if one can't be named elsewhere.
+local function encode_order_params(params)
+	local out = {}
+	for i, p in ipairs(type(params) == "table" and params or {}) do
+		if type(p) == "table" and p.type ~= "internal" and p.value ~= nil then
+			local a = encode_atom(p.value)
+			if not a then return nil end
+			out[#out + 1] = i .. "=" .. a
+		end
+	end
+	return table.concat(out, ";")
+end
+
+local function behaviour_snapshot(id)
+	local default = "-"
+	local buf = ffi.new("Order")
+	if C.GetDefaultOrder(buf, id) and buf.orderdef ~= nil then
+		local params = encode_order_params(GetOrderParams(id, "default"))
+		if params then default = ffi.string(buf.orderdef) .. ":" .. params end
+	end
+	local queue = {}
+	local n = C.GetNumOrders(id)
+	if n > 0 then
+		local orders = ffi.new("Order[?]", n)
+		n = C.GetOrders(orders, n, id)
+		for i = 0, n - 1 do
+			local o = orders[i]
+			if not o.istemporder and o.orderdef ~= nil then
+				local params = encode_order_params(GetOrderParams(id, i + 1))
+				if params then queue[#queue + 1] = ffi.string(o.orderdef) .. ":" .. params end
+			end
+		end
+	end
+	return default, table.concat(queue, "/")
+end
+
+local function behaviours_tick(now)
+	if not behaviours_enabled() then return end
+	if declare_order_ffi() then install_behaviour_hooks() end
+	for key, d in pairs(S.behave.dirty) do
+		if now - d.at >= BEHAVIOUR_QUIET then
+			S.behave.dirty[key] = nil
+			local ship = encode_atom(ConvertStringToLuaID(tostring(d.id)))
+			if behaviour_ffi and ship and ship:sub(1, 5) == "oship" and C.IsComponentOperational(d.id) then
+				local default, queue = behaviour_snapshot(d.id)
+				reliable_send("J", { ship, default, queue })
+				S.behave.sent = S.behave.sent + 1
+			end
+		end
+	end
+end
+
+-- "def:i=atom;..." -> { def = ..., params = { [i] = decoded } }; refs collects what md must find
+local function decode_order(text, refs)
+	local def, rest = text:match("^([%w_]+):(.*)$")
+	if not def then return nil end
+	local params = {}
+	for kv in rest:gmatch("[^;]+") do
+		local i, a = kv:match("^(%d+)=(.+)$")
+		local d = i and decode_atom(a, refs)
+		if not d then return nil end
+		params[tonumber(i)] = d
+	end
+	return { def = def, params = params }
+end
+
+behaviours_receive = function(f, now)
+	if not behaviours_enabled() then return end
+	reliable_receive("J", f, now, function(m)
+		local refs = {}
+		local ship = decode_atom(m[4] or "", refs)
+		if not (ship and ship.ref and refs[ship.ref][1] == "ship") then return end
+		local default = (m[5] and m[5] ~= "-") and decode_order(m[5], refs) or nil
+		if m[5] and m[5] ~= "-" and not default then return end
+		local queue = {}
+		for text in (m[6] or ""):gmatch("[^/]+") do
+			local o = decode_order(text, refs)
+			if not o then return end
+			queue[#queue + 1] = o
+		end
+		local O = S.orders
+		O.seq = O.seq + 1
+		O.waiting[O.seq] = { kind = "behaviour", ship = ship, default = default, queue = queue, at = now }
+		local request_args = { O.seq }
+		for _, r in ipairs(refs) do request_args[#request_args + 1] = r end
+		request("resolve", request_args)
+	end)
+end
+
+-- md found the objects of a partner's behaviour/queue: rebuild ours the same.
+local function rebuild_behaviour(w, found)
+	local ship = found[w.ship.ref]
+	if not ship or not declare_order_ffi() then
+		log("partner's orders for a ship skipped: the ship isn't in this world")
+		return
+	end
+	local id = to64(ship)
+	local set = original_set_order_param or SetOrderParam
+	local function params_of(order)
+		local out = {}
+		for i, d in pairs(order.params) do
+			local v, ok = materialize(d, found)
+			if not ok then return nil end
+			out[i] = v
+		end
+		return out
+	end
+	if w.default then
+		local params = params_of(w.default)
+		if params then
+			C.CreateOrder(id, w.default.def, true)
+			for i, v in pairs(params) do set(id, "planneddefault", i, nil, v) end
+			C.EnablePlannedDefaultOrder(id, false)
+		end
+	end
+	C.RemoveAllOrders2(id, false, false)
+	for _, order in ipairs(w.queue) do
+		local params = params_of(order)
+		if params then
+			local idx = C.CreateOrder(id, order.def, false)
+			if idx and idx > 0 then
+				for i, v in pairs(params) do set(id, idx, i, nil, v) end
+				C.EnableOrder(id, idx)
+			end
+		end
+	end
+	S.behave.rebuilt = S.behave.rebuilt + 1
+	log("partner's orders for %s set up here: %s, %d in the queue", ffi.string(C.GetObjectIDCode(id) or ""),
+		w.default and w.default.def or "default unchanged", #w.queue)
+end
+
 -- md found the objects of a partner's order: carry it out.
 local function on_resolved()
 	local list = S.player and GetNPCBlackboard(S.player, "$x4coop_resolved")
@@ -2622,6 +2842,10 @@ local function on_resolved()
 	for i = 2, #list do
 		local v = list[i]
 		if type(v) == "table" and tonumber(v[1]) and v[2] then found[tonumber(v[1])] = v[2] end
+	end
+	if w.kind == "behaviour" then
+		rebuild_behaviour(w, found)
+		return
 	end
 	local ship = found[w.ship.ref]
 	local params, ok = {}, ship ~= nil
@@ -2920,6 +3144,7 @@ local function tick(now, dt)
 	owners_tick()
 	newships_tick()
 	orders_tick(now)
+	behaviours_tick(now)
 end
 
 local function on_update()

@@ -65,16 +65,17 @@ X4 (ui/x4_coop.lua) <-> named pipe <-> bridge (Python: UDP/TCP sockets) <-> netw
 ### Native code and memory addresses
 
 The mod has **no DLLs, no native hooks, no injection, and reads or writes no memory addresses**. In
-Lua it wraps one of the UI's own script functions, `CreateOrder`, the one the menus use to give a ship
-an order, so it can share orders the player gives (see Orders). That is ordinary UI scripting: a Lua
-function replaced by one that calls the original.
+Lua it wraps some of the UI's own script functions, so it can share the orders the player gives: the
+global `CreateOrder` and `SetOrderParam`, and the map menu's order-editing functions (for example
+`buttonDefaultOrderConfirm`). See Orders and Behaviours. That is ordinary UI scripting: each Lua function
+is replaced by one that calls the original and then notes which ship's orders changed.
 [`demo/x4_memory_demo.py`](demo/x4_memory_demo.py) is a separate tool that shows reading and
 writing X4's memory is possible, on your credits; the mod never loads or calls it. The
 [Memory demo](#memory-demo-not-part-of-the-mod) section also explains why the mod doesn't need
 memory writes. The Lua calls functions by name through FFI:
 
 * **6 Windows functions** for the pipe (listed above).
-* **20 game functions.** Egosoft's own UI scripts call every one of them; one example file each, from
+* **25 game functions.** Egosoft's own UI scripts call every one of them; one example file each, from
   the game's archives:
 
 | function | used by vanilla, e.g. |
@@ -91,7 +92,8 @@ memory writes. The Lua calls functions by name through FFI:
 | `GetNumAllFactions`, `GetAllFactions` | `ui/addons/ego_detailmonitor/menu_mapeditor.lua` |
 | `IsComponentClass` | `ui/addons/ego_detailmonitor/menu_diplomacy.lua` |
 | `GetNumOrders` | `ui/addons/ego_detailmonitor/menu_docked.lua` |
-| `RemoveAllOrders2` | `ui/addons/ego_detailmonitor/menu_map.lua` |
+| `RemoveAllOrders2`, `CreateOrder`, `EnableOrder`, `EnablePlannedDefaultOrder` | `ui/addons/ego_detailmonitor/menu_map.lua` |
+| `GetDefaultOrder`, `GetOrders` | `ui/addons/ego_detailmonitor/menu_docked.lua` |
 
 Everything else, such as spawning ships, damage, kills and weapons, is ordinary Mission Director
 and AI script. The tests validate those files against the game's own XSD schemas.
@@ -241,8 +243,13 @@ builds don't copy across yet.
 (fly to, attack, dock, follow, protect, mine, explore, collect, salvage, withdraw and the rest) is
 carried out in the other world too. If it replaced the ship's whole queue there, it does here as well.
 Orders that name something the other world can't find, such as a drop, a lockbox or a gate, stay on
-your side; the log says so. Orders built step by step in the ship's behaviour panel aren't shared yet.
-`/x4coop set orders 0` turns it off.
+your side; the log says so. `/x4coop set orders 0` turns it off.
+
+**Behaviours and order queues:** when you change a ship's default behaviour in the map (trade, mine,
+patrol, protect and so on) or edit its order queue (add, reorder, remove, change a parameter, trade
+loops, formation), its whole set-up is sent once you stop for a moment: the default behaviour and the
+queue, with every parameter. The other game sets up its copy the same way. Temporary orders the AI makes
+for itself are left out. `/x4coop set behaviours 0` turns it off.
 
 **Ships changing owner:** a ship that one of you claims, boards or captures becomes the player's in the
 other world too (and one the player loses is lost in both). `/x4coop set owners 0` turns it off.
@@ -366,6 +373,7 @@ change a value that already exists; it can't create anything.
 | inventory items | `add_inventory` | not yet |
 | ownership (claims, boarding, captures) | `set_owner` | yes |
 | orders given from the menus | the UI's own `CreateOrder` (Lua) | yes |
+| default behaviours, order queues | `GetDefaultOrder`, `GetOrders`, `SetOrderParam`, `EnablePlannedDefaultOrder` | yes |
 | missions | `create_mission` | not yet |
 
 All of these, except `SetObjectSectorPos`, `CreateOrder` and `shoot_at`, are Mission Director commands from the
@@ -425,7 +433,7 @@ game's own schema (`libraries/md.xsd`, `libraries/common.xsd`).
 
 Messages (one text line each): `S` snapshot (position, rotation, velocity, ship, hull, shield),
 `P`/`Q` ping, `M` chat, `L` world link, `K` kill, `D` hit, `F` firing at, `B` nearby ships (both
-ways), `E` station stock (host to joiner), `T` a joiner's trade, `V` relations, `U` research/blueprints/licences, `Z` SETA, `O` ownership, `Y` new ships, `G` orders, `C` credits given; `R`/`W`/`N`/`X` are between a game and
+ways), `E` station stock (host to joiner), `T` a joiner's trade, `V` relations, `U` research/blueprints/licences, `Z` SETA, `O` ownership, `Y` new ships, `G` orders, `J` behaviours and queues, `C` credits given; `R`/`W`/`N`/`X` are between a game and
 its own bridge.
 
 Self-calibration: on first contact the proxy is nudged and read back (does `SetObjectSectorPos`
@@ -465,7 +473,8 @@ python extensions/x4_coop/dev/run_tests.py [--quick]
   (followed; turned off for both when one side can't follow), ownership changes both ways (sent
   until confirmed, applied once), new ships both ways (made once, paired, kills and hits on them
   translated both ways), orders both ways (encoded, shared once, objects found again, queue cleared
-  when it was; ones naming a drop stay local),
+  when it was; ones naming a drop stay local), behaviours and queues (one snapshot after the
+  player's last edit, without the AI's temporary orders; rebuilt once on the other side),
   hostile messages, guest ship, save handoff commands. Errors are measured against ground truth:
   the partner within ~2–3 m and ~2° (95th percentile) at 220–300 m/s; NPC copies within ~3.5 m.
 * Bridge: password codec (encryption, replay, tamper, stale, other versions), reconnects, chat, wrong password, partner
