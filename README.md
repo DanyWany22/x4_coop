@@ -64,14 +64,17 @@ X4 (ui/x4_coop.lua) <-> named pipe <-> bridge (Python: UDP/TCP sockets) <-> netw
 
 ### Native code and memory addresses
 
-The mod has **no DLLs, no hooks, no injection, and reads or writes no memory addresses**.
+The mod has **no DLLs, no native hooks, no injection, and reads or writes no memory addresses**. In
+Lua it wraps one of the UI's own script functions, `CreateOrder`, the one the menus use to give a ship
+an order, so it can share orders the player gives (see Orders). That is ordinary UI scripting: a Lua
+function replaced by one that calls the original.
 [`demo/x4_memory_demo.py`](demo/x4_memory_demo.py) is a separate tool that shows reading and
 writing X4's memory is possible, on your credits; the mod never loads or calls it. The
 [Memory demo](#memory-demo-not-part-of-the-mod) section also explains why the mod doesn't need
 memory writes. The Lua calls functions by name through FFI:
 
 * **6 Windows functions** for the pipe (listed above).
-* **15 game functions.** Egosoft's own UI scripts call every one of them; one example file each, from
+* **20 game functions.** Egosoft's own UI scripts call every one of them; one example file each, from
   the game's archives:
 
 | function | used by vanilla, e.g. |
@@ -85,6 +88,10 @@ memory writes. The Lua calls functions by name through FFI:
 | `IsComponentOperational`, `CanTeleportPlayerTo`, `TeleportPlayerTo`, `IsSaveListLoadingComplete` | `ui/addons/ego_detailmonitor/menu_map.lua` |
 | `IsGamePaused` | `ui/addons/ego_helptext/helptext.lua` |
 | `GetSaveFolderPath`, `IsSaveValid`, `ReloadSaveList` | `ui/addons/ego_gameoptions/gameoptions.lua` |
+| `GetNumAllFactions`, `GetAllFactions` | `ui/addons/ego_detailmonitor/menu_mapeditor.lua` |
+| `IsComponentClass` | `ui/addons/ego_detailmonitor/menu_diplomacy.lua` |
+| `GetNumOrders` | `ui/addons/ego_detailmonitor/menu_docked.lua` |
+| `RemoveAllOrders2` | `ui/addons/ego_detailmonitor/menu_map.lua` |
 
 Everything else, such as spawning ships, damage, kills and weapons, is ordinary Mission Director
 and AI script. The tests validate those files against the game's own XSD schemas.
