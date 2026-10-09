@@ -55,6 +55,8 @@ local SC = {
 	                 role = "join", own_world = "abc123", partner_world = "abc123", foot_test = true },
 	stations     = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
 	                 role = "join", own_world = "abc123", partner_world = "abc123", station_test = true },
+	station_settings = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30,
+	                 pipes = true, role = "host", own_world = "abc123", partner_world = "abc123", settings_test = true },
 	credits      = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
 	                 role = "join", own_world = "abc123", partner_world = "abc123", credits_test = true },
 	npc_apart_join = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
@@ -319,6 +321,19 @@ function SetScript(kind, fn) if kind == "onUpdate" then on_update = fn end end
 function ConvertStringTo64Bit(s) return tonumber((tostring(s):gsub("ULL$", ""))) end
 function ConvertStringToLuaID(s) return tonumber((tostring(s):gsub("ULL$", ""))) end
 function GetComponentData(id, key)
+	local cfg = station_cfg[id]
+	if cfg then
+		if key == "tradewares" then
+			local list = {}
+			for w in pairs(cfg.own) do list[#list + 1] = w end
+			table.sort(list)
+			return list
+		end
+		if key == "allresources" then return cfg.resources end
+		if key == "products" then return cfg.products end
+		if key == "name" then return cfg.name end
+		if key == "tradenpc" then return cfg.manager and 9001 or nil end
+	end
 	if key == "macro" then return SECTORS[id] or (objects[id] and objects[id].macro) end
 	if key == "name" and SECTORS[id] then return "Sector " .. id end
 	local o = objects[id]
@@ -346,6 +361,15 @@ order_book = {
 behaviour_calls, set_param_calls = {}, {}
 foot_requests, foot_status_seen = {}, nil
 station_requests, station_made_id = {}, nil
+function settings_world()
+	if not sc.settings_test then return end
+	for i, def in ipairs({ { 601, "Energy One", { "silicon", "energycells" }, { "siliconwafers" } },
+			{ 602, "Refinery 2", { "energycells", "ore" }, { "refinedmetals" } } }) do
+		objects[def[1]] = { sector = 500, x = -3000 * i, y = 0, z = 3000, yaw = 0, pitch = 0, roll = 0,
+			macro = "station_gen_factory_base_01_macro", idcode = "STA-" .. def[1], station = true, playerowned = true, cargo = {} }
+		station_cfg[def[1]] = new_station_cfg(def[2], def[3], def[4])
+	end
+end
 function GetOrderParams(ship, which)
 	local book = order_book[ship] or {}
 	local order = which == "default" and book.default or (book.queue or {})[which]
@@ -370,6 +394,58 @@ unlock_requests, unlock_switch, unlock_sends = {}, {}, {}
 sim_warp, warp_requests = { active = false, factor = 1, blocked = false }, {}
 owner_requests, owner_switch = {}, {}
 newship_requests, newship_made_id, newship_first_sent = {}, nil, nil
+-- station settings as the game keeps them, per station id
+station_cfg, settings_calls, manager_requests = {}, {}, {}
+function new_station_cfg(name, resources, products)
+	return { name = name, resources = resources, products = products, own = {}, buyable = {}, sellable = {}, buylimit = {},
+		selllimit = {}, stock = {}, price = { [true] = {}, [false] = {} }, rules = {}, fill = false, buildprice = 1, manager = false }
+end
+local function scfg(id)
+	station_cfg[id] = station_cfg[id] or new_station_cfg("Station " .. tostring(id), {}, {})
+	return station_cfg[id]
+end
+local function scall(...) settings_calls[#settings_calls + 1] = table.concat({ ... }, ":") end
+C.GetContainerWareIsBuyable = function(id, w) return scfg(id).buyable[w] == true end
+C.GetContainerWareIsSellable = function(id, w) return scfg(id).sellable[w] == true end
+C.HasContainerBuyLimitOverride = function(id, w) return scfg(id).buylimit[w] ~= nil end
+C.HasContainerSellLimitOverride = function(id, w) return scfg(id).selllimit[w] ~= nil end
+C.GetContainerBuyLimit = function(id, w) return scfg(id).buylimit[w] or 100 end
+C.GetContainerSellLimit = function(id, w) return scfg(id).selllimit[w] or 100 end
+C.GetContainerTradeRuleID = function(id, kind, w) return scfg(id).rules[kind .. ":" .. w] or 0 end
+C.HasContainerOwnTradeRule = function(id, kind, w) return scfg(id).rules[kind .. ":" .. w] ~= nil end
+C.GetNumAllTradeRules = function() return 2 end
+C.GetAllTradeRules = function(buf, n) buf[0], buf[1] = 7, 8; return 2 end
+C.ShouldContainerFillWorkforceCapacity = function(id) return scfg(id).fill end
+C.GetContainerBuildPriceFactor = function(id) return scfg(id).buildprice end
+C.SetContainerWareIsBuyable = function(id, w, v) scall("buyable", id, w, tostring(v)); scfg(id).buyable[w] = v end
+C.SetContainerWareIsSellable = function(id, w, v) scall("sellable", id, w, tostring(v)); scfg(id).sellable[w] = v end
+C.SetContainerBuyLimitOverride = function(id, w, n) scall("buylimit", id, w, n); scfg(id).buylimit[w] = n end
+C.ClearContainerBuyLimitOverride = function(id, w) scall("buylimit", id, w, "-"); scfg(id).buylimit[w] = nil end
+C.SetContainerSellLimitOverride = function(id, w, n) scall("selllimit", id, w, n); scfg(id).selllimit[w] = n end
+C.ClearContainerSellLimitOverride = function(id, w) scall("selllimit", id, w, "-"); scfg(id).selllimit[w] = nil end
+C.SetContainerTradeRule = function(id, rule, kind, w, own)
+	scall("rule", id, kind, w, rule, tostring(own))
+	scfg(id).rules[kind .. ":" .. w] = own and math.max(rule, 0) or nil
+end
+C.SetContainerWorkforceFillCapacity = function(id, v) scall("fill", id, tostring(v)); scfg(id).fill = v end
+C.SetContainerBuildPriceFactor = function(id, v) scall("buildprice", id, v); scfg(id).buildprice = v end
+C.AddTradeWare = function(id, w) scall("addware", id, w); scfg(id).own[w] = true end
+C.RemoveTradeWare = function(id, w) scall("removeware", id, w); scfg(id).own[w] = nil end
+function HasContainerStockLimitOverride(id, w) return scfg(id).stock[w] ~= nil end
+function GetWareProductionLimit(id, w) return scfg(id).stock[w] or 1000 end
+function SetContainerStockLimitOverride(id, w, n) scall("stock", id, w, n); scfg(id).stock[w] = n end
+function ClearContainerStockLimitOverride(id, w) scall("stock", id, w, "-"); scfg(id).stock[w] = nil end
+function HasContainerWarePriceOverride(id, w, buy) return scfg(id).price[buy][w] ~= nil end
+function GetContainerWarePrice(id, w, buy) return scfg(id).price[buy][w] or 10 end
+function SetContainerWarePriceOverride(id, w, buy, p) scall("price", id, w, tostring(buy), p); scfg(id).price[buy][w] = p end
+function ClearContainerWarePriceOverride(id, w, buy) scall("price", id, w, tostring(buy), "-"); scfg(id).price[buy][w] = nil end
+function SetComponentName(id, name) scall("name", id, name); scfg(id).name = name end
+function GetContainedStationsByOwner(owner)
+	local list = {}
+	for id, o in pairs(objects) do if o.station and o.playerowned and owner == "player" then list[#list + 1] = id end end
+	table.sort(list)
+	return list
+end
 function GetPlayerMoney() return player_money end
 function SetNPCBlackboard(_, key, v) blackboard[key] = v end
 function ExecuteDebugCommand(cmd, param) say("  ego command /%s %s", cmd, tostring(param)) end
@@ -506,6 +582,8 @@ function AddUITriggeredEvent(screen, control, args)
 		end
 		blackboard["$x4coop_resolved"] = out
 		queue("x4coop.resolved")
+	elseif control == "station_manager" then
+		manager_requests[#manager_requests + 1] = tostring(args[1])
 	elseif control == "station_sync" then
 		-- md only remembers the switch
 	elseif control == "station_module" then
@@ -516,7 +594,8 @@ function AddUITriggeredEvent(screen, control, args)
 			found = next_id
 			next_id = next_id + 1
 			objects[found] = { sector = sector_by_macro(args[3]) or 500, x = args[4], y = args[5], z = args[6], yaw = 0, pitch = 0, roll = 0,
-				macro = args[2], idcode = "LST-" .. found, station = true, cargo = {}, newship = true }
+				macro = args[2], idcode = "LST-" .. found, station = true, cargo = {}, newship = true, playerowned = true }
+			station_cfg[found] = new_station_cfg("Station " .. found, {}, {})
 			station_made_id = found
 			blackboard["$x4coop_newstations"] = { { args[17], found } }
 			queue("x4coop.station_made")
@@ -644,6 +723,8 @@ if sc.pipes then
 					partner_queue[#partner_queue + 1] = { at = clock + 2 * ONE_WAY, msg = reply }
 				elseif f[1] == "M" then
 					partner_queue[#partner_queue + 1] = { at = clock + 2 * ONE_WAY, msg = "M|Echo|you said: " .. tostring(f[3]) }
+				elseif f[1] == "s" and f[2] == "msg" then
+					partner_queue[#partner_queue + 1] = { at = clock + 2 * ONE_WAY, msg = "s|ack|" .. f[3] }
 				elseif f[1] == "b" and f[2] == "msg" then
 					partner_queue[#partner_queue + 1] = { at = clock + 2 * ONE_WAY, msg = "b|ack|" .. f[3] }
 				elseif f[1] == "J" and f[2] == "msg" then
@@ -973,6 +1054,40 @@ local function station_script()
 	while station_steps[1] and clock >= station_steps[1][1] do table.remove(station_steps, 1)[2]() end
 end
 
+local function settings_msg(id, rest) pipe_reader("s|msg|" .. id .. "|" .. rest) end
+local settings_steps = {
+	{ 0, function() settings_world() end },
+	{ 8, function()  -- the player changes station 601: a buy price, a ware added to trade, a buy rule
+		local s = station_cfg[601]
+		s.price[true].energycells = 18.5
+		s.own.water, s.sellable.water, s.selllimit.water = true, true, 500
+		s.rules["buy:silicon"] = 7
+	end },
+	{ 10, function()  -- the partner changed station 602
+		settings_msg("00c1", "set|STA-602|Refinery West|1|1.20|-|8|1|energycells:0:1:0:2000:-:-:15.00:-:-:-;"
+			.. "ore:0:1:0:-:-:5000:-:-:7:-;refinedmetals:0:0:1:-:-:-:-:140.00:-:99;hullparts:1:0:1:-:-:-:-:-:-:-;"
+			.. "teladianium:0:1:0:-:-:-:-:-:-:-")
+	end },
+	{ 11, function() settings_msg("00c1", "set|STA-602|Refinery West|1|1.20|-|8|1|") end },  -- the same id again
+	{ 14, function() settings_msg("00c2", "want|STA-601") end },
+	{ 16, function() table.insert(station_cfg[601].products, "microchips") end },  -- our own module: no message
+	{ 18, function() pipe_reader("b|msg|00b9|STA-602|station_gen_factory_base_01_macro|" .. SECTORS[500]
+		.. "|-3000.000|0.000|3000.000|0.000|0.000|0.000|prod_gen_claytronics_macro|0.000|0.000|600.000|0.000|0.000|0.000") end },
+	{ 19, function() table.insert(station_cfg[602].products, "claytronics") end },  -- that module's wares
+	{ 21, function()  -- a station copied from the partner's world
+		objects[603] = { sector = 500, x = 0, y = 0, z = 9000, yaw = 0, pitch = 0, roll = 0, macro = "station_gen_factory_base_01_macro",
+			idcode = "LST-603", station = true, playerowned = true, cargo = {} }
+		station_cfg[603] = new_station_cfg("Player Station", { "energycells" }, {})
+		blackboard["$x4coop_newstations"] = { { "PST-9", 603 } }
+		queue("x4coop.station_made")
+	end },
+	{ 23, function() settings_msg("00c3", "set|PST-9|Partner Yard|0|1.00|-|-|0|energycells:0:1:0:-:-:-:-:-:-:-") end },
+}
+local function settings_script()
+	if not sc.settings_test or not pipe_reader then return end
+	while settings_steps[1] and clock >= settings_steps[1][1] do table.remove(settings_steps, 1)[2]() end
+end
+
 local function credit_script()
 	if not sc.credits_test or not pipe_reader then return end
 	while credit_steps[1] and clock >= credit_steps[1][1] do
@@ -1104,6 +1219,7 @@ while clock < sc.duration do
 	behaviour_script()
 	foot_script()
 	station_script()
+	settings_script()
 	if sc.partner_restart_at and clock >= sc.partner_restart_at and partner_clock_offset == 1000 then
 		partner_clock_offset = -500
 		say("t=%.1f partner restarted their game (clock jumped back)", clock)
@@ -1652,6 +1768,34 @@ if sc.foot_test then
 		and tostring(foot_status_seen):find("on foot at Harbour Bar Station", 1, true) ~= nil
 		and said:find("is on foot at Harbour Bar Station", 1, true) ~= nil
 		and said:find("is back aboard a ship", 1, true) ~= nil
+end
+if sc.settings_test then
+	local sets, wants = {}, {}
+	for _, w in ipairs(pipe_writes) do
+		local id, rest = w:match("^s|msg|(%x+)|(.*)$")
+		if id and rest:sub(1, 4) == "set|" then sets[id] = rest end
+		if id and rest:sub(1, 5) == "want|" then wants[id] = rest end
+	end
+	local set601, set602, want_list = {}, 0, {}
+	for _, rest in pairs(sets) do
+		if rest:find("set|STA-601|", 1, true) == 1 then set601[#set601 + 1] = rest end
+		if rest:find("STA-602", 1, true) then set602 = set602 + 1 end
+	end
+	for _, rest in pairs(wants) do want_list[#want_list + 1] = rest end
+	table.sort(want_list)
+	local s2, s3 = station_cfg[602], station_cfg[603]
+	say("settings: sets for 601 %d: %s", #set601, (set601[1] or ""):sub(1, 300))
+	say("settings: wants %s; sets for 602 %d; manager %s; calls %s", table.concat(want_list, ","), set602,
+		table.concat(manager_requests, ","), table.concat(settings_calls, " "):sub(1, 900))
+	ok = ok and #set601 == 2 and set601[1]:find("energycells:0:0:0:-:-:-:18.50:-:-:-", 1, true) ~= nil
+		and set601[1]:find("water:1:0:1:-:500:-:-:-:-:-", 1, true) ~= nil and set601[1]:find("silicon:0:0:0:-:-:-:-:-:7:-", 1, true) ~= nil
+		and set602 == 0 and #want_list == 2 and want_list[1] == "want|PST-9" and want_list[2] == "want|STA-602"
+		and s2.name == "Refinery West" and s2.fill == true and math.abs(s2.buildprice - 1.2) < 1e-6 and s2.rules["build:"] == 8
+		and s2.buylimit.energycells == 2000 and s2.buyable.energycells == true and s2.price[true].energycells == 15
+		and s2.stock.ore == 5000 and s2.rules["buy:ore"] == 7 and s2.price[false].refinedmetals == 140
+		and s2.sellable.refinedmetals == true and s2.rules["sell:refinedmetals"] == nil and s2.own.hullparts == true
+		and s2.sellable.hullparts == true and s2.buyable.teladianium == nil
+		and #manager_requests == 1 and manager_requests[1] == "STA-602" and s3.name == "Partner Yard"
 end
 if sc.station_test then
 	local ours = {}

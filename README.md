@@ -75,7 +75,7 @@ writing X4's memory is possible, on your credits; the mod never loads or calls i
 memory writes. The Lua calls functions by name through FFI:
 
 * **6 Windows functions** for the pipe (listed above).
-* **26 game functions.** Egosoft's own UI scripts call every one of them; one example file each, from
+* **49 game functions.** Egosoft's own UI scripts call every one of them; one example file each, from
   the game's archives:
 
 | function | used by vanilla, e.g. |
@@ -94,6 +94,13 @@ memory writes. The Lua calls functions by name through FFI:
 | `GetNumOrders` | `ui/addons/ego_detailmonitor/menu_docked.lua` |
 | `RemoveAllOrders2`, `CreateOrder`, `EnableOrder`, `EnablePlannedDefaultOrder` | `ui/addons/ego_detailmonitor/menu_map.lua` |
 | `GetDefaultOrder`, `GetOrders` | `ui/addons/ego_detailmonitor/menu_docked.lua` |
+| `GetContainerWareIsBuyable`, `GetContainerWareIsSellable`, `HasContainerBuyLimitOverride`, `HasContainerSellLimitOverride`, `GetContainerBuyLimit`, `GetContainerSellLimit`, `SetContainerBuyLimitOverride`, `SetContainerSellLimitOverride`, `GetNumAllTradeRules`, `GetAllTradeRules` | `ui/addons/ego_detailmonitorhelper/helper.lua` |
+| `GetContainerTradeRuleID`, `HasContainerOwnTradeRule`, `SetContainerTradeRule`, `SetContainerWareIsBuyable`, `SetContainerWareIsSellable`, `ClearContainerBuyLimitOverride`, `ClearContainerSellLimitOverride`, `AddTradeWare`, `RemoveTradeWare`, `ShouldContainerFillWorkforceCapacity`, `SetContainerWorkforceFillCapacity`, `GetContainerBuildPriceFactor`, `SetContainerBuildPriceFactor` | `ui/addons/ego_detailmonitor/menu_station_overview.lua` |
+
+The station settings also use the UI's own script functions for prices, storage limits and names
+(`GetContainerWarePrice`, `SetContainerWarePriceOverride`, `SetContainerStockLimitOverride`, `SetComponentName`
+and their read and clear forms), and `GetContainedStationsByOwner` to list the empire's stations, as the
+station and map menus do.
 
 Everything else, such as spawning ships, damage, kills and weapons, is ordinary Mission Director
 and AI script. The tests validate those files against the game's own XSD schemas.
@@ -253,9 +260,21 @@ are built in both worlds anyway, so they aren't copied. `/x4coop set new_ships 0
 other world too, at the same place on the same station, so a station grows the same way in both. A station
 the other world doesn't have yet, such as a new one either of you founds, is created there with its first
 finished module and paired with the original like a new ship. Builds already under way in the shared save
-finish in both worlds by themselves and aren't copied. The station's settings (wares it trades,
-prices, manager, workforce) don't copy, and neither do modules removed later. `/x4coop set station_sync 0`
+finish in both worlds by themselves and aren't copied. Modules removed later aren't. `/x4coop set station_sync 0`
 turns it off.
+
+**Station settings:** what either of you sets on one of the empire's stations is set on it in the other world
+too:
+* wares it trades besides its own, and whether it buys and sells each ware
+* buy, sell and storage limits, buy and sell prices, and trade rules, per ware
+* the station's supply and build trade rules, filling the workforce, the ship-building price, and the name
+
+A station whose original has a manager gets one too, with a defence officer if it has none. Each game looks
+at one of its stations every quarter second, and sends a station whose settings changed; the other game
+changes only what differs. A station copied from the other world, or one that gets a module from it, asks
+for the original's settings. Trade rules apply only if the other world has the same rule, so rules made
+before the host shared the save work, and rules made after it don't yet. The station's account isn't copied,
+since each of you has your own wallet. `/x4coop set station_settings 0` turns it off.
 
 **Orders:** an order either of you gives one of the empire's ships from the map or the right-click menu
 (fly to, attack, dock, follow, protect, mine, explore, collect, salvage, withdraw and the rest) is
@@ -390,6 +409,7 @@ change a value that already exists; it can't create anything.
 | time acceleration (SETA) | `set_timewarp_factor`, `toggle_timewarp` | yes |
 | inventory items | `add_inventory` | not yet |
 | stations built after the shared save | `create_station`, `create_module` | yes |
+| station trade settings, limits, prices, rules, name | the station menus' own functions (Lua) | yes |
 | ownership (claims, boarding, captures) | `set_owner` | yes |
 | orders given from the menus | the UI's own `CreateOrder` (Lua) | yes |
 | default behaviours, order queues | `GetDefaultOrder`, `GetOrders`, `SetOrderParam`, `EnablePlannedDefaultOrder` | yes |
@@ -452,7 +472,7 @@ game's own schema (`libraries/md.xsd`, `libraries/common.xsd`).
 
 Messages (one text line each): `S` snapshot (position, rotation, velocity, ship, hull, shield),
 `P`/`Q` ping, `M` chat, `L` world link, `K` kill, `D` hit, `F` firing at, `B` nearby ships (both
-ways), `E` station stock (host to joiner), `T` a joiner's trade, `V` relations, `U` research/blueprints/licences, `Z` SETA, `O` ownership, `Y` new ships, `G` orders, `J` behaviours and queues, `I` on foot, `b` station modules, `C` credits given; `R`/`W`/`N`/`X` are between a game and
+ways), `E` station stock (host to joiner), `T` a joiner's trade, `V` relations, `U` research/blueprints/licences, `Z` SETA, `O` ownership, `Y` new ships, `G` orders, `J` behaviours and queues, `I` on foot, `b` station modules, `s` station settings, `C` credits given; `R`/`W`/`N`/`X` are between a game and
 its own bridge.
 
 Self-calibration: on first contact the proxy is nudged and read back (does `SetObjectSectorPos`
@@ -463,7 +483,8 @@ axis vectors. In-game results so far: degrees, YXZ+--.
 
 * Ships in the shared world match by ID code. Ships bought after the shared save are copied to the
   other world and paired with their copy. Stations built after it are copied module by module as each one
-  is finished, but not their settings or modules removed later.
+  is finished, and their settings follow, but modules removed later don't, and trade rules made after the
+  shared save aren't copied.
 * Proxies are player-owned (friendly, but listed in your property).
 * No highway or travel-drive visuals for the partner; they reappear when they leave the highway.
 * The bridge's encryption uses Python's standard library only: scrypt for the key, a SHAKE-256
@@ -491,7 +512,9 @@ python extensions/x4_coop/dev/run_tests.py [--quick]
   relations both ways (the host's followed; a joiner's change counted once and never undone in flight),
   on foot both ways (where you walk sent; status, join to the station, the stand-in walking in the same
   room and removed when back aboard), stations both ways (finished modules sent until confirmed, the
-  station created once, paired, later modules added to the copy), research, blueprints and licences both ways (sent until confirmed, added once), SETA both ways
+  station created once, paired, later modules added to the copy), station settings both ways (a change sent
+  once, only what differs applied, never sent back; new wares from a module and copied stations ask for the
+  original's; unknown trade rules and wares the station hasn't got yet left alone; a manager hired), research, blueprints and licences both ways (sent until confirmed, added once), SETA both ways
   (followed; turned off for both when one side can't follow), ownership changes both ways (sent
   until confirmed, applied once), new ships both ways (made once, paired, kills and hits on them
   translated both ways), orders both ways (encoded, shared once, objects found again, queue cleared

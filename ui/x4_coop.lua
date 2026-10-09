@@ -111,6 +111,7 @@ local config = {
 	foot = 1,                 -- on foot: tell the partner where you walk (station, room, position)
 	foot_avatar = 1,          -- shared world: show a partner on foot as a crew member walking in the same room
 	station_sync = 1,         -- shared world: station modules either player builds appear in both worlds
+	station_settings = 1,     -- shared world: station trade settings, limits, prices, rules, workforce, name match
 	ghost_latency = 0.12,     -- s, simulated one-way latency in ghost mode
 	ghost_jitter = 0.03,      -- s, extra random delay per snapshot
 	ghost_loss = 0.0,         -- 0..1, fraction of snapshots dropped
@@ -361,6 +362,7 @@ local function reset()
 		orders = { seq = 0, waiting = {}, applied = 0 },
 		behave = { dirty = {}, map_hooked = false, sent = 0, rebuilt = 0 },
 		stations_on = false,
+		ssettings = { list = {}, idx = 0, next = 0, ids = {}, base = {}, settle = {}, out = {}, expect = {}, sent = 0, applied = 0 },
 		foot = { on = false, walking = false, last = nil, gone_left = 0, gone_at = -1e9, partner = nil, avatar_on = false },
 		alias = { loaded = false, into = {}, out = {} },
 		net = { api = nil, status = "idle", reading = false, connected = false, retry_at = 0, last_ping = -1e9, rtt = nil,
@@ -727,6 +729,7 @@ local behaviours_receive -- default behaviours and order queues (J), defined wit
 local foot_receive      -- the partner on foot (I), defined with the credits
 local partner_on_foot   -- "on foot at <station>" or nil, defined with the credits
 local stations_receive  -- the partner's new station modules (b), defined with the orders
+local settings_receive  -- the partner's station settings (s), defined in the third feature block
 local send_link
 
 local function net_send(msg)
@@ -828,6 +831,8 @@ on_pipe_message = function(msg)
 		if config.mode == "net" then foot_receive(f, now) end
 	elseif kind == "b" then
 		if config.mode == "net" then stations_receive(f, now) end
+	elseif kind == "s" then
+		if config.mode == "net" then settings_receive(f, now) end
 	elseif kind == "M" then
 		local text = clean_text(f[3], 200)
 		if text ~= "" then
@@ -2322,6 +2327,7 @@ local function reliable_send(kind, fields)
 	local now = getElapsedTime()
 	local id = string.format("%06x%04x", math.floor(now * 1000) % 0x1000000, Q.seq % 0x10000)
 	Q.out[id] = { msg = kind .. "|msg|" .. id .. "|" .. table.concat(fields, "|"), first = now, last = -1e9 }
+	return id
 end
 
 -- f: the split message. handler(f, now) is called once per id, with the fields from f[4] on.
@@ -3047,6 +3053,7 @@ stations_receive = function(f, now)
 		end
 		args[#args + 1] = m[4]  -- the partner's code, to pair a station made here
 		request("station_module", args)
+		S.ssettings.expect[args[1]] = now  -- if it brings new wares, ask for the partner's settings for them
 	end)
 end
 
@@ -3058,6 +3065,7 @@ local function on_station_made()
 		local code = type(v) == "table" and v[2] and C.GetObjectIDCode(to64(v[2]))
 		if code ~= nil and type(v[1]) == "string" then
 			alias_add(v[1], ffi.string(code))
+			Feature.settings_want(v[1])
 			notify("your partner's new station (%s) is in your world now, as %s", v[1], ffi.string(code))
 		end
 	end
@@ -3079,6 +3087,315 @@ Feature.on_foot = on_foot
 Feature.on_modules = on_modules
 Feature.on_station_made = on_station_made
 Feature.stations_tick = stations_tick
+end
+
+-- Station settings: a third block, so neither earlier block's helpers count against it.
+do
+local reliable_send, reliable_receive = Feature.reliable_send, Feature.reliable_receive
+
+-------------------------------------------------------------------------------
+-- Station settings (shared faction): what the player sets on a station is the same in both worlds: wares it trades
+-- besides its own, buying and selling each ware, buy, sell and storage limits, prices, trade rules, filling the
+-- workforce, the ship-building price and the name; and a station whose original has a manager gets one too (md
+-- OnStationManager). The station menus change these through the game's C functions, which can't be wrapped, so each
+-- game looks at one of its stations every SETTINGS_POLL seconds instead. A station whose settings changed since the
+-- last look is sent whole, and the partner's game changes only what differs. Wares coming or going with a module
+-- aren't a change; a station that just got a module from the partner, or was copied from the partner's world, asks
+-- for the partner's settings instead.
+-- "s|msg|id|set|station|name|fill|build price|supply rule|build rule|manager|wares", the wares as
+-- "ware:own:buy:sell:buy limit:sell limit:storage limit:buy price:sell price:buy rule:sell rule;..." ("-": the game's
+-- own value, no override); "s|msg|id|want|station". Sent until confirmed; a newer "set" for a station replaces an
+-- unconfirmed older one.
+
+local SETTINGS_POLL = 0.25   -- s between stations looked at
+local SETTINGS_SETTLE = 2    -- s after the partner's settings were applied in which that station's changes aren't sent
+local SETTINGS_EXPECT = 60   -- s after a module from the partner in which new wares mean "ask for their settings"
+local WARE_LISTS = { "allresources", "products", "tradewares" }
+local STATION_FIELDS = { "name", "fill", "buildprice", "supplyrule", "buildrule", "manager" }
+local settings_ffi           -- true once the station functions are declared here
+
+local function declare_settings_ffi()
+	if settings_ffi == nil then
+		settings_ffi = pcall(ffi.cdef, [[
+			bool GetContainerWareIsBuyable(UniverseID containerid, const char* wareid);
+			bool GetContainerWareIsSellable(UniverseID containerid, const char* wareid);
+			bool HasContainerBuyLimitOverride(UniverseID containerid, const char* wareid);
+			bool HasContainerSellLimitOverride(UniverseID containerid, const char* wareid);
+			int32_t GetContainerBuyLimit(UniverseID containerid, const char* wareid);
+			int32_t GetContainerSellLimit(UniverseID containerid, const char* wareid);
+			int32_t GetContainerTradeRuleID(UniverseID containerid, const char* ruletype, const char* wareid);
+			bool HasContainerOwnTradeRule(UniverseID containerid, const char* ruletype, const char* wareid);
+			uint32_t GetNumAllTradeRules(void);
+			uint32_t GetAllTradeRules(int32_t* result, uint32_t resultlen);
+			bool ShouldContainerFillWorkforceCapacity(UniverseID containerid);
+			float GetContainerBuildPriceFactor(UniverseID containerid);
+			void SetContainerWareIsBuyable(UniverseID containerid, const char* wareid, bool allowed);
+			void SetContainerWareIsSellable(UniverseID containerid, const char* wareid, bool allowed);
+			void SetContainerBuyLimitOverride(UniverseID containerid, const char* wareid, int32_t amount);
+			void ClearContainerBuyLimitOverride(UniverseID containerid, const char* wareid);
+			void SetContainerSellLimitOverride(UniverseID containerid, const char* wareid, int32_t amount);
+			void ClearContainerSellLimitOverride(UniverseID containerid, const char* wareid);
+			void SetContainerTradeRule(UniverseID containerid, int32_t id, const char* ruletype, const char* wareid, bool value);
+			void SetContainerWorkforceFillCapacity(UniverseID containerid, bool value);
+			void SetContainerBuildPriceFactor(UniverseID containerid, float value);
+			void AddTradeWare(UniverseID containerid, const char* wareid);
+			void RemoveTradeWare(UniverseID containerid, const char* wareid);
+		]]) and pcall(function() assert(C.GetContainerWareIsBuyable and C.SetContainerTradeRule and C.AddTradeWare) end)
+	end
+	return settings_ffi
+end
+
+local function settings_enabled()
+	return config.mode == "net" and S.link.linked and config.station_settings == 1 and declare_settings_ffi()
+end
+
+local function own_rule(c, kind, ware)
+	if not C.HasContainerOwnTradeRule(c, kind, ware) then return "-" end
+	return string.format("%d", C.GetContainerTradeRuleID(c, kind, ware))
+end
+
+local function price_override(id, ware, buy)
+	if not HasContainerWarePriceOverride(id, ware, buy) then return "-" end
+	return string.format("%.2f", GetContainerWarePrice(id, ware, buy))
+end
+
+-- { name, fill, buildprice, supplyrule, buildrule, manager (strings), wares = { [ware] = { 10 strings, as sent } } }
+local function read_settings(id)
+	local c = to64(id)
+	local own, wares = {}, {}
+	for _, w in ipairs(GetComponentData(id, "tradewares") or {}) do own[w] = true end
+	for _, key in ipairs(WARE_LISTS) do
+		for _, w in ipairs(GetComponentData(id, key) or {}) do
+			if not wares[w] and type(w) == "string" and w:match("^[%w_]+$") then
+				wares[w] = { own[w] and "1" or "0",
+					C.GetContainerWareIsBuyable(c, w) and "1" or "0", C.GetContainerWareIsSellable(c, w) and "1" or "0",
+					C.HasContainerBuyLimitOverride(c, w) and string.format("%d", C.GetContainerBuyLimit(c, w)) or "-",
+					C.HasContainerSellLimitOverride(c, w) and string.format("%d", C.GetContainerSellLimit(c, w)) or "-",
+					HasContainerStockLimitOverride(id, w) and string.format("%d", GetWareProductionLimit(id, w)) or "-",
+					price_override(id, w, true), price_override(id, w, false), own_rule(c, "buy", w), own_rule(c, "sell", w) }
+			end
+		end
+	end
+	local manager = GetComponentData(id, "tradenpc")
+	return { name = (clean_text(GetComponentData(id, "name"), 60):gsub("[:;]", " ")),
+		fill = C.ShouldContainerFillWorkforceCapacity(c) and "1" or "0",
+		buildprice = string.format("%.2f", C.GetContainerBuildPriceFactor(c)),
+		supplyrule = own_rule(c, "supply", ""), buildrule = own_rule(c, "build", ""),
+		manager = (manager and manager ~= 0) and "1" or "0", wares = wares }
+end
+
+local function encode_settings(st)
+	local names = {}
+	for w in pairs(st.wares) do names[#names + 1] = w end
+	table.sort(names)
+	for i, w in ipairs(names) do names[i] = w .. ":" .. table.concat(st.wares[w], ":") end
+	return { st.name, st.fill, st.buildprice, st.supplyrule, st.buildrule, st.manager, table.concat(names, ";") }
+end
+
+local function decode_settings(m, from)
+	local st = { wares = {} }
+	for i, k in ipairs(STATION_FIELDS) do st[k] = m[from + i - 1] or "" end
+	for entry in (m[from + #STATION_FIELDS] or ""):gmatch("[^;]+") do
+		local f = {}
+		for v in entry:gmatch("[^:]+") do f[#f + 1] = v end
+		if #f == 11 and f[1]:match("^[%w_]+$") then st.wares[f[1]] = { unpack(f, 2, 11) } end
+	end
+	return st
+end
+
+-- "settings": something the player sets changed; "wares": only which wares the station has; nil: nothing
+local function compare_settings(old, new)
+	for _, k in ipairs(STATION_FIELDS) do
+		if old[k] ~= new[k] then return "settings" end
+	end
+	local wares = false
+	for w, f in pairs(new.wares) do
+		local o = old.wares[w]
+		if not o then
+			if f[1] == "1" then return "settings" end  -- a ware added to trade
+			wares = true
+		elseif table.concat(o, ":") ~= table.concat(f, ":") then
+			return "settings"
+		end
+	end
+	for w, o in pairs(old.wares) do
+		if not new.wares[w] then
+			if o[1] == "1" then return "settings" end
+			wares = true
+		end
+	end
+	return wares and "wares" or nil
+end
+
+local function find_station(code)
+	local T = S.ssettings
+	local id = T.ids[code]
+	if id and IsValidComponent(id) then return id end
+	for _, s in ipairs(GetContainedStationsByOwner("player", nil, true) or {}) do
+		local c = C.GetObjectIDCode(to64(s))
+		if c ~= nil and ffi.string(c) == code then
+			T.ids[code] = s
+			return s
+		end
+	end
+end
+
+local function trade_rules()
+	local rules, n = {}, C.GetNumAllTradeRules()
+	if n > 0 then
+		local buf = ffi.new("int32_t[?]", n)
+		n = C.GetAllTradeRules(buf, n)
+		for i = 0, n - 1 do rules[tonumber(buf[i])] = true end
+	end
+	return rules
+end
+
+local function set_rule(c, kind, ware, want, have, rules)
+	if want == have then return end
+	if want == "-" then
+		C.SetContainerTradeRule(c, -1, kind, ware, false)
+	else
+		local n = tonumber(want)
+		if n and (n <= 0 or rules[n]) then C.SetContainerTradeRule(c, n > 0 and n or -1, kind, ware, true) end
+	end
+end
+
+local function amount(v)  -- a limit from the partner, or nil
+	local n = tonumber(v)
+	return n and n >= 0 and n < 2147483647 and math.floor(n) or nil
+end
+
+local function money(v)  -- a price from the partner, or nil
+	local n = tonumber(v)
+	return n and n >= 0 and n < 1e9 and n or nil
+end
+
+-- One ware: want and have are the 10 fields; have is {} for a ware just added, so everything is set.
+local function apply_ware(id, c, w, f, h, rules)
+	if f[2] ~= h[2] and (f[2] == "0" or f[2] == "1") then C.SetContainerWareIsBuyable(c, w, f[2] == "1") end
+	if f[3] ~= h[3] and (f[3] == "0" or f[3] == "1") then C.SetContainerWareIsSellable(c, w, f[3] == "1") end
+	if f[4] ~= h[4] then
+		if f[4] == "-" then C.ClearContainerBuyLimitOverride(c, w)
+		elseif amount(f[4]) then C.SetContainerBuyLimitOverride(c, w, amount(f[4])) end
+	end
+	if f[5] ~= h[5] then
+		if f[5] == "-" then C.ClearContainerSellLimitOverride(c, w)
+		elseif amount(f[5]) then C.SetContainerSellLimitOverride(c, w, amount(f[5])) end
+	end
+	if f[6] ~= h[6] then
+		if f[6] == "-" then ClearContainerStockLimitOverride(id, w)
+		elseif amount(f[6]) then SetContainerStockLimitOverride(id, w, amount(f[6])) end
+	end
+	for i, buy in ipairs({ true, false }) do
+		local want, have = f[6 + i], h[6 + i]
+		if want ~= have then
+			if want == "-" then ClearContainerWarePriceOverride(id, w, buy)
+			elseif money(want) then SetContainerWarePriceOverride(id, w, buy, money(want)) end
+		end
+	end
+	set_rule(c, "buy", w, f[9], h[9], rules)
+	set_rule(c, "sell", w, f[10], h[10], rules)
+end
+
+local function apply_settings(id, code, want)
+	local c, have, rules = to64(id), read_settings(id), trade_rules()
+	if want.name ~= "" and want.name ~= have.name then SetComponentName(id, want.name) end
+	if want.fill ~= have.fill and (want.fill == "0" or want.fill == "1") then
+		C.SetContainerWorkforceFillCapacity(c, want.fill == "1")
+	end
+	local factor = tonumber(want.buildprice)
+	if want.buildprice ~= have.buildprice and factor and factor > 0 and factor < 10 then C.SetContainerBuildPriceFactor(c, factor) end
+	set_rule(c, "supply", "", want.supplyrule, have.supplyrule, rules)
+	set_rule(c, "build", "", want.buildrule, have.buildrule, rules)
+	for w, h in pairs(have.wares) do
+		local f = want.wares[w]
+		if h[1] == "1" and not (f and f[1] == "1") then  -- the partner's station stopped trading it: as the menu does
+			C.ClearContainerBuyLimitOverride(c, w)
+			C.SetContainerWareIsBuyable(c, w, false)
+			ClearContainerWarePriceOverride(id, w, true)
+			C.ClearContainerSellLimitOverride(c, w)
+			C.SetContainerWareIsSellable(c, w, false)
+			ClearContainerWarePriceOverride(id, w, false)
+			ClearContainerStockLimitOverride(id, w)
+			C.RemoveTradeWare(c, w)
+			have.wares[w] = nil
+		end
+	end
+	for w, f in pairs(want.wares) do
+		local h = have.wares[w]
+		if f[1] == "1" and not (h and h[1] == "1") then
+			C.AddTradeWare(c, w)
+			h = {}
+		end
+		if h then apply_ware(id, c, w, f, h, rules) end  -- a ware this station hasn't got yet waits for its module
+	end
+	if want.manager == "1" and have.manager == "0" then request("station_manager", { code }) end
+end
+
+local function send_settings(code, st)
+	local T = S.ssettings
+	local fields = encode_settings(st)
+	table.insert(fields, 1, alias_out(code))
+	table.insert(fields, 1, "set")
+	if T.out[code] then S.reliable.out[T.out[code]] = nil end  -- an older, unconfirmed one would be out of date
+	T.out[code] = reliable_send("s", fields)
+	T.sent = T.sent + 1
+end
+
+-- theirs: the partner's code for a station that's new in this world
+local function settings_want(theirs)
+	if settings_enabled() then reliable_send("s", { "want", theirs }) end
+end
+
+settings_receive = function(f, now)
+	if not settings_enabled() then return end
+	reliable_receive("s", f, now, function(m)
+		local code = m[5] and m[5]:match("^[%w%-]+$") and alias_in(m[5])
+		local id = code and find_station(code)
+		if not id then return end  -- not in this world (yet)
+		local T = S.ssettings
+		if m[4] == "want" then
+			local st = read_settings(id)
+			T.base[code] = st
+			send_settings(code, st)
+		elseif m[4] == "set" then
+			apply_settings(id, code, decode_settings(m, 6))
+			T.base[code] = read_settings(id)
+			T.settle[code] = now + SETTINGS_SETTLE
+			T.applied = T.applied + 1
+			log("station settings from your partner applied to %s", code)
+		end
+	end)
+end
+
+local function settings_tick(now)
+	local T = S.ssettings
+	if now < T.next or not settings_enabled() then return end
+	T.next = now + SETTINGS_POLL
+	if T.idx >= #T.list then
+		T.list, T.idx = GetContainedStationsByOwner("player", nil, true) or {}, 0
+		if #T.list == 0 then return end
+	end
+	T.idx = T.idx + 1
+	local id = T.list[T.idx]
+	local code = id and IsValidComponent(id) and C.GetObjectIDCode(to64(id))
+	if not code then return end
+	code = ffi.string(code)
+	T.ids[code] = id
+	local st, old = read_settings(id), T.base[code]
+	T.base[code] = st
+	if not old or now < (T.settle[code] or 0) then return end
+	local change = compare_settings(old, st)
+	if change == "settings" then
+		send_settings(code, st)
+	elseif change == "wares" and now - (T.expect[code] or -1e9) < SETTINGS_EXPECT then
+		T.expect[code] = nil
+		reliable_send("s", { "want", alias_out(code) })
+	end
+end
+
+Feature.settings_tick = settings_tick
+Feature.settings_want = settings_want
 end
 
 -------------------------------------------------------------------------------
@@ -3129,7 +3446,9 @@ local function status_text()
 		.. " | pipe " .. config.pipe .. " via " .. (N.client or "-")
 		.. " | " .. (S.link.role or "?") .. ", world " .. (S.link.state or "unknown")
 		.. " | economy " .. econ_summary()
-		.. (S.credits.empire_on and string.format(" | empire trades kept for the host: %d", S.credits.empire_trades) or "")) or "-"
+		.. (S.credits.empire_on and string.format(" | empire trades kept for the host: %d", S.credits.empire_trades) or "")
+		.. ((S.ssettings.sent + S.ssettings.applied > 0)
+			and string.format(" | station settings sent %d, applied %d", S.ssettings.sent, S.ssettings.applied) or "")) or "-"
 	return string.format("mode %s | backend %s (%s) | proxy %s%s | partner %s %s, last snapshot %s | link %s | rotation %s %s",
 		config.mode, config.backend, S.backend or "untested", P.state, proxy_is_adopted() and " (their own ship)" or "",
 		R.name or "-", partner_whereabouts() or "", age, link,
@@ -3361,6 +3680,7 @@ local function tick(now, dt)
 	Feature.behaviours_tick(now)
 	Feature.foot_tick(now)
 	Feature.stations_tick()
+	Feature.settings_tick(now)
 end
 
 local function on_update()

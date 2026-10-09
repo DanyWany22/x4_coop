@@ -1517,6 +1517,33 @@
           </actions>
         </cue>
 
+        <!--
+          Station settings: a station whose original in the partner's world has a manager gets one here too, and a
+          defence officer if it has none, as the game gives the stations it makes (param3: [station idcode]).
+        -->
+        <cue name="OnStationManager" instantiate="true">
+          <conditions>
+            <event_ui_triggered screen="'x4coop'" control="'station_manager'"/>
+          </conditions>
+          <actions>
+            <find_station name="$Stations" owner="faction.player" space="player.galaxy" multiple="true"/>
+            <do_for_each name="$Station" in="$Stations">
+              <do_if value="$Station.idcode == event.param3.{1} and $Station.canhavecontrolentity.{controlpost.manager} and not $Station.assignedcontrolentity.{controlpost.manager}">
+                <create_control_entity object="$Station" post="controlpost.manager">
+                  <select faction="$Station.owner" tags="controlpost.manager.tag"/>
+                  <owner exact="$Station.owner"/>
+                </create_control_entity>
+                <do_if value="$Station.canhavecontrolentity.{controlpost.defence} and not $Station.assignedcontrolentity.{controlpost.defence}">
+                  <create_control_entity object="$Station" post="controlpost.defence">
+                    <select tags="controlpost.defence.tag"/>
+                    <owner exact="$Station.owner"/>
+                  </create_control_entity>
+                </do_if>
+              </do_if>
+            </do_for_each>
+          </actions>
+        </cue>
+
         <cue name="OnNpcClear" instantiate="true">
           <conditions>
             <event_ui_triggered screen="'x4coop'" control="'npc_clear'"/>
