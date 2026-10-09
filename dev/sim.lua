@@ -55,6 +55,8 @@ local SC = {
 	                 role = "join", own_world = "abc123", partner_world = "abc123", foot_test = true },
 	stations     = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
 	                 role = "join", own_world = "abc123", partner_world = "abc123", station_test = true },
+	traderules   = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
+	                 role = "host", own_world = "abc123", partner_world = "abc123", rules_test = true },
 	commanders   = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 34, pipes = true,
 	                 role = "join", own_world = "abc123", partner_world = "abc123", commands_test = true },
 	station_settings = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30,
@@ -309,7 +311,11 @@ C = {
 package.loaded.ffi = {
 	cdef = function() end,
 	C = C,
-	new = function() return { x = 0, y = 0, z = 0, yaw = 0, pitch = 0, roll = 0 } end,
+	new = function(ct, n, init)
+		if ct == "char[?]" then return init end  -- a C string: the sim keeps the Lua string
+		return { x = 0, y = 0, z = 0, yaw = 0, pitch = 0, roll = 0 }
+	end,
+	typeof = function(ct) return ct end,
 	string = function(s) return s end,
 }
 function getElapsedTime() return clock end
@@ -417,8 +423,49 @@ C.GetContainerBuyLimit = function(id, w) return scfg(id).buylimit[w] or 100 end
 C.GetContainerSellLimit = function(id, w) return scfg(id).selllimit[w] or 100 end
 C.GetContainerTradeRuleID = function(id, kind, w) return scfg(id).rules[kind .. ":" .. w] or 0 end
 C.HasContainerOwnTradeRule = function(id, kind, w) return scfg(id).rules[kind .. ":" .. w] ~= nil end
-C.GetNumAllTradeRules = function() return 2 end
-C.GetAllTradeRules = function(buf, n) buf[0], buf[1] = 7, 8; return 2 end
+-- trade rules as the game keeps them
+sim_rules = { [7] = { name = "No enemies", whitelist = false, factions = { "khaak", "xenon" }, defaults = {} },
+	[8] = { name = "Friends", whitelist = true, factions = { "antigone", "argon" }, defaults = { buy = true, sell = true } } }
+sim_next_rule, rule_calls = 100, {}
+local function rule_from_info(info, old)
+	local factions = {}
+	for i = 0, info.numfactions - 1 do factions[#factions + 1] = info.factions[i] end
+	return { name = info.name, whitelist = info.iswhitelist, factions = factions, defaults = old and old.defaults or {} }
+end
+C.GetNumAllTradeRules = function() local n = 0; for _ in pairs(sim_rules) do n = n + 1 end; return n end
+C.GetAllTradeRules = function(buf, n)
+	local ids = {}
+	for id in pairs(sim_rules) do ids[#ids + 1] = id end
+	table.sort(ids)
+	for i, id in ipairs(ids) do buf[i - 1] = id end
+	return #ids
+end
+C.GetTradeRuleInfoCounts = function(id) return { numfactions = sim_rules[id] and #sim_rules[id].factions or 0 } end
+C.GetTradeRuleInfo = function(info, id)
+	local r = sim_rules[id]
+	if not r then return false end
+	info.name, info.iswhitelist, info.numfactions = r.name, r.whitelist, #r.factions
+	for i, f in ipairs(r.factions) do info.factions[i - 1] = f end
+	return true
+end
+C.CreateTradeRule = function(info)
+	local id = sim_next_rule
+	sim_next_rule = id + 1
+	sim_rules[id] = rule_from_info(info)
+	rule_calls[#rule_calls + 1] = "create:" .. id .. ":" .. info.name
+	return id
+end
+C.UpdateTradeRule = function(info)
+	sim_rules[info.id] = rule_from_info(info, sim_rules[info.id])
+	rule_calls[#rule_calls + 1] = "update:" .. info.id .. ":" .. info.name
+end
+C.RemoveTradeRule = function(id) sim_rules[id] = nil; rule_calls[#rule_calls + 1] = "remove:" .. id end
+C.IsPlayerTradeRuleDefault = function(id, t) return sim_rules[id] ~= nil and sim_rules[id].defaults[t] == true end
+C.SetPlayerTradeRuleDefault = function(id, t, v)
+	if v then for _, r in pairs(sim_rules) do r.defaults[t] = nil end end  -- one default per kind
+	if sim_rules[id] then sim_rules[id].defaults[t] = v or nil end
+	rule_calls[#rule_calls + 1] = "default:" .. id .. ":" .. t .. ":" .. tostring(v)
+end
 C.ShouldContainerFillWorkforceCapacity = function(id) return scfg(id).fill end
 C.GetContainerBuildPriceFactor = function(id) return scfg(id).buildprice end
 C.SetContainerWareIsBuyable = function(id, w, v) scall("buyable", id, w, tostring(v)); scfg(id).buyable[w] = v end
@@ -738,6 +785,8 @@ if sc.pipes then
 					partner_queue[#partner_queue + 1] = { at = clock + 2 * ONE_WAY, msg = reply }
 				elseif f[1] == "M" then
 					partner_queue[#partner_queue + 1] = { at = clock + 2 * ONE_WAY, msg = "M|Echo|you said: " .. tostring(f[3]) }
+				elseif f[1] == "r" and f[2] == "msg" then
+					partner_queue[#partner_queue + 1] = { at = clock + 2 * ONE_WAY, msg = "r|ack|" .. f[3] }
 				elseif f[1] == "c" and f[2] == "msg" then
 					partner_queue[#partner_queue + 1] = { at = clock + 2 * ONE_WAY, msg = "c|ack|" .. f[3] }
 				elseif f[1] == "s" and f[2] == "msg" then
@@ -1081,8 +1130,8 @@ local settings_steps = {
 		s.rules["buy:silicon"] = 7
 	end },
 	{ 10, function()  -- the partner changed station 602
-		settings_msg("00c1", "set|STA-602|Refinery West|1|1.20|-|8|1|energycells:0:1:0:2000:-:-:15.00:-:-:-;"
-			.. "ore:0:1:0:-:-:5000:-:-:7:-;refinedmetals:0:0:1:-:-:-:-:140.00:-:99;hullparts:1:0:1:-:-:-:-:-:-:-;"
+		settings_msg("00c1", "set|STA-602|Refinery West|1|1.20|-|m8|1|energycells:0:1:0:2000:-:-:15.00:-:-:-;"
+			.. "ore:0:1:0:-:-:5000:-:-:m7:-;refinedmetals:0:0:1:-:-:-:-:140.00:-:m99;hullparts:1:0:1:-:-:-:-:-:-:-;"
 			.. "teladianium:0:1:0:-:-:-:-:-:-:-")
 	end },
 	{ 11, function() settings_msg("00c1", "set|STA-602|Refinery West|1|1.20|-|8|1|") end },  -- the same id again
@@ -1129,6 +1178,24 @@ local command_steps = {
 local function command_script()
 	if not sc.commands_test or not pipe_reader then return end
 	while command_steps[1] and clock >= command_steps[1][1] do table.remove(command_steps, 1)[2]() end
+end
+
+local function rules_msg(id, rest) pipe_reader("r|msg|" .. id .. "|" .. rest) end
+local rule_steps = {
+	{ 6, function() sim_rules[20] = { name = "Teladi only", whitelist = true, factions = { "teladi" }, defaults = {} } end },
+	{ 8, function() sim_rules[7].factions = { "kaori", "khaak", "xenon" } end },
+	{ 10, function() sim_rules[8] = nil end },
+	{ 12, function() rules_msg("00f1", "set|m7|No enemies v2|0|u|khaak,xenon") end },
+	{ 14, function() rules_msg("00f2", "set|m31|Partner rule|1|bs|argon") end },
+	{ 16, function() rules_msg("00f3", "set|m31|Partner rule 2|1|bs|argon,teladi") end },
+	{ 18, function() rules_msg("00f4", "set|m20|Their twenty|0||split") end },  -- their 20 is not our 20
+	{ 19, function() rules_msg("00f5", "set|y20|Teladi only!|1||teladi") end },  -- but this is
+	{ 20, function() rules_msg("00f6", "remove|m31") end },
+	{ 22, function() sim_rules[101].name = "Their twenty renamed" end },
+}
+local function rule_script()
+	if not sc.rules_test or not pipe_reader then return end
+	while rule_steps[1] and clock >= rule_steps[1][1] do table.remove(rule_steps, 1)[2]() end
 end
 
 local function credit_script()
@@ -1264,6 +1331,7 @@ while clock < sc.duration do
 	station_script()
 	settings_script()
 	command_script()
+	rule_script()
 	if sc.partner_restart_at and clock >= sc.partner_restart_at and partner_clock_offset == 1000 then
 		partner_clock_offset = -500
 		say("t=%.1f partner restarted their game (clock jumped back)", clock)
@@ -1813,6 +1881,25 @@ if sc.foot_test then
 		and said:find("is on foot at Harbour Bar Station", 1, true) ~= nil
 		and said:find("is back aboard a ship", 1, true) ~= nil
 end
+if sc.rules_test then
+	local sent = {}
+	for _, w in ipairs(pipe_writes) do
+		local id, rest = w:match("^r|msg|(%x+)|(.*)$")
+		if id then sent[id] = rest end
+	end
+	local list = {}
+	for _, rest in pairs(sent) do list[#list + 1] = rest end
+	table.sort(list)
+	local r7, r20, r101 = sim_rules[7], sim_rules[20], sim_rules[101]
+	say("rules: sent %s", table.concat(list, " / "))
+	say("rules: calls %s; alias %s", table.concat(rule_calls, " "), tostring(blackboard["$x4coop_rule_alias"]))
+	ok = ok and table.concat(list, " / ") == "remove|m8 / set|m20|Teladi only|1||teladi / set|m7|No enemies|0||kaori,khaak,xenon"
+			.. " / set|y20|Their twenty renamed|0||split"
+		and r7.name == "No enemies v2" and table.concat(r7.factions, ",") == "khaak,xenon" and r7.defaults.supply == true
+		and sim_rules[100] == nil and r20.name == "Teladi only!" and r101 and r101.name == "Their twenty renamed"
+		and tostring(blackboard["$x4coop_rule_alias"]) == "20=101"
+		and table.concat(rule_calls, " "):find("create:100:Partner rule default:100:buy:true default:100:sell:true update:100:Partner rule 2", 1, true) ~= nil
+end
 if sc.commands_test then
 	local ours = {}
 	for _, w in ipairs(pipe_writes) do
@@ -1851,7 +1938,7 @@ if sc.settings_test then
 	say("settings: wants %s; sets for 602 %d; manager %s; calls %s", table.concat(want_list, ","), set602,
 		table.concat(manager_requests, ","), table.concat(settings_calls, " "):sub(1, 900))
 	ok = ok and #set601 == 2 and set601[1]:find("energycells:0:0:0:-:-:-:18.50:-:-:-", 1, true) ~= nil
-		and set601[1]:find("water:1:0:1:-:500:-:-:-:-:-", 1, true) ~= nil and set601[1]:find("silicon:0:0:0:-:-:-:-:-:7:-", 1, true) ~= nil
+		and set601[1]:find("water:1:0:1:-:500:-:-:-:-:-", 1, true) ~= nil and set601[1]:find("silicon:0:0:0:-:-:-:-:-:m7:-", 1, true) ~= nil
 		and set602 == 0 and #want_list == 2 and want_list[1] == "want|PST-9" and want_list[2] == "want|STA-602"
 		and s2.name == "Refinery West" and s2.fill == true and math.abs(s2.buildprice - 1.2) < 1e-6 and s2.rules["build:"] == 8
 		and s2.buylimit.energycells == 2000 and s2.buyable.energycells == true and s2.price[true].energycells == 15

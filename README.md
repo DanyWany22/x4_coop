@@ -272,9 +272,13 @@ too:
 A station whose original has a manager gets one too, with a defence officer if it has none. Each game looks
 at one of its stations every quarter second, and sends a station whose settings changed; the other game
 changes only what differs. A station copied from the other world, or one that gets a module from it, asks
-for the original's settings. Trade rules apply only if the other world has the same rule, so rules made
-before the host shared the save work, and rules made after it don't yet. The station's account isn't copied,
+for the original's settings. The station's account isn't copied,
 since each of you has your own wallet. `/x4coop set station_settings 0` turns it off.
+
+**Trade rules:** the empire's trade rules are the same in both worlds: a rule either of you makes, edits
+or deletes in the empire menu (name, factions, whitelist or blacklist, and whether it's the default for
+trading, supply, building or transmuting) is made, edited or deleted in the other world too. Stations and
+ships that use a rule use the matching one. `/x4coop set trade_rules 0` turns it off.
 
 **Assignments:** a ship of the empire that one of you assigns to a station (to trade, mine or defend it),
 to another ship's fleet or to your own ship, or takes off one, is assigned the same way in the other world:
@@ -479,7 +483,7 @@ game's own schema (`libraries/md.xsd`, `libraries/common.xsd`).
 
 Messages (one text line each): `S` snapshot (position, rotation, velocity, ship, hull, shield),
 `P`/`Q` ping, `M` chat, `L` world link, `K` kill, `D` hit, `F` firing at, `B` nearby ships (both
-ways), `E` station stock (host to joiner), `T` a joiner's trade, `V` relations, `U` research/blueprints/licences, `Z` SETA, `O` ownership, `Y` new ships, `G` orders, `J` behaviours and queues, `I` on foot, `b` station modules, `s` station settings, `c` assignments, `C` credits given; `R`/`W`/`N`/`X` are between a game and
+ways), `E` station stock (host to joiner), `T` a joiner's trade, `V` relations, `U` research/blueprints/licences, `Z` SETA, `O` ownership, `Y` new ships, `G` orders, `J` behaviours and queues, `I` on foot, `b` station modules, `s` station settings, `c` assignments, `r` trade rules, `C` credits given; `R`/`W`/`N`/`X` are between a game and
 its own bridge.
 
 Self-calibration: on first contact the proxy is nudged and read back (does `SetObjectSectorPos`
@@ -490,8 +494,7 @@ axis vectors. In-game results so far: degrees, YXZ+--.
 
 * Ships in the shared world match by ID code. Ships bought after the shared save are copied to the
   other world and paired with their copy. Stations built after it are copied module by module as each one
-  is finished, and their settings follow, but modules removed later don't, and trade rules made after the
-  shared save aren't copied.
+  is finished, and their settings follow, but modules removed later don't.
 * Proxies are player-owned (friendly, but listed in your property).
 * No highway or travel-drive visuals for the partner; they reappear when they leave the highway.
 * The bridge's encryption uses Python's standard library only: scrypt for the key, a SHAKE-256
@@ -523,7 +526,8 @@ python extensions/x4_coop/dev/run_tests.py [--quick]
   once, only what differs applied, never sent back; new wares from a module and copied stations ask for the
   original's; unknown trade rules and wares the station hasn't got yet left alone; a manager hired), assignments both ways
   (one change sent once, applied with the partner's codes translated, a ship not there yet tried again and
-  then dropped), research, blueprints and licences both ways (sent until confirmed, added once), SETA both ways
+  then dropped), trade rules both ways (made, edited and deleted; ids that clash between the worlds kept
+  apart; defaults moved; nothing sent back), research, blueprints and licences both ways (sent until confirmed, added once), SETA both ways
   (followed; turned off for both when one side can't follow), ownership changes both ways (sent
   until confirmed, applied once), new ships both ways (made once, paired, kills and hits on them
   translated both ways), orders both ways (encoded, shared once, objects found again, queue cleared

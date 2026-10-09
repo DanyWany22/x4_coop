@@ -113,6 +113,7 @@ local config = {
 	station_sync = 1,         -- shared world: station modules either player builds appear in both worlds
 	station_settings = 1,     -- shared world: station trade settings, limits, prices, rules, workforce, name match
 	command_sync = 1,         -- shared world: ships assigned to stations, fleets or a player's ship in both worlds
+	trade_rules = 1,          -- shared world: the empire's trade rules and their defaults match
 	ghost_latency = 0.12,     -- s, simulated one-way latency in ghost mode
 	ghost_jitter = 0.03,      -- s, extra random delay per snapshot
 	ghost_loss = 0.0,         -- 0..1, fraction of snapshots dropped
@@ -364,6 +365,7 @@ local function reset()
 		behave = { dirty = {}, map_hooked = false, sent = 0, rebuilt = 0 },
 		stations_on = false,
 		commands = { on = false, last = {}, tries = {}, sent = 0, applied = 0 },
+		rules = { next = 0, base = nil, shared = {}, alias = { loaded = false, into = {}, out = {} }, sent = 0, applied = 0 },
 		ssettings = { list = {}, idx = 0, next = 0, ids = {}, base = {}, settle = {}, out = {}, expect = {}, sent = 0, applied = 0 },
 		foot = { on = false, walking = false, last = nil, gone_left = 0, gone_at = -1e9, partner = nil, avatar_on = false },
 		alias = { loaded = false, into = {}, out = {} },
@@ -733,6 +735,7 @@ local partner_on_foot   -- "on foot at <station>" or nil, defined with the credi
 local stations_receive  -- the partner's new station modules (b), defined with the orders
 local settings_receive  -- the partner's station settings (s), defined in the third feature block
 local commands_receive  -- the partner's ship assignments (c), defined in the third feature block
+local rules_receive     -- the partner's trade rules (r), defined in the third feature block
 local send_link
 
 local function net_send(msg)
@@ -838,6 +841,8 @@ on_pipe_message = function(msg)
 		if config.mode == "net" then settings_receive(f, now) end
 	elseif kind == "c" then
 		if config.mode == "net" then commands_receive(f, now) end
+	elseif kind == "r" then
+		if config.mode == "net" then rules_receive(f, now) end
 	elseif kind == "M" then
 		local text = clean_text(f[3], 200)
 		if text ~= "" then
@@ -3094,9 +3099,239 @@ Feature.on_station_made = on_station_made
 Feature.stations_tick = stations_tick
 end
 
--- Station settings: a third block, so neither earlier block's helpers count against it.
+-- Trade rules, station settings and assignments: a third block, so neither earlier block's helpers count against it.
 do
 local reliable_send, reliable_receive = Feature.reliable_send, Feature.reliable_receive
+
+-------------------------------------------------------------------------------
+-- Trade rules (shared faction): the empire's trade rules (name, factions, whitelist or blacklist, and which are the
+-- default for buying, selling, supply, building and transmuting) are the same in both worlds. Each game reads its
+-- rules every RULES_POLL seconds and sends a rule that is new, changed or gone; the partner's game updates, creates
+-- or removes its copy. Rule ids are small numbers, so a rule made after the shared save can have the same id as a
+-- different rule in the other world: ids travel as "m<id>" (the sender's own rule) or "y<id>" (the receiver's rule,
+-- which the sender has a copy of), and each game remembers which of its rules copies which of the partner's
+-- ($x4coop_rule_alias, cleared when the host shares a save). Station settings send their rule ids the same way.
+-- "r|msg|id|set|rule|name|whitelist|defaults|factions" (defaults: b s u c t for buy, sell, supply, build, transmute;
+-- factions comma-separated), "r|msg|id|remove|rule".
+
+local RULES_POLL = 1         -- s between looks at the rules
+local RULE_DEFAULTS = { { "buy", "b" }, { "sell", "s" }, { "supply", "u" }, { "build", "c" }, { "transmute", "t" } }
+local rules_ffi              -- true once the rule functions are declared here
+
+local function declare_rules_ffi()
+	if rules_ffi == nil then
+		pcall(ffi.cdef, [[
+			typedef struct {
+				uint32_t numfactions;
+			} TradeRuleCounts;
+			typedef struct {
+				uint32_t id;
+				const char* name;
+				uint32_t numfactions;
+				const char** factions;
+				bool iswhitelist;
+			} TradeRuleInfo;
+		]])  -- the game's own menus declare the same, so this may already be done
+		rules_ffi = pcall(ffi.cdef, [[
+			uint32_t GetNumAllTradeRules(void);
+			uint32_t GetAllTradeRules(int32_t* result, uint32_t resultlen);
+			TradeRuleCounts GetTradeRuleInfoCounts(int32_t id);
+			bool GetTradeRuleInfo(TradeRuleInfo* info, int32_t id);
+			int32_t CreateTradeRule(TradeRuleInfo info);
+			void UpdateTradeRule(TradeRuleInfo info);
+			void RemoveTradeRule(int32_t id);
+			bool IsPlayerTradeRuleDefault(int32_t id, const char* ruletype);
+			void SetPlayerTradeRuleDefault(int32_t id, const char* ruletype, bool value);
+		]]) and pcall(function() assert(ffi.typeof("TradeRuleInfo") and C.CreateTradeRule and C.SetPlayerTradeRuleDefault) end)
+	end
+	return rules_ffi
+end
+
+local function rules_enabled()
+	return config.mode == "net" and S.link.linked and config.trade_rules == 1 and declare_rules_ffi()
+end
+
+local function rule_alias()
+	local A = S.rules.alias
+	if not A.loaded and S.player then
+		A.loaded = true
+		local saved = GetNPCBlackboard(S.player, "$x4coop_rule_alias")
+		for theirs, ours in tostring(saved or ""):gmatch("(%d+)=(%d+)") do
+			A.into[tonumber(theirs)], A.out[tonumber(ours)] = tonumber(ours), tonumber(theirs)
+		end
+	end
+	return A
+end
+
+local function rule_alias_set(theirs, ours)  -- ours nil: forget
+	local A = rule_alias()
+	if ours then
+		A.into[theirs], A.out[ours] = ours, theirs
+	else
+		if A.into[theirs] then A.out[A.into[theirs]] = nil end
+		A.into[theirs] = nil
+	end
+	if S.player then
+		local parts = {}
+		for t, o in pairs(A.into) do parts[#parts + 1] = t .. "=" .. o end
+		SetNPCBlackboard(S.player, "$x4coop_rule_alias", table.concat(parts, ";"))
+	end
+end
+
+-- our rule id as the partner reads it
+local function rule_token(id)
+	local theirs = rule_alias().out[id]
+	return theirs and ("y" .. theirs) or ("m" .. id)
+end
+
+-- the partner's token: our id, or nil when this world has no such rule
+local function rule_from_token(token)
+	local kind, n = tostring(token or ""):match("^([my])(%d+)$")
+	n = tonumber(n)
+	if not n then return nil end
+	if kind == "y" then return n end
+	return rule_alias().into[n] or (S.rules.shared[n] and n) or nil
+end
+
+local function read_rule(id)
+	local counts = C.GetTradeRuleInfoCounts(id)
+	local info = ffi.new("TradeRuleInfo")
+	local factions = ffi.new("const char*[?]", math.max(counts.numfactions, 1))  -- kept alive by this local
+	info.numfactions = counts.numfactions
+	info.factions = factions
+	if not C.GetTradeRuleInfo(info, id) then return nil end
+	local list = {}
+	for j = 0, info.numfactions - 1 do
+		local f = ffi.string(info.factions[j])
+		if f:match("^[%w_]+$") then list[#list + 1] = f end
+	end
+	table.sort(list)
+	local defaults = ""
+	for _, d in ipairs(RULE_DEFAULTS) do
+		if C.IsPlayerTradeRuleDefault(id, d[1]) then defaults = defaults .. d[2] end
+	end
+	return { name = clean_text(ffi.string(info.name), 60), whitelist = info.iswhitelist and "1" or "0", defaults = defaults,
+		factions = table.concat(list, ",") }
+end
+
+local function read_rules()
+	local rules, n = {}, C.GetNumAllTradeRules()
+	if n == 0 then return rules end
+	local ids = ffi.new("int32_t[?]", n)
+	n = C.GetAllTradeRules(ids, n)
+	for i = 0, n - 1 do
+		local id = tonumber(ids[i])
+		rules[id] = read_rule(id)
+	end
+	return rules
+end
+
+local function rule_state(r)
+	return r.name .. "|" .. r.whitelist .. "|" .. r.defaults .. "|" .. r.factions
+end
+
+-- Our rule id (nil: create one) set up as r says; returns its id.
+local function write_rule(id, r)
+	local info = ffi.new("TradeRuleInfo")
+	local keep = { ffi.new("char[?]", #r.name + 1, r.name) }
+	local list = {}
+	for f in r.factions:gmatch("[^,]+") do
+		if f:match("^[%w_]+$") then list[#list + 1] = f end
+	end
+	local factions = ffi.new("const char*[?]", math.max(#list, 1))
+	for i, f in ipairs(list) do
+		keep[#keep + 1] = ffi.new("char[?]", #f + 1, f)
+		factions[i - 1] = keep[#keep]
+	end
+	info.name, info.numfactions, info.factions, info.iswhitelist = keep[1], #list, factions, r.whitelist == "1"
+	if id then
+		info.id = id
+		C.UpdateTradeRule(info)
+	else
+		id = tonumber(C.CreateTradeRule(info))
+	end
+	if id and id ~= 0 then
+		for _, d in ipairs(RULE_DEFAULTS) do
+			local want = r.defaults:find(d[2], 1, true) ~= nil
+			if want ~= C.IsPlayerTradeRuleDefault(id, d[1]) then C.SetPlayerTradeRuleDefault(id, d[1], want) end
+		end
+	end
+	return id
+end
+
+rules_receive = function(f, now)
+	if not rules_enabled() then return end
+	reliable_receive("r", f, now, function(m)
+		local R = S.rules
+		local kind, n = tostring(m[5] or ""):match("^([my])(%d+)$")
+		n = tonumber(n)
+		if not (R.base and n) then return end
+		local ours = rule_from_token(m[5])
+		if ours and not R.base[ours] then ours = nil end  -- gone here
+		if m[4] == "remove" then
+			if ours then
+				C.RemoveTradeRule(ours)
+				R.base[ours] = nil
+				if kind == "m" then rule_alias_set(n, nil) end
+				R.applied = R.applied + 1
+			end
+		elseif m[4] == "set" and (ours or kind == "m") then
+			local r = { name = clean_text(m[6], 60), whitelist = m[7] == "1" and "1" or "0",
+				defaults = tostring(m[8] or ""):gsub("[^bsuct]", ""), factions = tostring(m[9] or "") }
+			local id = write_rule(ours, r)
+			if id and id ~= 0 then
+				if not ours then rule_alias_set(n, id) end  -- made here: pair it with theirs
+				local after = read_rules()  -- defaults moved off other rules too: none of that is ours to send
+				for rid, rr in pairs(after) do
+					if rid == id or (R.base[rid] and R.base[rid].defaults ~= rr.defaults) then R.base[rid] = rr end
+				end
+				R.applied = R.applied + 1
+			end
+		end
+	end)
+end
+
+local function rules_tick(now)
+	local R = S.rules
+	if now < R.next or not rules_enabled() then return end
+	R.next = now + RULES_POLL
+	local current = read_rules()
+	if not R.base then  -- the first look since linking: these rules are in both worlds, with the same ids
+		R.base, R.shared = current, {}
+		for id in pairs(current) do R.shared[id] = true end
+		return
+	end
+	for id, r in pairs(current) do
+		local old = R.base[id]
+		if not old or rule_state(old) ~= rule_state(r) then
+			reliable_send("r", { "set", rule_token(id), r.name, r.whitelist, r.defaults, r.factions })
+			R.sent = R.sent + 1
+		end
+	end
+	for id in pairs(R.base) do
+		if not current[id] then
+			reliable_send("r", { "remove", rule_token(id) })
+			R.sent = R.sent + 1
+			local theirs = rule_alias().out[id]
+			if theirs then rule_alias_set(theirs, nil) end
+		end
+	end
+	R.base = current
+end
+
+-- Station settings: a rule field ("-", "0" or our id) as the partner reads it, and back ("?": no such rule here).
+local function rule_field_out(v)
+	if v == "-" or v == "0" or not tonumber(v) then return v end
+	return rule_token(tonumber(v))
+end
+
+local function rule_field_in(v)
+	if v == "-" or v == "0" then return v end
+	local id = rule_from_token(v)
+	return id and tostring(id) or "?"
+end
+
+Feature.rules_tick = rules_tick
 
 -------------------------------------------------------------------------------
 -- Station settings (shared faction): what the player sets on a station is the same in both worlds: wares it trades
@@ -3193,8 +3428,12 @@ local function encode_settings(st)
 	local names = {}
 	for w in pairs(st.wares) do names[#names + 1] = w end
 	table.sort(names)
-	for i, w in ipairs(names) do names[i] = w .. ":" .. table.concat(st.wares[w], ":") end
-	return { st.name, st.fill, st.buildprice, st.supplyrule, st.buildrule, st.manager, table.concat(names, ";") }
+	for i, w in ipairs(names) do
+		local f = st.wares[w]
+		names[i] = table.concat({ w, f[1], f[2], f[3], f[4], f[5], f[6], f[7], f[8], rule_field_out(f[9]), rule_field_out(f[10]) }, ":")
+	end
+	return { st.name, st.fill, st.buildprice, rule_field_out(st.supplyrule), rule_field_out(st.buildrule), st.manager,
+		table.concat(names, ";") }
 end
 
 local function decode_settings(m, from)
@@ -3203,8 +3442,12 @@ local function decode_settings(m, from)
 	for entry in (m[from + #STATION_FIELDS] or ""):gmatch("[^;]+") do
 		local f = {}
 		for v in entry:gmatch("[^:]+") do f[#f + 1] = v end
-		if #f == 11 and f[1]:match("^[%w_]+$") then st.wares[f[1]] = { unpack(f, 2, 11) } end
+		if #f == 11 and f[1]:match("^[%w_]+$") then
+			f[10], f[11] = rule_field_in(f[10]), rule_field_in(f[11])
+			st.wares[f[1]] = { unpack(f, 2, 11) }
+		end
 	end
+	st.supplyrule, st.buildrule = rule_field_in(st.supplyrule), rule_field_in(st.buildrule)
 	return st
 end
 
@@ -3543,6 +3786,8 @@ local function status_text()
 		.. (S.credits.empire_on and string.format(" | empire trades kept for the host: %d", S.credits.empire_trades) or "")
 		.. ((S.ssettings.sent + S.ssettings.applied > 0)
 			and string.format(" | station settings sent %d, applied %d", S.ssettings.sent, S.ssettings.applied) or "")
+		.. ((S.rules.sent + S.rules.applied > 0)
+			and string.format(" | trade rules sent %d, applied %d", S.rules.sent, S.rules.applied) or "")
 		.. ((S.commands.sent + S.commands.applied > 0)
 			and string.format(" | assignments sent %d, applied %d", S.commands.sent, S.commands.applied) or "")) or "-"
 	return string.format("mode %s | backend %s (%s) | proxy %s%s | partner %s %s, last snapshot %s | link %s | rotation %s %s",
@@ -3593,6 +3838,11 @@ local function share_save()
 		-- and the game time it was taken at: builds queued before it finish in both worlds by themselves, so md
 		-- doesn't copy the ships and station modules they make (OnShipBuilt, OnModulesBuilt)
 		SetNPCBlackboard(S.player, "$x4coop_shared_at", C.GetCurrentGameTime())
+		-- and from now on both worlds have the same objects and rules with the same ids: forget the pairings
+		S.alias.into, S.alias.out, S.alias.loaded = {}, {}, true
+		S.rules.alias.into, S.rules.alias.out, S.rules.alias.loaded = {}, {}, true
+		SetNPCBlackboard(S.player, "$x4coop_alias", nil)
+		SetNPCBlackboard(S.player, "$x4coop_rule_alias", nil)
 		SaveGame("quicksave", "X4 Co-op shared world")
 		net_send("X|share|" .. ffi.string(C.GetSaveFolderPath()) .. "|quicksave.xml.gz")
 		notify("saving to your quicksave and sending it to your partner%s",
@@ -3776,6 +4026,7 @@ local function tick(now, dt)
 	Feature.behaviours_tick(now)
 	Feature.foot_tick(now)
 	Feature.stations_tick()
+	Feature.rules_tick(now)
 	Feature.settings_tick(now)
 	Feature.commands_tick(now)
 end
