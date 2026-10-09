@@ -125,6 +125,7 @@ local config = {
 	crew_sync = 1,            -- shared world: ships' crew and marines (numbers, skills) and pilots' skills
 	world_sync = 1,           -- shared world: other factions' stations and sector owners follow the host's world
 	logbook_sync = 1,         -- shared world: missions, general and diplomacy logbook entries in both logbooks
+	loot_sync = 1,            -- shared world: lockboxes opened, drops collected, crates opened are gone in both
 	ghost_latency = 0.12,     -- s, simulated one-way latency in ghost mode
 	ghost_jitter = 0.03,      -- s, extra random delay per snapshot
 	ghost_loss = 0.0,         -- 0..1, fraction of snapshots dropped
@@ -386,6 +387,7 @@ local function reset()
 		renames = { sent = 0, applied = 0 },
 		crew = { on = false, sent = 0, applied = 0 },
 		logbook = { next = 0, last = nil, sent = 0, applied = 0 },
+		loot = { on = false, sent = 0, applied = 0 },
 		world = { key = nil, asked = {}, gone = 0, wanted = 0, layouts = 0, summaries = 0, built = 0, ships = 0 },
 		rules = { next = 0, base = nil, shared = {}, alias = { loaded = false, into = {}, out = {} }, sent = 0, applied = 0 },
 		ssettings = { list = {}, idx = 0, next = 0, ids = {}, base = {}, settle = {}, out = {}, expect = {}, sent = 0, applied = 0 },
@@ -890,6 +892,8 @@ on_pipe_message = function(msg)
 		if config.mode == "net" then Receive.g(f, now) end
 	elseif kind == "h" then
 		if config.mode == "net" then Receive.h(f, now) end
+	elseif kind == "d" then
+		if config.mode == "net" then Receive.d(f, now) end
 	elseif kind == "M" then
 		local text = clean_text(f[3], 200)
 		if text ~= "" then
@@ -4543,6 +4547,57 @@ end
 Feature.logbook_tick = logbook_tick
 
 -------------------------------------------------------------------------------
+-- Shared loot: a lockbox opened, a drop collected or a crate opened by either player is gone in the other's world
+-- too, without dropping its contents again: the loot is the finder's (md OnLootLockbox/Drop/Crate, OnLoot).
+-- "d|msg|id|kind|macro|sector|x|y|z|station|station macro" (kind: lockbox, drop or crate; a crate's place is on the
+-- station), sent reliably.
+
+local LOOT_KINDS = { lockbox = true, drop = true, crate = true }
+
+local function loot_enabled()
+	return config.mode == "net" and S.link.linked and config.loot_sync == 1
+end
+
+local function on_loot()
+	local list = S.player and GetNPCBlackboard(S.player, "$x4coop_loot")
+	if S.player then SetNPCBlackboard(S.player, "$x4coop_loot", nil) end
+	if type(list) ~= "table" or not loot_enabled() then return end
+	for _, v in ipairs(list) do
+		local ok = type(v) == "table" and LOOT_KINDS[v[1]] and type(v[2]) == "string" and v[2]:match("^[%w_]+$")
+			and type(v[3]) == "string" and v[3]:match("^[%w_]+$")
+			and (v[1] ~= "crate" or valid_world_ref(v[7], v[8], v[3]))
+		for i = 4, 6 do ok = ok and tonumber(v[i]) ~= nil end
+		if ok then
+			reliable_send("d", { v[1], v[2], v[3], string.format("%.1f", tonumber(v[4])), string.format("%.1f", tonumber(v[5])),
+				string.format("%.1f", tonumber(v[6])), v[1] == "crate" and alias_out(v[7]) or "", v[1] == "crate" and v[8] or "" })
+			S.loot.sent = S.loot.sent + 1
+		end
+	end
+end
+
+Receive.d = function(f, now)
+	if not loot_enabled() then return end
+	reliable_receive("d", f, now, function(m)
+		local x, y, z = tonumber(m[7]), tonumber(m[8]), tonumber(m[9])
+		if not (LOOT_KINDS[m[4]] and type(m[5]) == "string" and m[5]:match("^[%w_]+$") and type(m[6]) == "string"
+			and m[6]:match("^[%w_]+$") and x and y and z and (m[4] ~= "crate" or valid_world_ref(m[10], m[11], m[6]))) then return end
+		request("loot", { m[4], m[5], m[6], x, y, z, m[4] == "crate" and alias_in(m[10]) or "", m[4] == "crate" and m[11] or "" })
+		S.loot.applied = S.loot.applied + 1
+	end)
+end
+
+local function loot_tick()
+	local on = loot_enabled()
+	if on ~= S.loot.on then
+		S.loot.on = on
+		request("loot_sync", { on and 1 or 0 })
+	end
+end
+
+Feature.on_loot = on_loot
+Feature.loot_tick = loot_tick
+
+-------------------------------------------------------------------------------
 -- The wider world (host to joiner): every other faction's stations, as they are in the host's world (built,
 -- expanded, changing owner), and sector owners. The host's md goes round all stations, eight a second, and Lua sends
 -- each one's summary ("g|st|round|station|macro|owner|sector|x|y|z|yaw|pitch|roll|modules|wrecks|sum x|sum y|sum z",
@@ -5075,6 +5130,7 @@ local function tick(now, dt)
 	Feature.crew_tick()
 	Feature.world_tick()
 	Feature.logbook_tick(now)
+	Feature.loot_tick()
 end
 
 local function on_update()
@@ -5121,6 +5177,7 @@ local function init()
 	RegisterEvent("x4coop.deploy_made", Feature.on_deploy_made)
 	RegisterEvent("x4coop.knowledge", Feature.on_knowledge)
 	RegisterEvent("x4coop.crew", Feature.on_crew)
+	RegisterEvent("x4coop.loot", Feature.on_loot)
 	RegisterEvent("x4coop.galaxy", Feature.on_world)
 	RegisterEvent("x4coop.galaxy_want", Feature.on_world_want)
 	RegisterEvent("x4coop.galaxy_layout", Feature.on_world_layout)

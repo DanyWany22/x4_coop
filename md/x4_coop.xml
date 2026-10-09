@@ -2825,6 +2825,116 @@
           </actions>
         </cue>
 
+        <!--
+          Shared loot: a lockbox the player opens, a drop the player collects and a crate the player opens are reported
+          (player.entity.$x4coop_loot gets [kind lockbox/drop/crate, macro, sector macro, x, y, z, station idcode,
+          station macro]: in the sector, or for a crate on that station; then 'x4coop.loot'). OnLoot (param3: the
+          same) removes ours, the one of that macro nearest that spot, without dropping what's in it: the loot is the
+          finder's. 'loot_sync' (param3: [1 or 0]) turns it on.
+        -->
+        <cue name="OnLootSyncConfig" instantiate="true">
+          <conditions>
+            <event_ui_triggered screen="'x4coop'" control="'loot_sync'"/>
+          </conditions>
+          <actions>
+            <set_value name="Root.$LootSyncOn" exact="event.param3.{1}"/>
+          </actions>
+        </cue>
+
+        <cue name="OnLootLockbox" instantiate="true">
+          <conditions>
+            <event_player_opened_lockbox/>
+            <check_value value="@Root.$LootSyncOn == 1 and @event.param.sector and @event.param.macro"/>
+          </conditions>
+          <actions>
+            <set_value name="$O" exact="event.param"/>
+            <set_value name="$P" exact="$O.relativeposition.{$O.sector}"/>
+            <set_value name="$Entry" exact="['lockbox', $O.macro.id, $O.sector.macro.id, $P.x / 1m, $P.y / 1m, $P.z / 1m, '', '']"/>
+            <include_actions ref="LootReport"/>
+          </actions>
+        </cue>
+
+        <cue name="OnLootDrop" instantiate="true">
+          <conditions>
+            <event_player_collected_ware/>
+            <check_value value="@Root.$LootSyncOn == 1 and @event.param3.macro"/>
+          </conditions>
+          <actions>
+            <set_value name="$O" exact="event.param3"/>
+            <!-- the drop may be gone already: then where the player is -->
+            <set_value name="$Where" exact="if @$O.sector then $O else player.entity"/>
+            <do_if value="@$Where.sector">
+              <set_value name="$P" exact="$Where.relativeposition.{$Where.sector}"/>
+              <set_value name="$Entry" exact="['drop', $O.macro.id, $Where.sector.macro.id, $P.x / 1m, $P.y / 1m, $P.z / 1m, '', '']"/>
+              <include_actions ref="LootReport"/>
+            </do_if>
+          </actions>
+        </cue>
+
+        <cue name="OnLootCrate" instantiate="true">
+          <conditions>
+            <event_player_opened_crate/>
+            <check_value value="@Root.$LootSyncOn == 1 and @event.param.macro and @event.param.container.isclass.station"/>
+          </conditions>
+          <actions>
+            <set_value name="$O" exact="event.param"/>
+            <set_value name="$S" exact="$O.container"/>
+            <do_if value="@$S.sector">
+              <set_value name="$P" exact="$O.relativeposition.{$S}"/>
+              <set_value name="$Entry" exact="['crate', $O.macro.id, $S.sector.macro.id, $P.x / 1m, $P.y / 1m, $P.z / 1m, $S.idcode, $S.macro.id]"/>
+              <include_actions ref="LootReport"/>
+            </do_if>
+          </actions>
+        </cue>
+
+        <cue name="OnLoot" instantiate="true">
+          <conditions>
+            <event_ui_triggered screen="'x4coop'" control="'loot'"/>
+          </conditions>
+          <actions>
+            <set_value name="$L" exact="event.param3"/>
+            <set_value name="$Pos" exact="position.[$L.{4}, $L.{5}, $L.{6}]"/>
+            <set_value name="$Found" exact="null"/>
+            <do_if value="$L.{1} == 'crate'">
+              <set_value name="$A" exact="[$L.{7}, $L.{8}, $L.{3}]"/>
+              <include_actions ref="FindContainer"/>
+              <do_if value="@$Container.isclass.station">
+                <find_object_component name="$Candidates" object="$Container" class="class.crate" checkoperational="false" multiple="true"/>
+                <set_value name="$Best" exact="5m"/>
+                <do_for_each name="$C" in="$Candidates">
+                  <do_if value="$C.macro.id == $L.{2} and $C.relativeposition.{$Container}.distanceto.{$Pos} lt $Best">
+                    <set_value name="$Found" exact="$C"/>
+                    <set_value name="$Best" exact="$C.relativeposition.{$Container}.distanceto.{$Pos}"/>
+                  </do_if>
+                </do_for_each>
+              </do_if>
+            </do_if>
+            <do_else>
+              <find_sector name="$Sector" macro="@macro.{$L.{3}}"/>
+              <do_if value="$Sector">
+                <do_if value="$L.{1} == 'lockbox'">
+                  <find_object name="$Candidates" class="class.lockbox" space="$Sector" multiple="true"/>
+                  <set_value name="$Best" exact="300m"/>
+                </do_if>
+                <do_else>
+                  <find_object name="$Candidates" class="class.collectable" space="$Sector" multiple="true"/>
+                  <set_value name="$Best" exact="500m"/>
+                </do_else>
+                <do_for_each name="$C" in="$Candidates">
+                  <do_if value="$C.macro.id == $L.{2} and $C.relativeposition.{$Sector}.distanceto.{$Pos} lt $Best">
+                    <set_value name="$Found" exact="$C"/>
+                    <set_value name="$Best" exact="$C.relativeposition.{$Sector}.distanceto.{$Pos}"/>
+                  </do_if>
+                </do_for_each>
+              </do_if>
+            </do_else>
+            <do_if value="@$Found.exists">
+              <set_allow_drop object="$Found" allow="false" recursive="true"/>
+              <destroy_object object="$Found" explosion="false"/>
+            </do_if>
+          </actions>
+        </cue>
+
         <cue name="OnNpcClear" instantiate="true">
           <conditions>
             <event_ui_triggered screen="'x4coop'" control="'npc_clear'"/>
@@ -3159,6 +3269,16 @@
                 <remove_value name="Root.$GalaxySeen.{$S}"/>
               </do_if>
             </do_for_each>
+          </actions>
+        </library>
+
+        <library name="LootReport">
+          <actions>
+            <do_if value="not player.entity.$x4coop_loot?">
+              <set_value name="player.entity.$x4coop_loot" exact="[]"/>
+            </do_if>
+            <append_to_list name="player.entity.$x4coop_loot" exact="$Entry"/>
+            <raise_lua_event name="'x4coop.loot'"/>
           </actions>
         </library>
 

@@ -55,6 +55,8 @@ local SC = {
 	                 role = "join", own_world = "abc123", partner_world = "abc123", foot_test = true },
 	stations     = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
 	                 role = "join", own_world = "abc123", partner_world = "abc123", station_test = true },
+	loot         = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
+	                 role = "join", own_world = "abc123", partner_world = "abc123", loot_test = true },
 	logbook      = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
 	                 role = "join", own_world = "abc123", partner_world = "abc123", logbook_test = true },
 	galaxy_join  = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
@@ -402,6 +404,8 @@ knowledge_requests = {}
 rename_requests = {}
 crew_requests = {}
 galaxy_requests = {}
+loot_requests = {}
+if sc.loot_test then blackboard["$x4coop_alias"] = "PST-7=LST-201" end
 if sc.crew_test then blackboard["$x4coop_alias"] = "PSH-9=LSH-9" end
 if sc.rename_test then blackboard["$x4coop_alias"] = "PSH-9=LSH-9" end
 if sc.knowledge_test then blackboard["$x4coop_alias"] = "PST-7=LST-201" end
@@ -778,6 +782,10 @@ function AddUITriggeredEvent(screen, control, args)
 		galaxy_requests[#galaxy_requests + 1] = "world_layout:" .. table.concat(head, ":") .. ":" .. table.concat(mods, ";")
 	elseif control == "world_sync" then
 		-- md only remembers the switch
+	elseif control == "loot" then
+		loot_requests[#loot_requests + 1] = sim_args(args)
+	elseif control == "loot_sync" then
+		-- md only remembers the switch
 	elseif control == "logbook" then
 		logbook_requests[#logbook_requests + 1] = sim_args(args)
 	elseif control == "crew" then
@@ -948,6 +956,8 @@ if sc.pipes then
 						msg = "X|profile|" .. f[3] .. "|" .. (sim_profiles[f[3]] or "none") }
 				elseif f[1] == "g" and f[2] == "msg" then
 					partner_queue[#partner_queue + 1] = { at = clock + 2 * ONE_WAY, msg = "g|ack|" .. f[3] }
+				elseif f[1] == "d" and f[2] == "msg" then
+					partner_queue[#partner_queue + 1] = { at = clock + 2 * ONE_WAY, msg = "d|ack|" .. f[3] }
 				elseif f[1] == "h" and f[2] == "msg" then
 					partner_queue[#partner_queue + 1] = { at = clock + 2 * ONE_WAY, msg = "h|ack|" .. f[3] }
 				elseif f[1] == "w" and f[2] == "msg" then
@@ -1592,6 +1602,23 @@ local function logbook_script()
 	while logbook_steps[1] and clock >= logbook_steps[1][1] do table.remove(logbook_steps, 1)[2]() end
 end
 
+local loot_steps = {
+	{ 6, function()
+		blackboard["$x4coop_loot"] = {
+			{ "lockbox", "lockbox_ship_s_macro", SECTORS[500], 100, 20, -300, "", "" },
+			{ "crate", "crate_s_01_macro", SECTORS[500], 5, 0, 12, "STN-1", "station_gen_factory_base_01_macro" },
+			{ "piñata", "x", SECTORS[500], 0, 0, 0, "", "" } }
+		queue("x4coop.loot")
+	end },
+	{ 10, function() pipe_reader("d|msg|0c71|drop|collectable_ware_hullparts_macro|" .. SECTORS[500] .. "|1.0|2.0|3.0||") end },
+	{ 10.3, function() pipe_reader("d|msg|0c71|drop|collectable_ware_hullparts_macro|" .. SECTORS[500] .. "|1.0|2.0|3.0||") end },
+	{ 11, function() pipe_reader("d|msg|0c72|crate|crate_s_01_macro|" .. SECTORS[500] .. "|5.0|0.0|12.0|PST-7|station_gen_factory_base_01_macro") end },
+}
+local function loot_script()
+	if not sc.loot_test or not pipe_reader then return end
+	while loot_steps[1] and clock >= loot_steps[1][1] do table.remove(loot_steps, 1)[2]() end
+end
+
 local function credit_script()
 	if not sc.credits_test or not pipe_reader then return end
 	while credit_steps[1] and clock >= credit_steps[1][1] do
@@ -1737,6 +1764,7 @@ while clock < sc.duration do
 	crew_script()
 	galaxy_script()
 	logbook_script()
+	loot_script()
 	if sc.partner_restart_at and clock >= sc.partner_restart_at and partner_clock_offset == 1000 then
 		partner_clock_offset = -500
 		say("t=%.1f partner restarted their game (clock jumped back)", clock)
@@ -2285,6 +2313,22 @@ if sc.foot_test then
 		and tostring(foot_status_seen):find("on foot at Harbour Bar Station", 1, true) ~= nil
 		and said:find("is on foot at Harbour Bar Station", 1, true) ~= nil
 		and said:find("is back aboard a ship", 1, true) ~= nil
+end
+if sc.loot_test then
+	local sent = {}
+	for _, w in ipairs(pipe_writes) do
+		local id, rest = w:match("^d|msg|(%x+)|(.*)$")
+		if id then sent[id] = rest end
+	end
+	local list = {}
+	for _, rest in pairs(sent) do list[#list + 1] = rest end
+	table.sort(list)
+	local s = SECTORS[500]
+	say("loot: sent %s; md %s", table.concat(list, " / "), table.concat(loot_requests, " / "))
+	ok = ok and table.concat(list, " / ") == "crate|crate_s_01_macro|" .. s .. "|5.0|0.0|12.0|STN-1|station_gen_factory_base_01_macro"
+			.. " / lockbox|lockbox_ship_s_macro|" .. s .. "|100.0|20.0|-300.0||"
+		and table.concat(loot_requests, " / ") == "drop:collectable_ware_hullparts_macro:" .. s .. ":1:2:3::"
+			.. " / crate:crate_s_01_macro:" .. s .. ":5:0:12:LST-201:station_gen_factory_base_01_macro"
 end
 if sc.logbook_test then
 	local sent = {}
