@@ -2102,6 +2102,99 @@
           </actions>
         </cue>
 
+        <!--
+          Deployables (shared faction): a satellite, navigation beacon, resource probe, mine or laser tower the empire
+          deploys is deployed in the partner's world too, at the same place; one that is destroyed or collected goes
+          there too. DeployWatch.$Objects holds ours (deployed here, or copies of the partner's). Reports go to
+          player.entity.$x4coop_deploys as ['add', idcode, macro, sector macro, x, y, z] or ['gone', idcode, macro,
+          sector macro, 0, 0, 0], then 'x4coop.deploys'. OnDeploy (param3: the same, then the partner's idcode)
+          makes or removes ours; one made here is reported for pairing (player.entity.$x4coop_deploys_made =
+          [[partner idcode, object], ...], 'x4coop.deploy_made'). 'deploy_sync' (param3: [1 or 0]) turns it on.
+        -->
+        <cue name="OnDeploySyncConfig" instantiate="true">
+          <conditions>
+            <event_ui_triggered screen="'x4coop'" control="'deploy_sync'"/>
+          </conditions>
+          <actions>
+            <set_value name="Root.$DeploySyncOn" exact="event.param3.{1}"/>
+          </actions>
+        </cue>
+
+        <cue name="DeployWatch">
+          <actions>
+            <create_group groupname="$Objects"/>
+          </actions>
+          <cues>
+            <cue name="DeployLaunched" instantiate="true">
+              <conditions>
+                <check_any>
+                  <event_satellite_launched space="player.galaxy"/>
+                  <event_navbeacon_launched space="player.galaxy"/>
+                  <event_resourceprobe_launched space="player.galaxy"/>
+                  <event_mine_launched space="player.galaxy"/>
+                  <event_lasertower_launched space="player.galaxy"/>
+                </check_any>
+                <check_value value="@Root.$DeploySyncOn == 1 and @event.param2.isplayerowned and @event.param2.sector"/>
+              </conditions>
+              <actions>
+                <set_value name="$D" exact="event.param2"/>
+                <add_to_group groupname="DeployWatch.$Objects" object="$D"/>
+                <set_value name="$P" exact="$D.relativeposition.{$D.sector}"/>
+                <do_if value="not player.entity.$x4coop_deploys?">
+                  <set_value name="player.entity.$x4coop_deploys" exact="[]"/>
+                </do_if>
+                <append_to_list name="player.entity.$x4coop_deploys" exact="['add', $D.idcode, $D.macro.id, $D.sector.macro.id, $P.x / 1m, $P.y / 1m, $P.z / 1m]"/>
+                <raise_lua_event name="'x4coop.deploys'"/>
+              </actions>
+            </cue>
+            <cue name="DeployGone" instantiate="true">
+              <conditions>
+                <event_object_destroyed group="DeployWatch.$Objects"/>
+                <check_value value="@Root.$DeploySyncOn == 1 and @event.object.sector"/>
+              </conditions>
+              <actions>
+                <do_if value="not player.entity.$x4coop_deploys?">
+                  <set_value name="player.entity.$x4coop_deploys" exact="[]"/>
+                </do_if>
+                <append_to_list name="player.entity.$x4coop_deploys" exact="['gone', event.object.idcode, event.object.macro.id, event.object.sector.macro.id, 0, 0, 0]"/>
+                <raise_lua_event name="'x4coop.deploys'"/>
+              </actions>
+            </cue>
+          </cues>
+        </cue>
+
+        <cue name="OnDeploy" instantiate="true">
+          <conditions>
+            <event_ui_triggered screen="'x4coop'" control="'deploy'"/>
+          </conditions>
+          <actions>
+            <set_value name="$A" exact="event.param3"/>
+            <do_if value="$A.{1} == 'add' and @macro.{$A.{3}}">
+              <find_sector name="$Sector" macro="@macro.{$A.{4}}"/>
+              <do_if value="$Sector">
+                <create_object name="$D" macro="macro.{$A.{3}}" sector="$Sector" owner="faction.player">
+                  <position x="$A.{5}" y="$A.{6}" z="$A.{7}"/>
+                </create_object>
+                <do_if value="@$D.exists">
+                  <add_to_group groupname="DeployWatch.$Objects" object="$D"/>
+                  <do_if value="not player.entity.$x4coop_deploys_made?">
+                    <set_value name="player.entity.$x4coop_deploys_made" exact="[]"/>
+                  </do_if>
+                  <append_to_list name="player.entity.$x4coop_deploys_made" exact="[$A.{8}, $D]"/>
+                  <raise_lua_event name="'x4coop.deploy_made'"/>
+                </do_if>
+              </do_if>
+            </do_if>
+            <do_elseif value="$A.{1} == 'gone'">
+              <do_for_each name="$D" in="DeployWatch.$Objects">
+                <do_if value="$D.idcode == $A.{2}">
+                  <destroy_object object="$D" explosion="false"/>
+                </do_if>
+              </do_for_each>
+            </do_elseif>
+          </actions>
+        </cue>
+
         <cue name="OnNpcClear" instantiate="true">
           <conditions>
             <event_ui_triggered screen="'x4coop'" control="'npc_clear'"/>

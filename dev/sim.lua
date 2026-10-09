@@ -55,6 +55,8 @@ local SC = {
 	                 role = "join", own_world = "abc123", partner_world = "abc123", foot_test = true },
 	stations     = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
 	                 role = "join", own_world = "abc123", partner_world = "abc123", station_test = true },
+	deploy       = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
+	                 role = "host", own_world = "abc123", partner_world = "abc123", deploy_test = true },
 	refit        = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
 	                 role = "join", own_world = "abc123", partner_world = "abc123", refit_test = true },
 	modules      = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
@@ -383,6 +385,7 @@ station_requests, station_made_id = {}, nil
 command_requests, command_misses = {}, {}
 module_requests = {}
 refit_requests = {}
+deploy_requests = {}
 if sc.refit_test then blackboard["$x4coop_alias"] = "PSH-9=LSH-9" end
 local function sim_args(args)  -- md's arguments as text; lists of [ware, count] as "ware=count"
 	local parts = {}
@@ -731,6 +734,16 @@ function AddUITriggeredEvent(screen, control, args)
 		manager_requests[#manager_requests + 1] = tostring(args[1])
 	elseif control == "station_sync" then
 		-- md only remembers the switch
+	elseif control == "deploy" then
+		deploy_requests[#deploy_requests + 1] = sim_args(args)
+		if args[1] == "add" then  -- md made the copy
+			objects[801] = { sector = 500, x = args[5], y = args[6], z = args[7], yaw = 0, pitch = 0, roll = 0, macro = args[3],
+				idcode = "LDE-801", newship = true }
+			blackboard["$x4coop_deploys_made"] = { { args[8], 801 } }
+			queue("x4coop.deploy_made")
+		end
+	elseif control == "deploy_sync" then
+		-- md only remembers the switch
 	elseif control == "refit" then
 		refit_requests[#refit_requests + 1] = sim_args(args)
 	elseif control == "equipment_sync" then
@@ -877,6 +890,8 @@ if sc.pipes then
 				elseif f[1] == "X" and f[2] == "profile_get" then
 					partner_queue[#partner_queue + 1] = { at = clock + 0.05,
 						msg = "X|profile|" .. f[3] .. "|" .. (sim_profiles[f[3]] or "none") }
+				elseif f[1] == "p" and f[2] == "msg" then
+					partner_queue[#partner_queue + 1] = { at = clock + 2 * ONE_WAY, msg = "p|ack|" .. f[3] }
 				elseif f[1] == "q" and f[2] == "msg" then
 					partner_queue[#partner_queue + 1] = { at = clock + 2 * ONE_WAY, msg = "q|ack|" .. f[3] }
 				elseif f[1] == "e" and f[2] == "msg" then
@@ -1388,6 +1403,22 @@ local function refit_script()
 	while refit_steps[1] and clock >= refit_steps[1][1] do table.remove(refit_steps, 1)[2]() end
 end
 
+local SAT_M = "eq_arg_satellite_02_macro"
+local deploy_steps = {
+	{ 6, function()
+		blackboard["$x4coop_deploys"] = { { "add", "SAT-1", SAT_M, SECTORS[500], 1200.24, -10, 3500 },
+			{ "gone", "SAT-0", SAT_M, SECTORS[500], 0, 0, 0 }, { "explode", "SAT-2", SAT_M, SECTORS[500], 0, 0, 0 } }
+		queue("x4coop.deploys")
+	end },
+	{ 10, function() pipe_reader("p|msg|0d01|add|PSA-4|" .. SAT_M .. "|" .. SECTORS[500] .. "|100.0|0.0|-200.0") end },
+	{ 10.4, function() pipe_reader("p|msg|0d01|add|PSA-4|" .. SAT_M .. "|" .. SECTORS[500] .. "|100.0|0.0|-200.0") end },
+	{ 14, function() pipe_reader("p|msg|0d02|gone|PSA-4|" .. SAT_M .. "|" .. SECTORS[500] .. "|0|0|0") end },
+}
+local function deploy_script()
+	if not sc.deploy_test or not pipe_reader then return end
+	while deploy_steps[1] and clock >= deploy_steps[1][1] do table.remove(deploy_steps, 1)[2]() end
+end
+
 local function credit_script()
 	if not sc.credits_test or not pipe_reader then return end
 	while credit_steps[1] and clock >= credit_steps[1][1] do
@@ -1527,6 +1558,7 @@ while clock < sc.duration do
 	mission_script()
 	module_script()
 	refit_script()
+	deploy_script()
 	if sc.partner_restart_at and clock >= sc.partner_restart_at and partner_clock_offset == 1000 then
 		partner_clock_offset = -500
 		say("t=%.1f partner restarted their game (clock jumped back)", clock)
@@ -2075,6 +2107,22 @@ if sc.foot_test then
 		and tostring(foot_status_seen):find("on foot at Harbour Bar Station", 1, true) ~= nil
 		and said:find("is on foot at Harbour Bar Station", 1, true) ~= nil
 		and said:find("is back aboard a ship", 1, true) ~= nil
+end
+if sc.deploy_test then
+	local sent = {}
+	for _, w in ipairs(pipe_writes) do
+		local id, rest = w:match("^p|msg|(%x+)|(.*)$")
+		if id then sent[id] = rest end
+	end
+	local list = {}
+	for _, rest in pairs(sent) do list[#list + 1] = rest end
+	table.sort(list)
+	local s = SECTORS[500]
+	say("deploy: sent %s", table.concat(list, " / "))
+	say("deploy: md %s; alias %s", table.concat(deploy_requests, " / "), tostring(blackboard["$x4coop_alias"]))
+	ok = ok and table.concat(list, " / ") == "add|SAT-1|" .. SAT_M .. "|" .. s .. "|1200.2|-10.0|3500.0 / gone|SAT-0|" .. SAT_M .. "|" .. s .. "|0.0|0.0|0.0"
+		and table.concat(deploy_requests, " / ") == "add:PSA-4:" .. SAT_M .. ":" .. s .. ":100:0:-200:PSA-4 / gone:LDE-801:" .. SAT_M .. ":" .. s .. ":0:0:0:PSA-4"
+		and tostring(blackboard["$x4coop_alias"]):find("PSA-4=LDE-801", 1, true) ~= nil
 end
 if sc.refit_test then
 	local sent = {}

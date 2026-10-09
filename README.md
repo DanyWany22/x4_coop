@@ -262,6 +262,10 @@ flies, its copy in the other world gets the same equipment: weapons, turrets, sh
 software and drones. Equipment may sit in different slots of the same kind. `/x4coop set equipment_sync 0`
 turns it off.
 
+**Deployables:** a satellite, navigation beacon, resource probe, mine or laser tower either of you deploys is
+deployed in the other world too, at the same place, and paired with the original, so kills reach it. One that
+is destroyed or collected goes in both worlds. `/x4coop set deploy_sync 0` turns it off.
+
 **Stations:** when a build finishes modules of one of the empire's stations, those modules appear in the
 other world too, at the same place on the same station and with the same turrets and shields, so a station
 grows the same way in both. A station
@@ -453,6 +457,7 @@ change a value that already exists; it can't create anything.
 | the joiner's own credits and inventory between sessions | `transfer_money`, `add_inventory`, `remove_inventory` | yes |
 | stations built after the shared save | `create_station`, `create_module` | yes |
 | new ships, ship upgrades, station modules' equipment | `create_ship`, `generate_loadout`, `apply_loadout` | yes |
+| satellites, beacons, probes, mines, laser towers | `create_object`, `destroy_object` | yes |
 | station trade settings, limits, prices, rules, name | the station menus' own functions (Lua) | yes |
 | station accounts and budgets | `transfer_money`, the account menu's own functions (Lua) | yes |
 | ownership (claims, boarding, captures) | `set_owner` | yes |
@@ -518,7 +523,7 @@ game's own schema (`libraries/md.xsd`, `libraries/common.xsd`).
 
 Messages (one text line each): `S` snapshot (position, rotation, velocity, ship, hull, shield),
 `P`/`Q` ping, `M` chat, `L` world link, `K` kill, `D` hit, `F` firing at, `B` nearby ships (both
-ways), `E` station stock (host to joiner), `T` a joiner's trade, `V` relations, `U` research/blueprints/licences, `Z` SETA, `O` ownership, `Y` new ships, `G` orders, `J` behaviours and queues, `I` on foot, `b` station modules, `s` station settings, `c` assignments, `r` trade rules, `a` station accounts, `m` missions, `e` station modules removed/wrecked/repaired, `q` ship upgrades, `C` credits given; `R`/`W`/`N`/`X` are between a game and
+ways), `E` station stock (host to joiner), `T` a joiner's trade, `V` relations, `U` research/blueprints/licences, `Z` SETA, `O` ownership, `Y` new ships, `G` orders, `J` behaviours and queues, `I` on foot, `b` station modules, `s` station settings, `c` assignments, `r` trade rules, `a` station accounts, `m` missions, `e` station modules removed/wrecked/repaired, `q` ship upgrades, `p` deployables, `C` credits given; `R`/`W`/`N`/`X` are between a game and
 its own bridge.
 
 Self-calibration: on first contact the proxy is nudged and read back (does `SetObjectSectorPos`
@@ -567,7 +572,7 @@ python extensions/x4_coop/dev/run_tests.py [--quick]
   its budgets, applied once with the originals, the host's balances followed by the joiner), the joiner's
   own wallet and inventory (asked for after loading, brought along the first time, kept every 30 s and before
   loading), ship upgrades and module equipment both ways (wares counted, sent once, translated, applied
-  once), missions both ways (new, changed and ended ones sent once, alerts and guidance left out, ones
+  once), deployables both ways (placed at the same spot once, paired, removed when gone), missions both ways (new, changed and ended ones sent once, alerts and guidance left out, ones
   both worlds have not shown twice, ended ones dropped by the list), research, blueprints and licences both ways (sent until confirmed, added once), SETA both ways
   (followed; turned off for both when one side can't follow), ownership changes both ways (sent
   until confirmed, applied once), new ships both ways (made once, paired, kills and hits on them
