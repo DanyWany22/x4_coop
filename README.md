@@ -363,6 +363,10 @@ have from the shared save isn't shown twice. `/x4coop set missions 0` turns it o
 both logbooks, with "Co-op: <name>" as its source, and it stays in the host's save. Alerts, upkeep and news
 aren't shared, because both worlds write those themselves. `/x4coop set logbook_sync 0` turns it off.
 
+**Cargo:** the empire's ships carry the same in both worlds. The host's world is in charge of what they carry,
+except for the ship the joiner flies, which the joiner's world is in charge of: what the joiner buys, sells,
+mines or collects is on board in the host's world too. `/x4coop set cargo_sync 0` turns it off.
+
 **Shared loot:** a lockbox one of you opens, a drop one of you collects and a crate one of you opens are gone
 in the other's world too, without spilling their contents again: the loot is the finder's.
 `/x4coop set loot_sync 0` turns it off.
@@ -565,7 +569,7 @@ game's own schema (`libraries/md.xsd`, `libraries/common.xsd`).
 
 Messages (one text line each): `S` snapshot (position, rotation, velocity, ship, hull, shield),
 `P`/`Q` ping, `M` chat, `L` world link, `K` kill, `D` hit, `F` firing at, `B` nearby ships (both
-ways), `E` station stock (host to joiner), `T` a joiner's trade, `V` relations, `U` research/blueprints/licences, `Z` SETA, `O` ownership, `Y` new ships, `G` orders, `J` behaviours and queues, `I` on foot, `b` station modules, `s` station settings, `c` assignments, `r` trade rules, `a` station accounts, `m` missions, `e` station modules removed/wrecked/repaired, `q` ship upgrades, `p` deployables, `n` map knowledge, `l` ship renames, `w` crews, `g` the wider world (host to joiner), `h` logbook entries, `d` loot taken, `C` credits given; `R`/`W`/`N`/`X` are between a game and
+ways), `E` station stock (host to joiner), `T` a joiner's trade, `V` relations, `U` research/blueprints/licences, `Z` SETA, `O` ownership, `Y` new ships, `G` orders, `J` behaviours and queues, `I` on foot, `b` station modules, `s` station settings, `c` assignments, `r` trade rules, `a` station accounts, `m` missions, `e` station modules removed/wrecked/repaired, `q` ship upgrades, `p` deployables, `n` map knowledge, `l` ship renames, `w` crews, `g` the wider world (host to joiner), `h` logbook entries, `d` loot taken, `f` cargo, `C` credits given; `R`/`W`/`N`/`X` are between a game and
 its own bridge.
 
 Self-calibration: on first contact the proxy is nudged and read back (does `SetObjectSectorPos`
@@ -617,7 +621,8 @@ python extensions/x4_coop/dev/run_tests.py [--quick]
   once), map knowledge both ways (sectors, stations with how much is revealed, factions; checked and
   translated), the wider world (summaries sent by the host only, checked; layouts asked for, sent, parsed;
   sector owners; stations destroyed both ways), the logbook both ways (new entries of the shared kinds once,
-  none of the partner's back), loot both ways (lockboxes, drops, crates; checked, translated), crews both ways (counts and skills checked, translated, applied once), ship renames both ways (only the empire's ships, cleaned, applied once), deployables both ways (placed at the same spot once, paired, removed when gone), missions both ways (new, changed and ended ones sent once, alerts and guidance left out, ones
+  none of the partner's back), cargo both ways (each ship from the world in charge of it, set exactly, an
+  empty hold too), loot both ways (lockboxes, drops, crates; checked, translated), crews both ways (counts and skills checked, translated, applied once), ship renames both ways (only the empire's ships, cleaned, applied once), deployables both ways (placed at the same spot once, paired, removed when gone), missions both ways (new, changed and ended ones sent once, alerts and guidance left out, ones
   both worlds have not shown twice, ended ones dropped by the list), research, blueprints and licences both ways (sent until confirmed, added once), SETA both ways
   (followed; turned off for both when one side can't follow), ownership changes both ways (sent
   until confirmed, applied once), new ships both ways (made once, paired, kills and hits on them

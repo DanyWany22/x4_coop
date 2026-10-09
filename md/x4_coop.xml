@@ -2935,6 +2935,120 @@
           </actions>
         </cue>
 
+        <!--
+          Cargo (shared faction): what the empire's ships carry is the same in both worlds. The host's world is in
+          charge of all of them but the ship the joiner flies, which the joiner's world is in charge of. CargoWatch
+          (host: six of the empire's ships every 2 s, not the partner's own ship; joiner: the ship it flies) reports a
+          ship whose cargo changed since the last look: player.entity.$x4coop_cargo gets [idcode, macro, sector
+          macro, [[ware id, amount], ...]], then 'x4coop.cargo'. OnCargo (param3: [idcode, macro, sector macro,
+          [ware id, amount], ...]) sets ours to exactly that. 'cargo_sync' (param3: [1 or 0, 'host' or 'join'])
+          turns it on.
+        -->
+        <cue name="OnCargoSyncConfig" instantiate="true">
+          <conditions>
+            <event_ui_triggered screen="'x4coop'" control="'cargo_sync'"/>
+          </conditions>
+          <actions>
+            <set_value name="Root.$CargoSyncOn" exact="event.param3.{1}"/>
+            <set_value name="Root.$CargoRole" exact="event.param3.{2}"/>
+          </actions>
+        </cue>
+
+        <cue name="CargoWatch" instantiate="true" checkinterval="2s">
+          <conditions>
+            <check_value value="@Root.$CargoSyncOn == 1"/>
+          </conditions>
+          <actions>
+            <do_if value="not Root.$CargoBase?">
+              <set_value name="Root.$CargoBase" exact="table[]"/>
+              <set_value name="Root.$CargoQuiet" exact="table[]"/>
+            </do_if>
+            <set_value name="$Look" exact="[]"/>
+            <do_if value="Root.$CargoRole == 'host'">
+              <do_if value="not Root.$CargoQueue? or Root.$CargoQueue.count == 0">
+                <find_ship name="Root.$CargoQueue" owner="faction.player" space="player.galaxy" multiple="true"/>
+              </do_if>
+              <do_all exact="[6, Root.$CargoQueue.count].min">
+                <set_value name="$Ship" exact="Root.$CargoQueue.{1}"/>
+                <remove_value name="Root.$CargoQueue.{1}"/>
+                <do_if value="@$Ship.exists and $Ship.isplayerowned and not @Root.$AllProxies.indexof.{$Ship} and not @Root.$Adopted.indexof.{$Ship}">
+                  <append_to_list name="$Look" exact="$Ship"/>
+                </do_if>
+              </do_all>
+            </do_if>
+            <do_elseif value="@player.occupiedship.isplayerowned">
+              <append_to_list name="$Look" exact="player.occupiedship"/>
+            </do_elseif>
+            <do_for_each name="$Ship" in="$Look">
+              <do_if value="@$Ship.sector">
+                <set_value name="$Now" exact="$Ship.cargo.table"/>
+                <set_value name="$Old" exact="@Root.$CargoBase.{$Ship}"/>
+                <set_value name="Root.$CargoBase.{$Ship}" exact="$Now"/>
+                <set_value name="$Changed" exact="false"/>
+                <do_if value="$Old and not (@Root.$CargoQuiet.{$Ship} gt player.age)">
+                  <do_if value="$Old.keys.count != $Now.keys.count">
+                    <set_value name="$Changed" exact="true"/>
+                  </do_if>
+                  <do_for_each name="$W" valuename="$N" in="$Now">
+                    <do_if value="not $Old.{$W}? or $Old.{$W} != $N">
+                      <set_value name="$Changed" exact="true"/>
+                    </do_if>
+                  </do_for_each>
+                </do_if>
+                <do_if value="$Changed">
+                  <set_value name="$Wares" exact="[]"/>
+                  <do_for_each name="$W" valuename="$N" in="$Now">
+                    <append_to_list name="$Wares" exact="[$W.id, $N]"/>
+                  </do_for_each>
+                  <do_if value="not player.entity.$x4coop_cargo?">
+                    <set_value name="player.entity.$x4coop_cargo" exact="[]"/>
+                  </do_if>
+                  <append_to_list name="player.entity.$x4coop_cargo" exact="[$Ship.idcode, $Ship.macro.id, $Ship.sector.macro.id, $Wares]"/>
+                  <raise_lua_event name="'x4coop.cargo'"/>
+                </do_if>
+              </do_if>
+            </do_for_each>
+          </actions>
+        </cue>
+
+        <cue name="OnCargo" instantiate="true">
+          <conditions>
+            <event_ui_triggered screen="'x4coop'" control="'cargo'"/>
+          </conditions>
+          <actions>
+            <set_value name="$C" exact="event.param3"/>
+            <set_value name="$A" exact="[$C.{1}, $C.{2}, $C.{3}]"/>
+            <include_actions ref="FindContainer"/>
+            <do_if value="@$Container.isclass.ship and $Container.isplayerowned">
+              <set_value name="$Ship" exact="$Container"/>
+              <do_if value="not Root.$CargoQuiet?">
+                <set_value name="Root.$CargoQuiet" exact="table[]"/>
+              </do_if>
+              <set_value name="Root.$CargoQuiet.{$Ship}" exact="player.age + 6s"/>
+              <set_value name="$Want" exact="table[]"/>
+              <do_all exact="$C.count - 3" counter="$i">
+                <do_if value="@ware.{$C.{$i + 3}.{1}}">
+                  <set_value name="$Want.{ware.{$C.{$i + 3}.{1}}}" exact="$C.{$i + 3}.{2}"/>
+                </do_if>
+              </do_all>
+              <do_for_each name="$W" valuename="$N" in="$Ship.cargo.table">
+                <do_if value="not $Want.{$W}?">
+                  <remove_cargo object="$Ship" ware="$W" exact="$N"/>
+                </do_if>
+              </do_for_each>
+              <do_for_each name="$W" valuename="$N" in="$Want">
+                <set_value name="$Have" exact="$Ship.cargo.{$W}.count"/>
+                <do_if value="$N gt $Have">
+                  <add_cargo object="$Ship" ware="$W" exact="$N - $Have"/>
+                </do_if>
+                <do_elseif value="$N lt $Have">
+                  <remove_cargo object="$Ship" ware="$W" exact="$Have - $N"/>
+                </do_elseif>
+              </do_for_each>
+            </do_if>
+          </actions>
+        </cue>
+
         <cue name="OnNpcClear" instantiate="true">
           <conditions>
             <event_ui_triggered screen="'x4coop'" control="'npc_clear'"/>

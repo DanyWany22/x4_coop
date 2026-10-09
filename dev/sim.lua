@@ -55,6 +55,8 @@ local SC = {
 	                 role = "join", own_world = "abc123", partner_world = "abc123", foot_test = true },
 	stations     = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
 	                 role = "join", own_world = "abc123", partner_world = "abc123", station_test = true },
+	cargo        = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
+	                 role = "join", own_world = "abc123", partner_world = "abc123", cargo_test = true },
 	loot         = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
 	                 role = "join", own_world = "abc123", partner_world = "abc123", loot_test = true },
 	logbook      = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
@@ -405,6 +407,8 @@ rename_requests = {}
 crew_requests = {}
 galaxy_requests = {}
 loot_requests = {}
+cargo_requests = {}
+if sc.cargo_test then blackboard["$x4coop_alias"] = "PSH-9=LSH-9" end
 if sc.loot_test then blackboard["$x4coop_alias"] = "PST-7=LST-201" end
 if sc.crew_test then blackboard["$x4coop_alias"] = "PSH-9=LSH-9" end
 if sc.rename_test then blackboard["$x4coop_alias"] = "PSH-9=LSH-9" end
@@ -782,6 +786,10 @@ function AddUITriggeredEvent(screen, control, args)
 		galaxy_requests[#galaxy_requests + 1] = "world_layout:" .. table.concat(head, ":") .. ":" .. table.concat(mods, ";")
 	elseif control == "world_sync" then
 		-- md only remembers the switch
+	elseif control == "cargo" then
+		cargo_requests[#cargo_requests + 1] = sim_args(args)
+	elseif control == "cargo_sync" then
+		-- md only remembers the switch
 	elseif control == "loot" then
 		loot_requests[#loot_requests + 1] = sim_args(args)
 	elseif control == "loot_sync" then
@@ -956,6 +964,8 @@ if sc.pipes then
 						msg = "X|profile|" .. f[3] .. "|" .. (sim_profiles[f[3]] or "none") }
 				elseif f[1] == "g" and f[2] == "msg" then
 					partner_queue[#partner_queue + 1] = { at = clock + 2 * ONE_WAY, msg = "g|ack|" .. f[3] }
+				elseif f[1] == "f" and f[2] == "msg" then
+					partner_queue[#partner_queue + 1] = { at = clock + 2 * ONE_WAY, msg = "f|ack|" .. f[3] }
 				elseif f[1] == "d" and f[2] == "msg" then
 					partner_queue[#partner_queue + 1] = { at = clock + 2 * ONE_WAY, msg = "d|ack|" .. f[3] }
 				elseif f[1] == "h" and f[2] == "msg" then
@@ -1085,16 +1095,17 @@ local function fake_host_stock()
 		econ_index, #HOST_ORDER, code, table.concat(wares, ","), table.concat(named, ",")) }
 end
 
-local death_steps = {
+-- Scenario step lists and their runners are globals: as locals they'd pass LuaJIT's 200 per function.
+death_steps = {
 	{ 15, function() queue("x4coop.area_death", (sc.npc_test == "apart" and "NPC-2|" or "NPC-3|") .. SHIP_MACRO .. "|" .. SECTORS[500]) end },
 	{ 16, function() queue("x4coop.area_death", "NPC-21|" .. SHIP_MACRO .. "|" .. SECTORS[501]) end },
 }
-local function death_script()
+function death_script()
 	if sc.npc_test ~= "apart" and sc.npc_test ~= "apart_join" then return end
 	while death_steps[1] and clock >= death_steps[1][1] do table.remove(death_steps, 1)[2]() end
 end
 
-local credit_steps = {
+credit_steps = {
 	{ 6, function() ExecuteDebugCommand("x4coop", "set credit_timeout 5") end },
 	{ 8, function() ExecuteDebugCommand("x4coop", "give 5,000") end },
 	{ 9, function() ExecuteDebugCommand("x4coop", "give 999999999") end },
@@ -1106,7 +1117,7 @@ local trade_done, max_after_trade, host_trade_steps = false, 0, {
 	{ 10, function() pipe_reader("T|trade|0abc|STN-2|hullparts|50") end },
 	{ 12, function() pipe_reader("T|trade|0abc|STN-2|hullparts|50") end },  -- sent again: counted once
 }
-local function trade_script()
+function trade_script()
 	if sc.econ_test == "join" then
 		if not trade_done and clock >= 12 and pipe_reader then
 			trade_done = true  -- we sell 200 energy cells' worth... we buy 200 from STN-1: the game changes our copy at once
@@ -1123,11 +1134,11 @@ local function trade_script()
 end
 
 local rel_next, rel_changed, rel_max_after = 3, false, -2
-local rel_host_steps = {
+rel_host_steps = {
 	{ 10, function() pipe_reader("V|change|0bcd|teladi|0.020000") end },
 	{ 12, function() pipe_reader("V|change|0bcd|teladi|0.020000") end },  -- sent again: counted once
 }
-local function relations_script()
+function relations_script()
 	if not sc.rel_test or not pipe_reader then return end
 	if sc.rel_test == "join" then
 		if clock >= rel_next then  -- the host's report, every 2 s here
@@ -1150,7 +1161,7 @@ local function relations_script()
 	end
 end
 
-local unlock_steps = {
+unlock_steps = {
 	{ 10, function()  -- we finish a research here
 		blackboard["$x4coop_unlocks"] = { { "r", "research_teleportation", "" } }
 		queue("x4coop.unlock")
@@ -1159,12 +1170,12 @@ local unlock_steps = {
 	{ 13, function() pipe_reader("U|add|00aa|b|weapon_gen_m_laser_01_mk1|w") end },  -- sent again: added once
 	{ 15, function() pipe_reader("U|add|00ab|l|argon|police") end },
 }
-local function unlock_script()
+function unlock_script()
 	if not sc.unlock_test or not pipe_reader then return end
 	while unlock_steps[1] and clock >= unlock_steps[1][1] do table.remove(unlock_steps, 1)[2]() end
 end
 
-local warp_steps = {
+warp_steps = {
 	{ 10, function() sim_warp.active, sim_warp.factor = true, 6; warp_report(0) end },      -- we switch SETA on
 	{ 14, function() pipe_reader("Z|state|0|1.00|") end },                                  -- the partner switches it off
 	{ 17, function() sim_warp.blocked = true end },                                         -- enemies near: SETA not allowed
@@ -1172,12 +1183,12 @@ local warp_steps = {
 	{ 23, function() sim_warp.blocked = false; sim_warp.active, sim_warp.factor = true, 6; warp_report(0) end },  -- ours again
 	{ 24, function() pipe_reader("Z|state|0|1.00|refused") end },                           -- the partner can't follow
 }
-local function warp_script()
+function warp_script()
 	if not sc.warp_test or not pipe_reader then return end
 	while warp_steps[1] and clock >= warp_steps[1][1] do table.remove(warp_steps, 1)[2]() end
 end
 
-local owner_steps = {
+owner_steps = {
 	{ 10, function()  -- we claim an abandoned ship here
 		blackboard["$x4coop_owners"] = { { "ABC-123", SHIP_MACRO, SECTORS[500], "player" } }
 		queue("x4coop.owner")
@@ -1185,12 +1196,12 @@ local owner_steps = {
 	{ 11, function() pipe_reader("O|msg|00ee|NPC-1|" .. SHIP_MACRO .. "|" .. SECTORS[500] .. "|player") end },
 	{ 13, function() pipe_reader("O|msg|00ee|NPC-1|" .. SHIP_MACRO .. "|" .. SECTORS[500] .. "|player") end },  -- again: once
 }
-local function owner_script()
+function owner_script()
 	if not sc.owner_test or not pipe_reader then return end
 	while owner_steps[1] and clock >= owner_steps[1][1] do table.remove(owner_steps, 1)[2]() end
 end
 
-local newship_steps = {
+newship_steps = {
 	{ 10, function()  -- we bought a ship
 		blackboard["$x4coop_builtships"] = { { "NEW-1", SHIP_MACRO, SECTORS[500], "", "Kestrel",
 			{ "weapon_gen_s_laser_01_mk1", "shield_gen_s_standard_01_mk1" } } }
@@ -1203,12 +1214,12 @@ local newship_steps = {
 		handlers["x4coop.world"]("x4coop.world", "D|LOC-" .. tostring(newship_made_id) .. "|" .. SHIP_MACRO .. "|" .. SECTORS[500] .. "|50|1")
 	end },
 }
-local function newship_script()
+function newship_script()
 	if not sc.newship_test or not pipe_reader then return end
 	while newship_steps[1] and clock >= newship_steps[1][1] do table.remove(newship_steps, 1)[2]() end
 end
 
-local order_steps = {
+order_steps = {
 	{ 10, function()  -- the player orders NPC-1 to fly somewhere (its queue held only this order afterwards)
 		sim_player_ordering = true
 		order_counts[401] = 0
@@ -1234,12 +1245,12 @@ local order_steps = {
 		pipe_reader("G|msg|00c1|oship~NPC-1~" .. SHIP_MACRO .. "~" .. SECTORS[500] .. "|DockAndWait|1|b0;b0;b0;z;z;z;b1|destination=ostation~STN-1~station_gen_factory_base_01_macro~" .. SECTORS[500])
 	end },
 }
-local function order_script()
+function order_script()
 	if not sc.order_test or not pipe_reader then return end
 	while order_steps[1] and clock >= order_steps[1][1] do table.remove(order_steps, 1)[2]() end
 end
 
-local behaviour_steps = {
+behaviour_steps = {
 	{ 10, function()  -- the player confirms NPC-1's behaviour in the map's panel
 		Menus[1].infoSubmenuObject = 401
 		Menus[1].buttonDefaultOrderConfirm(1)
@@ -1255,13 +1266,13 @@ local behaviour_steps = {
 			.. SECTORS[500] .. ";2=n5000|DockAndWait:1=ostation~STN-1~station_gen_factory_base_01_macro~" .. SECTORS[500])
 	end },
 }
-local function behaviour_script()
+function behaviour_script()
 	if not sc.behaviour_test or not pipe_reader then return end
 	while behaviour_steps[1] and clock >= behaviour_steps[1][1] do table.remove(behaviour_steps, 1)[2]() end
 end
 
 local foot_next = 0
-local function foot_script()
+function foot_script()
 	if not sc.foot_test or not pipe_reader then return end
 	if clock >= 8 and clock < 11 and clock >= foot_next then  -- we walk across the bar of STN-1 at 1.5 m/s
 		foot_next = clock + 0.25
@@ -1292,7 +1303,7 @@ local function foot_script()
 	end
 end
 
-local station_steps = {
+station_steps = {
 	{ 10, function()  -- a build finished two modules of our new station
 		blackboard["$x4coop_modules"] = {
 			{ "STN-NEW", "station_gen_factory_base_01_macro", SECTORS[500], 1000, 0, 5000, 90, 0, 0, "prod_gen_energycells_macro", 0, 0, 0, 0, 0, 0 },
@@ -1306,13 +1317,13 @@ local station_steps = {
 	{ 16, function() pipe_reader("b|msg|00b2|PST-7|station_gen_factory_base_01_macro|" .. SECTORS[500]
 		.. "|2000.000|0.000|-3000.000|45.000|0.000|0.000|storage_arg_m_container_01_macro|0.000|-400.000|0.000|0.000|0.000|0.000") end },
 }
-local function station_script()
+function station_script()
 	if not sc.station_test or not pipe_reader then return end
 	while station_steps[1] and clock >= station_steps[1][1] do table.remove(station_steps, 1)[2]() end
 end
 
 local function settings_msg(id, rest) pipe_reader("s|msg|" .. id .. "|" .. rest) end
-local settings_steps = {
+settings_steps = {
 	{ 0, function() settings_world() end },
 	{ 8, function()  -- the player changes station 601: a buy price, a ware added to trade, a buy rule
 		local s = station_cfg[601]
@@ -1340,14 +1351,14 @@ local settings_steps = {
 	end },
 	{ 23, function() settings_msg("00c3", "set|PST-9|Partner Yard|0|1.00|-|-|0|energycells:0:1:0:-:-:-:-:-:-:-") end },
 }
-local function settings_script()
+function settings_script()
 	if not sc.settings_test or not pipe_reader then return end
 	while settings_steps[1] and clock >= settings_steps[1][1] do table.remove(settings_steps, 1)[2]() end
 end
 
-local SHIP_M = "ship_arg_m_trans_container_01_a_macro"
-local STATION_M = "station_gen_factory_base_01_macro"
-local command_steps = {
+SHIP_M = "ship_arg_m_trans_container_01_a_macro"
+STATION_M = "station_gen_factory_base_01_macro"
+command_steps = {
 	{ 6, function()  -- one change, three events: the ship is assigned to trade for station STA-601
 		local e = { "SHP-501", SHIP_M, SECTORS[500], "STA-601", STATION_M, SECTORS[500], 0, 8 }
 		blackboard["$x4coop_commands"] = { e, e }
@@ -1366,13 +1377,13 @@ local command_steps = {
 	{ 12, function() pipe_reader("c|msg|00e2|NEW-1|" .. SHIP_M .. "|" .. SECTORS[500] .. "|PLY-100|ship_arg_s_fighter_01_a_macro|" .. SECTORS[500] .. "|1|1") end },
 	{ 14, function() pipe_reader("c|msg|00e3|GNE-1|" .. SHIP_M .. "|" .. SECTORS[500] .. "||||0|0") end },
 }
-local function command_script()
+function command_script()
 	if not sc.commands_test or not pipe_reader then return end
 	while command_steps[1] and clock >= command_steps[1][1] do table.remove(command_steps, 1)[2]() end
 end
 
 local function rules_msg(id, rest) pipe_reader("r|msg|" .. id .. "|" .. rest) end
-local rule_steps = {
+rule_steps = {
 	{ 6, function() sim_rules[20] = { name = "Teladi only", whitelist = true, factions = { "teladi" }, defaults = {} } end },
 	{ 8, function() sim_rules[7].factions = { "kaori", "khaak", "xenon" } end },
 	{ 10, function() sim_rules[8] = nil end },
@@ -1384,12 +1395,12 @@ local rule_steps = {
 	{ 20, function() rules_msg("00f6", "remove|m31") end },
 	{ 22, function() sim_rules[101].name = "Their twenty renamed" end },
 }
-local function rule_script()
+function rule_script()
 	if not sc.rules_test or not pipe_reader then return end
 	while rule_steps[1] and clock >= rule_steps[1][1] do table.remove(rule_steps, 1)[2]() end
 end
 
-local account_steps = {
+account_steps = {
 	{ 0, function() settings_world() end },
 	{ 6, function()  -- the account menu's confirm: budgets, then the transfer
 		SetMaxBudget(601, 150000)
@@ -1401,24 +1412,24 @@ local account_steps = {
 	{ 10.3, function() pipe_reader("a|msg|00a1|STA-602|25000|200000|300000") end },
 	{ 12, function() pipe_reader("a|bal|STA-601=90000,STA-602=1000,ZZZ-1=5") end },
 }
-local function account_script()
+function account_script()
 	if not sc.accounts_test or not pipe_reader then return end
 	while account_steps[1] and clock >= account_steps[1][1] do table.remove(account_steps, 1)[2]() end
 end
 
-local profile_steps = {
+profile_steps = {
 	{ 14, function() sim_inventory.inv_a = { amount = 7 } end },  -- picked something up
 	{ 20, function()
 		pipe_reader("X|received|quicksave")
 		ExecuteDebugCommand("x4coop", "loadshared")
 	end },
 }
-local function profile_script()
+function profile_script()
 	if not sc.profile_test or not pipe_reader then return end
 	while profile_steps[1] and clock >= profile_steps[1][1] do table.remove(profile_steps, 1)[2]() end
 end
 
-local mission_steps = {
+mission_steps = {
 	{ 0, function()
 		objects[701] = { sector = 500, x = 100, y = 0, z = 200, yaw = 0, pitch = 0, roll = 0, macro = "ship_tel_m_frigate_01_a_macro",
 			idcode = "TGT-701", newship = true }
@@ -1431,13 +1442,13 @@ local mission_steps = {
 	{ 16, function() pipe_reader("m|msg|0a03|end|7001") end },
 	{ 18, function() pipe_reader("m|list|7002,7003") end },
 }
-local function mission_script()
+function mission_script()
 	if not sc.missions_test or not pipe_reader then return end
 	while mission_steps[1] and clock >= mission_steps[1][1] do table.remove(mission_steps, 1)[2]() end
 end
 
-local MOD_M, ST_M = "prod_gen_energycells_macro", "station_gen_factory_base_01_macro"
-local module_steps = {
+MOD_M, ST_M = "prod_gen_energycells_macro", "station_gen_factory_base_01_macro"
+module_steps = {
 	{ 6, function()  -- md saw: a module deconstructed, one wrecked, one repaired, a station gone, and junk
 		blackboard["$x4coop_module_changes"] = {
 			{ "STN-1", ST_M, SECTORS[500], "gone", "c", MOD_M, 0, 0, 300, 0, 0, 0 },
@@ -1453,12 +1464,12 @@ local module_steps = {
 	{ 12, function() pipe_reader("e|msg|0e02|station_gone|o|STN-9|" .. ST_M .. "|" .. SECTORS[500] .. "||0|0|0|0|0|0") end },
 	{ 14, function() pipe_reader("e|msg|0e03|melt|o|STN-9|" .. ST_M .. "|" .. SECTORS[500] .. "||0|0|0|0|0|0") end },
 }
-local function module_script()
+function module_script()
 	if not sc.modules_test or not pipe_reader then return end
 	while module_steps[1] and clock >= module_steps[1][1] do table.remove(module_steps, 1)[2]() end
 end
 
-local refit_steps = {
+refit_steps = {
 	{ 6, function()  -- an upgrade finished on one of our ships
 		blackboard["$x4coop_refits"] = { { "SHP-501", "ship_arg_m_fighter_01_a_macro", SECTORS[500],
 			{ { "weapon_gen_m_laser_01_mk2", 4 }, { "shield_gen_m_standard_01_mk2", 1 }, { "bad ware!", 2 }, { "software_dockmk2", 1 } } },
@@ -1474,13 +1485,13 @@ local refit_steps = {
 			.. "|shield_arg_l_standard_01_mk1=2,turret_arg_l_laser_01_mk1=6")
 	end },
 }
-local function refit_script()
+function refit_script()
 	if not sc.refit_test or not pipe_reader then return end
 	while refit_steps[1] and clock >= refit_steps[1][1] do table.remove(refit_steps, 1)[2]() end
 end
 
-local SAT_M = "eq_arg_satellite_02_macro"
-local deploy_steps = {
+SAT_M = "eq_arg_satellite_02_macro"
+deploy_steps = {
 	{ 6, function()
 		blackboard["$x4coop_deploys"] = { { "add", "SAT-1", SAT_M, SECTORS[500], 1200.24, -10, 3500 },
 			{ "gone", "SAT-0", SAT_M, SECTORS[500], 0, 0, 0 }, { "explode", "SAT-2", SAT_M, SECTORS[500], 0, 0, 0 } }
@@ -1490,12 +1501,12 @@ local deploy_steps = {
 	{ 10.4, function() pipe_reader("p|msg|0d01|add|PSA-4|" .. SAT_M .. "|" .. SECTORS[500] .. "|100.0|0.0|-200.0") end },
 	{ 14, function() pipe_reader("p|msg|0d02|gone|PSA-4|" .. SAT_M .. "|" .. SECTORS[500] .. "|0|0|0") end },
 }
-local function deploy_script()
+function deploy_script()
 	if not sc.deploy_test or not pipe_reader then return end
 	while deploy_steps[1] and clock >= deploy_steps[1][1] do table.remove(deploy_steps, 1)[2]() end
 end
 
-local knowledge_steps = {
+knowledge_steps = {
 	{ 6, function()
 		blackboard["$x4coop_knowledge"] = { { "sector", SECTORS[500] }, { "station", "STN-5", "station_gen_factory_base_01_macro", SECTORS[500], 40 },
 			{ "faction", "boron" }, { "planet", "x" }, { "station", "STN-6", "bad macro!", SECTORS[500], 40 } }
@@ -1507,12 +1518,12 @@ local knowledge_steps = {
 	{ 12, function() pipe_reader("n|msg|0c03|faction|terran") end },
 	{ 13, function() pipe_reader("n|msg|0c04|moon|x") end },
 }
-local function knowledge_script()
+function knowledge_script()
 	if not sc.knowledge_test or not pipe_reader then return end
 	while knowledge_steps[1] and clock >= knowledge_steps[1][1] do table.remove(knowledge_steps, 1)[2]() end
 end
 
-local rename_steps = {
+rename_steps = {
 	{ 0, function()
 		objects[650] = { sector = 500, x = 0, y = 0, z = 7000, yaw = 0, pitch = 0, roll = 0, macro = "ship_arg_m_trans_container_01_a_macro",
 			idcode = "SHP-650", playerowned = true, newship = true }
@@ -1524,12 +1535,12 @@ local rename_steps = {
 	{ 10, function() pipe_reader("l|msg|0b01|PSH-9|ship_arg_m_trans_container_01_a_macro|" .. SECTORS[500] .. "|Their Hauler") end },
 	{ 10.3, function() pipe_reader("l|msg|0b01|PSH-9|ship_arg_m_trans_container_01_a_macro|" .. SECTORS[500] .. "|Their Hauler") end },
 }
-local function rename_script()
+function rename_script()
 	if not sc.rename_test or not pipe_reader then return end
 	while rename_steps[1] and clock >= rename_steps[1][1] do table.remove(rename_steps, 1)[2]() end
 end
 
-local crew_steps = {
+crew_steps = {
 	{ 6, function()
 		blackboard["$x4coop_crew"] = {
 			{ "SHP-501", "ship_arg_m_trans_container_01_a_macro", SECTORS[500], 12, 3, 4, 5, 2, 7, 4, 1, 1, 9, 2, 3, 10, 11, 4, 2, 12 },
@@ -1540,13 +1551,13 @@ local crew_steps = {
 	{ 10.3, function() pipe_reader("w|msg|0a51|PSH-9|ship_arg_m_trans_container_01_a_macro|" .. SECTORS[500] .. "|8|1|2|3|4|5|0|0|0|0|0|0|-1|-1|-1|-1|-1") end },
 	{ 12, function() pipe_reader("w|msg|0a52|PSH-9|ship_arg_m_trans_container_01_a_macro|" .. SECTORS[500] .. "|8|99|2|3|4|5|0|0|0|0|0|0|-1|-1|-1|-1|-1") end },
 }
-local function crew_script()
+function crew_script()
 	if not sc.crew_test or not pipe_reader then return end
 	while crew_steps[1] and clock >= crew_steps[1][1] do table.remove(crew_steps, 1)[2]() end
 end
 
-local ST_W = "station_gen_factory_base_01_macro"
-local galaxy_steps = {
+ST_W = "station_gen_factory_base_01_macro"
+galaxy_steps = {
 	-- joiner: the host's summaries, sector owners, a layout, a station destroyed in the host's world
 	{ 6, function()
 		if sc.galaxy_test ~= "join" then return end
@@ -1582,12 +1593,12 @@ local galaxy_steps = {
 		queue("x4coop.galaxy_layout")
 	end },
 }
-local function galaxy_script()
+function galaxy_script()
 	if not sc.galaxy_test or not pipe_reader then return end
 	while galaxy_steps[1] and clock >= galaxy_steps[1][1] do table.remove(galaxy_steps, 1)[2]() end
 end
 
-local logbook_steps = {
+logbook_steps = {
 	{ 8, function()
 		table.insert(sim_logbook, { time = 108, category = "missions", title = "Mission completed", text = "Destroy | the\npirate", money = 25000 })
 		table.insert(sim_logbook, { time = 108.5, category = "alerts", title = "Ship attacked", text = "x", money = 0 })
@@ -1597,12 +1608,12 @@ local logbook_steps = {
 	{ 10.3, function() pipe_reader("h|msg|0b61|diplomacy|Embassy opened|With the Argon|0") end },
 	{ 11, function() pipe_reader("h|msg|0b62|alerts|Ship attacked|x|0") end },
 }
-local function logbook_script()
+function logbook_script()
 	if not sc.logbook_test or not pipe_reader then return end
 	while logbook_steps[1] and clock >= logbook_steps[1][1] do table.remove(logbook_steps, 1)[2]() end
 end
 
-local loot_steps = {
+loot_steps = {
 	{ 6, function()
 		blackboard["$x4coop_loot"] = {
 			{ "lockbox", "lockbox_ship_s_macro", SECTORS[500], 100, 20, -300, "", "" },
@@ -1614,12 +1625,28 @@ local loot_steps = {
 	{ 10.3, function() pipe_reader("d|msg|0c71|drop|collectable_ware_hullparts_macro|" .. SECTORS[500] .. "|1.0|2.0|3.0||") end },
 	{ 11, function() pipe_reader("d|msg|0c72|crate|crate_s_01_macro|" .. SECTORS[500] .. "|5.0|0.0|12.0|PST-7|station_gen_factory_base_01_macro") end },
 }
-local function loot_script()
+function loot_script()
 	if not sc.loot_test or not pipe_reader then return end
 	while loot_steps[1] and clock >= loot_steps[1][1] do table.remove(loot_steps, 1)[2]() end
 end
 
-local function credit_script()
+cargo_steps = {
+	{ 6, function()
+		blackboard["$x4coop_cargo"] = {
+			{ "SHP-501", "ship_arg_m_trans_container_01_a_macro", SECTORS[500], { { "energycells", 52000 }, { "water", 300 }, { "bad ware", 5 } } },
+			{ "SHP-502", "ship_arg_m_trans_container_01_a_macro", SECTORS[500], {} } }
+		queue("x4coop.cargo")
+	end },
+	{ 10, function() pipe_reader("f|msg|0d81|PSH-9|ship_arg_m_trans_container_01_a_macro|" .. SECTORS[500] .. "|ore=4000,silicon=12") end },
+	{ 10.3, function() pipe_reader("f|msg|0d81|PSH-9|ship_arg_m_trans_container_01_a_macro|" .. SECTORS[500] .. "|ore=4000,silicon=12") end },
+	{ 11, function() pipe_reader("f|msg|0d82|PSH-9|ship_arg_m_trans_container_01_a_macro|" .. SECTORS[500] .. "|") end },
+}
+function cargo_script()
+	if not sc.cargo_test or not pipe_reader then return end
+	while cargo_steps[1] and clock >= cargo_steps[1][1] do table.remove(cargo_steps, 1)[2]() end
+end
+
+function credit_script()
 	if not sc.credits_test or not pipe_reader then return end
 	while credit_steps[1] and clock >= credit_steps[1][1] do
 		table.remove(credit_steps, 1)[2]()
@@ -1765,6 +1792,7 @@ while clock < sc.duration do
 	galaxy_script()
 	logbook_script()
 	loot_script()
+	cargo_script()
 	if sc.partner_restart_at and clock >= sc.partner_restart_at and partner_clock_offset == 1000 then
 		partner_clock_offset = -500
 		say("t=%.1f partner restarted their game (clock jumped back)", clock)
@@ -2313,6 +2341,22 @@ if sc.foot_test then
 		and tostring(foot_status_seen):find("on foot at Harbour Bar Station", 1, true) ~= nil
 		and said:find("is on foot at Harbour Bar Station", 1, true) ~= nil
 		and said:find("is back aboard a ship", 1, true) ~= nil
+end
+if sc.cargo_test then
+	local sent = {}
+	for _, w in ipairs(pipe_writes) do
+		local id, rest = w:match("^f|msg|(%x+)|(.*)$")
+		if id then sent[id] = rest end
+	end
+	local list = {}
+	for _, rest in pairs(sent) do list[#list + 1] = rest end
+	table.sort(list)
+	local s = SECTORS[500]
+	say("cargo: sent %s; md %s", table.concat(list, " / "), table.concat(cargo_requests, " / "))
+	ok = ok and table.concat(list, " / ") == "SHP-501|ship_arg_m_trans_container_01_a_macro|" .. s .. "|energycells=52000,water=300"
+			.. " / SHP-502|ship_arg_m_trans_container_01_a_macro|" .. s .. "|"
+		and table.concat(cargo_requests, " / ") == "LSH-9:ship_arg_m_trans_container_01_a_macro:" .. s .. ":ore=4000:silicon=12"
+			.. " / LSH-9:ship_arg_m_trans_container_01_a_macro:" .. s
 end
 if sc.loot_test then
 	local sent = {}
