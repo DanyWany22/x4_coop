@@ -121,6 +121,7 @@ local config = {
 	equipment_sync = 1,       -- shared world: ship upgrades, and new station modules' equipment, in both worlds
 	deploy_sync = 1,          -- shared world: satellites, beacons, probes, mines and laser towers in both worlds
 	knowledge_sync = 1,       -- shared world: sectors and stations discovered, stations scanned, factions met
+	rename_sync = 1,          -- shared world: ships renamed in either world get the same name in both
 	ghost_latency = 0.12,     -- s, simulated one-way latency in ghost mode
 	ghost_jitter = 0.03,      -- s, extra random delay per snapshot
 	ghost_loss = 0.0,         -- 0..1, fraction of snapshots dropped
@@ -379,6 +380,7 @@ local function reset()
 		equipment = { on = false, sent = 0, applied = 0 },
 		deploys = { on = false, sent = 0, applied = 0 },
 		knowledge = { on = false, sent = 0, applied = 0 },
+		renames = { sent = 0, applied = 0 },
 		rules = { next = 0, base = nil, shared = {}, alias = { loaded = false, into = {}, out = {} }, sent = 0, applied = 0 },
 		ssettings = { list = {}, idx = 0, next = 0, ids = {}, base = {}, settle = {}, out = {}, expect = {}, sent = 0, applied = 0 },
 		foot = { on = false, walking = false, last = nil, gone_left = 0, gone_at = -1e9, partner = nil, avatar_on = false },
@@ -757,6 +759,7 @@ local module_changes_receive  -- station modules removed, wrecked or repaired (e
 local refit_receive     -- the partner's ship upgrades (q), defined in the fourth feature block
 local deploys_receive   -- the partner's deployables (p), defined in the fourth feature block
 local knowledge_receive -- what the partner has discovered (n), defined in the fourth feature block
+local renames_receive   -- the partner's ship renames (l), defined in the fourth feature block
 local send_link
 
 local function net_send(msg)
@@ -876,6 +879,8 @@ on_pipe_message = function(msg)
 		if config.mode == "net" then deploys_receive(f, now) end
 	elseif kind == "n" then
 		if config.mode == "net" then knowledge_receive(f, now) end
+	elseif kind == "l" then
+		if config.mode == "net" then renames_receive(f, now) end
 	elseif kind == "M" then
 		local text = clean_text(f[3], 200)
 		if text ~= "" then
@@ -4369,6 +4374,52 @@ end
 Feature.on_knowledge = on_knowledge
 Feature.knowledge_tick = knowledge_tick
 
+-------------------------------------------------------------------------------
+-- Renames (shared faction): one of the empire's ships renamed from the menus (the UI's global SetComponentName, which
+-- we wrap) gets the same name in the partner's world (md OnRename). Station names go with the station settings.
+-- "l|msg|id|ship|macro|sector|name", sent reliably.
+
+local rename_original        -- the UI's SetComponentName, once wrapped
+
+local function renames_enabled()
+	return config.mode == "net" and S.link.linked and config.rename_sync == 1
+end
+
+local function on_renamed(component, name)
+	if not renames_enabled() or type(name) ~= "string" then return end
+	local id = to64(component)
+	if not id or id == 0 or not C.IsComponentClass(id, "ship") or not GetComponentData(component, "isplayerowned") then return end
+	local code, macro = C.GetObjectIDCode(id), GetComponentData(component, "macro")
+	local sector = C.GetContextByClass(id, "sector", false)
+	local smacro = sector and sector ~= 0 and GetComponentData(sector, "macro")
+	name = clean_text(name, 60)
+	if code == nil or name == "" or not valid_world_ref(ffi.string(code), macro, smacro) then return end
+	reliable_send("l", { alias_out(ffi.string(code)), macro, smacro, name })
+	S.renames.sent = S.renames.sent + 1
+end
+
+renames_receive = function(f, now)
+	if not renames_enabled() then return end
+	reliable_receive("l", f, now, function(m)
+		local name = clean_text(m[7], 60)
+		if not (valid_world_ref(m[4], m[5], m[6]) and name ~= "") then return end
+		request("rename", { alias_in(m[4]), m[5], m[6], name })
+		S.renames.applied = S.renames.applied + 1
+	end)
+end
+
+local function renames_tick()
+	if rename_original or type(SetComponentName) ~= "function" then return end
+	rename_original = SetComponentName
+	SetComponentName = function(component, name, ...)
+		local r = rename_original(component, name, ...)
+		on_renamed(component, name)
+		return r
+	end
+end
+
+Feature.renames_tick = renames_tick
+
 Feature.commands_tick = commands_tick
 Feature.on_commands = on_commands
 Feature.on_command_missing = on_command_missing
@@ -4686,6 +4737,7 @@ local function tick(now, dt)
 	Feature.equipment_tick()
 	Feature.deploy_tick()
 	Feature.knowledge_tick()
+	Feature.renames_tick()
 end
 
 local function on_update()

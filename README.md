@@ -67,8 +67,8 @@ X4 (ui/x4_coop.lua) <-> named pipe <-> bridge (Python: UDP/TCP sockets) <-> netw
 The mod has **no DLLs, no native hooks, no injection, and reads or writes no memory addresses**. In
 Lua it wraps some of the UI's own script functions, so it can share the orders the player gives: the
 global `CreateOrder` and `SetOrderParam`, the map menu's order-editing functions (for example
-`buttonDefaultOrderConfirm`), and the station account functions `TransferPlayerMoneyTo`, `TransferMoneyToPlayer`,
-`SetMinBudget` and `SetMaxBudget`. See Orders, Behaviours and Station accounts. That is ordinary UI scripting: each Lua function
+`buttonDefaultOrderConfirm`), the station account functions `TransferPlayerMoneyTo`, `TransferMoneyToPlayer`,
+`SetMinBudget` and `SetMaxBudget`, and `SetComponentName` for ship renames. See Orders, Behaviours and Station accounts. That is ordinary UI scripting: each Lua function
 is replaced by one that calls the original and then notes which ship's orders changed.
 [`demo/x4_memory_demo.py`](demo/x4_memory_demo.py) is a separate tool that shows reading and
 writing X4's memory is possible, on your credits; the mod never loads or calls it. The
@@ -261,6 +261,9 @@ are built in both worlds anyway, so they aren't copied. `/x4coop set new_ships 0
 flies, its copy in the other world gets the same equipment: weapons, turrets, shields, engines, thrusters,
 software and drones. Equipment may sit in different slots of the same kind. `/x4coop set equipment_sync 0`
 turns it off.
+
+**Renamed ships:** a ship of the empire either of you renames gets the same name in the other world.
+Station names go with the station settings. `/x4coop set rename_sync 0` turns it off.
 
 **Map knowledge:** sectors and stations either of you discovers, stations you scan fully, and factions you
 meet become known in the other's map and encyclopedia too, within about 30 seconds. What the map has
@@ -529,7 +532,7 @@ game's own schema (`libraries/md.xsd`, `libraries/common.xsd`).
 
 Messages (one text line each): `S` snapshot (position, rotation, velocity, ship, hull, shield),
 `P`/`Q` ping, `M` chat, `L` world link, `K` kill, `D` hit, `F` firing at, `B` nearby ships (both
-ways), `E` station stock (host to joiner), `T` a joiner's trade, `V` relations, `U` research/blueprints/licences, `Z` SETA, `O` ownership, `Y` new ships, `G` orders, `J` behaviours and queues, `I` on foot, `b` station modules, `s` station settings, `c` assignments, `r` trade rules, `a` station accounts, `m` missions, `e` station modules removed/wrecked/repaired, `q` ship upgrades, `p` deployables, `n` map knowledge, `C` credits given; `R`/`W`/`N`/`X` are between a game and
+ways), `E` station stock (host to joiner), `T` a joiner's trade, `V` relations, `U` research/blueprints/licences, `Z` SETA, `O` ownership, `Y` new ships, `G` orders, `J` behaviours and queues, `I` on foot, `b` station modules, `s` station settings, `c` assignments, `r` trade rules, `a` station accounts, `m` missions, `e` station modules removed/wrecked/repaired, `q` ship upgrades, `p` deployables, `n` map knowledge, `l` ship renames, `C` credits given; `R`/`W`/`N`/`X` are between a game and
 its own bridge.
 
 Self-calibration: on first contact the proxy is nudged and read back (does `SetObjectSectorPos`
@@ -579,7 +582,7 @@ python extensions/x4_coop/dev/run_tests.py [--quick]
   own wallet and inventory (asked for after loading, brought along the first time, kept every 30 s and before
   loading), ship upgrades and module equipment both ways (wares counted, sent once, translated, applied
   once), map knowledge both ways (sectors, stations with how much is revealed, factions; checked and
-  translated), deployables both ways (placed at the same spot once, paired, removed when gone), missions both ways (new, changed and ended ones sent once, alerts and guidance left out, ones
+  translated), ship renames both ways (only the empire's ships, cleaned, applied once), deployables both ways (placed at the same spot once, paired, removed when gone), missions both ways (new, changed and ended ones sent once, alerts and guidance left out, ones
   both worlds have not shown twice, ended ones dropped by the list), research, blueprints and licences both ways (sent until confirmed, added once), SETA both ways
   (followed; turned off for both when one side can't follow), ownership changes both ways (sent
   until confirmed, applied once), new ships both ways (made once, paired, kills and hits on them

@@ -55,6 +55,8 @@ local SC = {
 	                 role = "join", own_world = "abc123", partner_world = "abc123", foot_test = true },
 	stations     = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
 	                 role = "join", own_world = "abc123", partner_world = "abc123", station_test = true },
+	rename       = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
+	                 role = "join", own_world = "abc123", partner_world = "abc123", rename_test = true },
 	knowledge    = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
 	                 role = "join", own_world = "abc123", partner_world = "abc123", knowledge_test = true },
 	deploy       = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
@@ -389,6 +391,8 @@ module_requests = {}
 refit_requests = {}
 deploy_requests = {}
 knowledge_requests = {}
+rename_requests = {}
+if sc.rename_test then blackboard["$x4coop_alias"] = "PSH-9=LSH-9" end
 if sc.knowledge_test then blackboard["$x4coop_alias"] = "PST-7=LST-201" end
 if sc.refit_test then blackboard["$x4coop_alias"] = "PSH-9=LSH-9" end
 local function sim_args(args)  -- md's arguments as text; lists of [ware, count] as "ware=count"
@@ -738,6 +742,8 @@ function AddUITriggeredEvent(screen, control, args)
 		manager_requests[#manager_requests + 1] = tostring(args[1])
 	elseif control == "station_sync" then
 		-- md only remembers the switch
+	elseif control == "rename" then
+		rename_requests[#rename_requests + 1] = sim_args(args)
 	elseif control == "knowledge" then
 		knowledge_requests[#knowledge_requests + 1] = sim_args(args)
 	elseif control == "knowledge_sync" then
@@ -898,6 +904,8 @@ if sc.pipes then
 				elseif f[1] == "X" and f[2] == "profile_get" then
 					partner_queue[#partner_queue + 1] = { at = clock + 0.05,
 						msg = "X|profile|" .. f[3] .. "|" .. (sim_profiles[f[3]] or "none") }
+				elseif f[1] == "l" and f[2] == "msg" then
+					partner_queue[#partner_queue + 1] = { at = clock + 2 * ONE_WAY, msg = "l|ack|" .. f[3] }
 				elseif f[1] == "n" and f[2] == "msg" then
 					partner_queue[#partner_queue + 1] = { at = clock + 2 * ONE_WAY, msg = "n|ack|" .. f[3] }
 				elseif f[1] == "p" and f[2] == "msg" then
@@ -1446,6 +1454,23 @@ local function knowledge_script()
 	while knowledge_steps[1] and clock >= knowledge_steps[1][1] do table.remove(knowledge_steps, 1)[2]() end
 end
 
+local rename_steps = {
+	{ 0, function()
+		objects[650] = { sector = 500, x = 0, y = 0, z = 7000, yaw = 0, pitch = 0, roll = 0, macro = "ship_arg_m_trans_container_01_a_macro",
+			idcode = "SHP-650", playerowned = true, newship = true }
+		objects[651] = { sector = 500, x = 0, y = 0, z = 7200, yaw = 0, pitch = 0, roll = 0, macro = "ship_arg_m_trans_container_01_a_macro",
+			idcode = "NPC-651", newship = true }
+	end },
+	{ 6, function() SetComponentName(650, "Hauler | One") end },
+	{ 7, function() SetComponentName(651, "Not ours") end },
+	{ 10, function() pipe_reader("l|msg|0b01|PSH-9|ship_arg_m_trans_container_01_a_macro|" .. SECTORS[500] .. "|Their Hauler") end },
+	{ 10.3, function() pipe_reader("l|msg|0b01|PSH-9|ship_arg_m_trans_container_01_a_macro|" .. SECTORS[500] .. "|Their Hauler") end },
+}
+local function rename_script()
+	if not sc.rename_test or not pipe_reader then return end
+	while rename_steps[1] and clock >= rename_steps[1][1] do table.remove(rename_steps, 1)[2]() end
+end
+
 local function credit_script()
 	if not sc.credits_test or not pipe_reader then return end
 	while credit_steps[1] and clock >= credit_steps[1][1] do
@@ -1587,6 +1612,7 @@ while clock < sc.duration do
 	refit_script()
 	deploy_script()
 	knowledge_script()
+	rename_script()
 	if sc.partner_restart_at and clock >= sc.partner_restart_at and partner_clock_offset == 1000 then
 		partner_clock_offset = -500
 		say("t=%.1f partner restarted their game (clock jumped back)", clock)
@@ -2135,6 +2161,21 @@ if sc.foot_test then
 		and tostring(foot_status_seen):find("on foot at Harbour Bar Station", 1, true) ~= nil
 		and said:find("is on foot at Harbour Bar Station", 1, true) ~= nil
 		and said:find("is back aboard a ship", 1, true) ~= nil
+end
+if sc.rename_test then
+	local sent = {}
+	for _, w in ipairs(pipe_writes) do
+		local id, rest = w:match("^l|msg|(%x+)|(.*)$")
+		if id then sent[id] = rest end
+	end
+	local list = {}
+	for _, rest in pairs(sent) do list[#list + 1] = rest end
+	local s = SECTORS[500]
+	say("rename: sent %s; md %s; game calls %s", table.concat(list, " / "), table.concat(rename_requests, " / "),
+		table.concat(settings_calls, " "))
+	ok = ok and #list == 1 and list[1] == "SHP-650|ship_arg_m_trans_container_01_a_macro|" .. s .. "|Hauler One"
+		and table.concat(rename_requests, " / ") == "LSH-9:ship_arg_m_trans_container_01_a_macro:" .. s .. ":Their Hauler"
+		and table.concat(settings_calls, " "):find("name:650:Hauler | One", 1, true) ~= nil
 end
 if sc.knowledge_test then
 	local sent = {}

@@ -2306,6 +2306,23 @@
           </actions>
         </cue>
 
+        <!--
+          Renames (shared faction): one of the empire's ships renamed in the partner's world (param3: [idcode, macro,
+          sector macro, name]) gets the same name here.
+        -->
+        <cue name="OnRename" instantiate="true">
+          <conditions>
+            <event_ui_triggered screen="'x4coop'" control="'rename'"/>
+          </conditions>
+          <actions>
+            <set_value name="$A" exact="event.param3"/>
+            <include_actions ref="FindContainer"/>
+            <do_if value="@$Container.isclass.ship and $Container.isplayerowned and $A.{4} != ''">
+              <set_object_name object="$Container" name="$A.{4}"/>
+            </do_if>
+          </actions>
+        </cue>
+
         <cue name="OnNpcClear" instantiate="true">
           <conditions>
             <event_ui_triggered screen="'x4coop'" control="'npc_clear'"/>
