@@ -63,6 +63,16 @@ def test_unique_names():
     events = re.findall(r'RegisterEvent\("([^"]+)"', lua)
     twice = sorted({n for n in events if events.count(n) > 1})
     check("lua: every game event is registered once", not twice, ", ".join(twice))
+    # every game function the Lua declares is listed for reviewers, and the count says so
+    blocks = re.findall(r"ffi\.cdef,?\s*\(?\[\[(.*?)\]\]", lua, re.S)
+    windows = {"CreateFileA", "SetNamedPipeHandleState", "PeekNamedPipe", "ReadFile", "WriteFile", "CloseHandle"}
+    game = sorted({m for b in blocks for m in re.findall(r"\b([A-Z][A-Za-z0-9]+)\s*\(", b)} - windows)
+    readme = (MOD / "README.md").read_text(encoding="utf-8")
+    unlisted = [n for n in game if "`%s`" % n not in readme]
+    count = re.search(r"\*\*(\d+) game functions\.\*\*", readme)
+    check("readme: every game function the Lua calls is listed, and counted",
+          not unlisted and count and int(count.group(1)) == len(game),
+          "%d declared, README says %s; unlisted: %s" % (len(game), count and count.group(1), ", ".join(unlisted)))
 
 
 def test_lua(tmp):

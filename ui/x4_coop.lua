@@ -127,6 +127,7 @@ local config = {
 	logbook_sync = 1,         -- shared world: missions, general and diplomacy logbook entries in both logbooks
 	loot_sync = 1,            -- shared world: lockboxes opened, drops collected, crates opened are gone in both
 	cargo_sync = 1,           -- shared world: the empire's ships carry the same (the host's, but the joiner's own ship)
+	terraform_sync = 1,       -- shared world: terraforming projects started/aborted in both; planets' stats the host's
 	ghost_latency = 0.12,     -- s, simulated one-way latency in ghost mode
 	ghost_jitter = 0.03,      -- s, extra random delay per snapshot
 	ghost_loss = 0.0,         -- 0..1, fraction of snapshots dropped
@@ -390,6 +391,7 @@ local function reset()
 		logbook = { next = 0, last = nil, sent = 0, applied = 0 },
 		loot = { on = false, sent = 0, applied = 0 },
 		cargo = { key = nil, sent = 0, applied = 0 },
+		terraform = { key = nil, sent = 0, applied = 0 },
 		world = { key = nil, asked = {}, gone = 0, wanted = 0, layouts = 0, summaries = 0, built = 0, ships = 0 },
 		rules = { next = 0, base = nil, shared = {}, alias = { loaded = false, into = {}, out = {} }, sent = 0, applied = 0 },
 		ssettings = { list = {}, idx = 0, next = 0, ids = {}, base = {}, settle = {}, out = {}, expect = {}, sent = 0, applied = 0 },
@@ -898,6 +900,8 @@ on_pipe_message = function(msg)
 		if config.mode == "net" then Receive.d(f, now) end
 	elseif kind == "f" then
 		if config.mode == "net" then Receive.f(f, now) end
+	elseif kind == "t" then
+		if config.mode == "net" then Receive.t(f, now) end
 	elseif kind == "M" then
 		local text = clean_text(f[3], 200)
 		if text ~= "" then
@@ -4665,6 +4669,127 @@ Feature.on_cargo = on_cargo
 Feature.cargo_tick = cargo_tick
 
 -------------------------------------------------------------------------------
+-- Terraforming (shared): a project either player starts or aborts in the terraforming menu (its buttonStartProject
+-- and buttonAbortProject, which we wrap) is started or aborted in the partner's world too; outcomes are rolled in
+-- each world, so the planets' stats follow the host's (md TerraformWatch every 30 s, OnTerraformStats).
+-- "t|msg|id|start|cluster macro|project", "t|msg|id|abort|cluster macro|", sent reliably;
+-- "t|st|cluster macro|stat=value,..." (host to joiner).
+
+local terraform_ffi           -- true once the project functions are declared here
+local terraform_hooked        -- the menu whose buttons are wrapped
+
+local function declare_terraform_ffi()
+	if terraform_ffi == nil then
+		terraform_ffi = pcall(ffi.cdef, [[
+			void StartTerraformingProject(UniverseID clusterid, const char* projectid);
+			void AbortActiveTerraformingProject(UniverseID clusterid);
+			bool CanStartTerraformingProject(UniverseID clusterid, const char* projectid);
+			bool CanAbortActiveTerraformingProject(UniverseID clusterid);
+			const char* GetTerraformingActiveProject(UniverseID clusterid);
+		]]) and pcall(function() assert(C.StartTerraformingProject and C.GetTerraformingActiveProject) end)
+	end
+	return terraform_ffi
+end
+
+local function terraform_enabled()
+	return config.mode == "net" and S.link.linked and config.terraform_sync == 1
+end
+
+local function cluster_by_macro(macro)
+	for _, c in ipairs(type(GetClusters) == "function" and GetClusters(true) or {}) do
+		if GetComponentData(c, "macro") == macro then return to64(c) end
+	end
+end
+
+local function terraform_note(op, cluster, project)
+	if not terraform_enabled() then return end
+	local macro = cluster and GetComponentData(cluster, "macro")
+	if type(macro) ~= "string" or not macro:match("^[%w_]+$") then return end
+	if op == "start" and not (type(project) == "string" and project:match("^[%w_]+$")) then return end
+	reliable_send("t", { op, macro, op == "start" and project or "" })
+	S.terraform.sent = S.terraform.sent + 1
+end
+
+local function terraform_hook()
+	if terraform_hooked or type(Menus) ~= "table" then return end
+	for _, menu in ipairs(Menus) do
+		if type(menu) == "table" and menu.name == "TerraformingMenu" and type(menu.buttonStartProject) == "function"
+			and type(menu.buttonAbortProject) == "function" then
+			terraform_hooked = menu
+			local start, abort = menu.buttonStartProject, menu.buttonAbortProject
+			menu.buttonStartProject = function(projectid, ...)
+				local r = start(projectid, ...)
+				terraform_note("start", menu.cluster, projectid)
+				return r
+			end
+			menu.buttonAbortProject = function(...)
+				local r = abort(...)
+				terraform_note("abort", menu.cluster)
+				return r
+			end
+		end
+	end
+end
+
+local function on_terraform()  -- host: the planets' stats
+	local list = S.player and GetNPCBlackboard(S.player, "$x4coop_terraform")
+	if S.player then SetNPCBlackboard(S.player, "$x4coop_terraform", nil) end
+	if type(list) ~= "table" or not terraform_enabled() or S.link.role ~= "host" then return end
+	for _, v in ipairs(list) do
+		if type(v) == "table" and type(v[1]) == "string" and v[1]:match("^[%w_]+$") then
+			local parts = {}
+			for i = 2, #v do
+				local e = v[i]
+				local n = type(e) == "table" and tonumber(e[2])
+				if n and type(e[1]) == "string" and e[1]:match("^[%w_]+$") then parts[#parts + 1] = e[1] .. "=" .. string.format("%.0f", n) end
+			end
+			if #parts > 0 then net_send("t|st|" .. v[1] .. "|" .. table.concat(parts, ",")) end
+		end
+	end
+end
+
+Receive.t = function(f, now)
+	if not terraform_enabled() then return end
+	if f[2] == "st" then
+		if S.link.role ~= "join" or not (type(f[3]) == "string" and f[3]:match("^[%w_]+$")) then return end
+		local args = { f[3] }
+		for entry in tostring(f[4] or ""):gmatch("[^,]+") do
+			local id, n = entry:match("^([%w_]+)=(%-?%d+)$")
+			if id and #args < 40 then args[#args + 1] = { id, tonumber(n) } end
+		end
+		if #args > 1 then request("terraform_stats", args) end
+		return
+	end
+	reliable_receive("t", f, now, function(m)
+		if not (type(m[5]) == "string" and m[5]:match("^[%w_]+$")) or not declare_terraform_ffi() then return end
+		local cluster = cluster_by_macro(m[5])
+		if not cluster then return end
+		local active = ffi.string(C.GetTerraformingActiveProject(cluster))
+		if m[4] == "start" and type(m[6]) == "string" and m[6]:match("^[%w_]+$") and active ~= m[6]
+			and C.CanStartTerraformingProject(cluster, m[6]) then
+			C.StartTerraformingProject(cluster, m[6])
+			S.terraform.applied = S.terraform.applied + 1
+		elseif m[4] == "abort" and active ~= "" and C.CanAbortActiveTerraformingProject(cluster) then
+			C.AbortActiveTerraformingProject(cluster)
+			S.terraform.applied = S.terraform.applied + 1
+		end
+	end)
+end
+
+local function terraform_tick()
+	terraform_hook()
+	local on = terraform_enabled() and (S.link.role == "host" or S.link.role == "join")
+	local key = on and S.link.role or "off"
+	if key ~= S.terraform.key then
+		S.terraform.key = key
+		request("terraform_sync", { on and 1 or 0, on and S.link.role or "" })
+	end
+end
+
+Feature.on_terraform = on_terraform
+Feature.terraform_tick = terraform_tick
+
+-------------------------------------------------------------------------------
 -- The wider world (host to joiner): every other faction's stations, as they are in the host's world (built,
 -- expanded, changing owner), and sector owners. The host's md goes round all stations, eight a second, and Lua sends
 -- each one's summary ("g|st|round|station|macro|owner|sector|x|y|z|yaw|pitch|roll|modules|wrecks|sum x|sum y|sum z",
@@ -5199,6 +5324,7 @@ local function tick(now, dt)
 	Feature.logbook_tick(now)
 	Feature.loot_tick()
 	Feature.cargo_tick()
+	Feature.terraform_tick()
 end
 
 local function on_update()
@@ -5247,6 +5373,7 @@ local function init()
 	RegisterEvent("x4coop.crew", Feature.on_crew)
 	RegisterEvent("x4coop.loot", Feature.on_loot)
 	RegisterEvent("x4coop.cargo", Feature.on_cargo)
+	RegisterEvent("x4coop.terraform", Feature.on_terraform)
 	RegisterEvent("x4coop.galaxy", Feature.on_world)
 	RegisterEvent("x4coop.galaxy_want", Feature.on_world_want)
 	RegisterEvent("x4coop.galaxy_layout", Feature.on_world_layout)

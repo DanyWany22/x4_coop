@@ -3049,6 +3049,70 @@
           </actions>
         </cue>
 
+        <!--
+          Terraforming (host to joiner): every 30 s the host's TerraformWatch reports each terraformable planet's stats
+          (player.entity.$x4coop_terraform gets [cluster macro, [stat id, value], ...], then 'x4coop.terraform');
+          OnTerraformStats (param3: the same) sets ours where they differ. Projects started or aborted are Lua's
+          (the terraforming menu, wrapped). 'terraform_sync' (param3: [1 or 0, 'host' or 'join']) turns it on.
+        -->
+        <cue name="OnTerraformSyncConfig" instantiate="true">
+          <conditions>
+            <event_ui_triggered screen="'x4coop'" control="'terraform_sync'"/>
+          </conditions>
+          <actions>
+            <set_value name="Root.$TerraformSyncOn" exact="event.param3.{1}"/>
+            <set_value name="Root.$TerraformRole" exact="event.param3.{2}"/>
+          </actions>
+        </cue>
+
+        <cue name="TerraformWatch" instantiate="true" checkinterval="30s">
+          <conditions>
+            <check_value value="@Root.$TerraformSyncOn == 1 and Root.$TerraformRole == 'host'"/>
+          </conditions>
+          <actions>
+            <set_value name="$Stats" exact="['airpressure', 'carbondioxide', 'humidity', 'methane', 'oxygen', 'population', 'radioactivity', 'seismicactivity', 'temperature', 'toxicity', 'trainee_group', 'trainee_individual', 'xenon_alertness', 'xenon_production']"/>
+            <find_cluster name="$Clusters" multiple="true"/>
+            <do_for_each name="$C" in="$Clusters">
+              <do_if value="@$C.terraforming.partname">
+                <set_value name="$Entry" exact="[$C.macro.id]"/>
+                <do_for_each name="$Id" in="$Stats">
+                  <do_if value="@$C.terraforming.stat.{$Id}.exists">
+                    <append_to_list name="$Entry" exact="[$Id, $C.terraforming.stat.{$Id}.value]"/>
+                  </do_if>
+                </do_for_each>
+                <do_if value="$Entry.count gt 1">
+                  <do_if value="not player.entity.$x4coop_terraform?">
+                    <set_value name="player.entity.$x4coop_terraform" exact="[]"/>
+                  </do_if>
+                  <append_to_list name="player.entity.$x4coop_terraform" exact="$Entry"/>
+                </do_if>
+              </do_if>
+            </do_for_each>
+            <do_if value="player.entity.$x4coop_terraform?">
+              <raise_lua_event name="'x4coop.terraform'"/>
+            </do_if>
+          </actions>
+        </cue>
+
+        <cue name="OnTerraformStats" instantiate="true">
+          <conditions>
+            <event_ui_triggered screen="'x4coop'" control="'terraform_stats'"/>
+          </conditions>
+          <actions>
+            <set_value name="$T" exact="event.param3"/>
+            <find_cluster name="$Cluster" macro="@macro.{$T.{1}}"/>
+            <do_if value="@$Cluster.terraforming.partname">
+              <do_all exact="$T.count - 1" counter="$i">
+                <set_value name="$Id" exact="$T.{$i + 1}.{1}"/>
+                <set_value name="$Value" exact="$T.{$i + 1}.{2}"/>
+                <do_if value="not @$Cluster.terraforming.stat.{$Id}.exists or $Cluster.terraforming.stat.{$Id}.value != $Value">
+                  <set_terraforming_stat cluster="$Cluster" id="$Id" value="$Value"/>
+                </do_if>
+              </do_all>
+            </do_if>
+          </actions>
+        </cue>
+
         <cue name="OnNpcClear" instantiate="true">
           <conditions>
             <event_ui_triggered screen="'x4coop'" control="'npc_clear'"/>

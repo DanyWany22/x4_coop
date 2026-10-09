@@ -68,7 +68,8 @@ The mod has **no DLLs, no native hooks, no injection, and reads or writes no mem
 Lua it wraps some of the UI's own script functions, so it can share the orders the player gives: the
 global `CreateOrder` and `SetOrderParam`, the map menu's order-editing functions (for example
 `buttonDefaultOrderConfirm`), the station account functions `TransferPlayerMoneyTo`, `TransferMoneyToPlayer`,
-`SetMinBudget` and `SetMaxBudget`, and `SetComponentName` for ship renames. See Orders, Behaviours and Station accounts. That is ordinary UI scripting: each Lua function
+`SetMinBudget` and `SetMaxBudget`, `SetComponentName` for ship renames, and the terraforming menu's
+`buttonStartProject` and `buttonAbortProject`. See Orders, Behaviours and Station accounts. That is ordinary UI scripting: each Lua function
 is replaced by one that calls the original and then notes which ship's orders changed.
 [`demo/x4_memory_demo.py`](demo/x4_memory_demo.py) is a separate tool that shows reading and
 writing X4's memory is possible, on your credits; the mod never loads or calls it. The
@@ -76,7 +77,7 @@ writing X4's memory is possible, on your credits; the mod never loads or calls i
 memory writes. The Lua calls functions by name through FFI:
 
 * **6 Windows functions** for the pipe (listed above).
-* **49 game functions.** Egosoft's own UI scripts call every one of them; one example file each, from
+* **63 game functions.** Egosoft's own UI scripts call every one of them; one example file each, from
   the game's archives:
 
 | function | used by vanilla, e.g. |
@@ -97,6 +98,10 @@ memory writes. The Lua calls functions by name through FFI:
 | `GetDefaultOrder`, `GetOrders` | `ui/addons/ego_detailmonitor/menu_docked.lua` |
 | `GetContainerWareIsBuyable`, `GetContainerWareIsSellable`, `HasContainerBuyLimitOverride`, `HasContainerSellLimitOverride`, `GetContainerBuyLimit`, `GetContainerSellLimit`, `SetContainerBuyLimitOverride`, `SetContainerSellLimitOverride`, `GetNumAllTradeRules`, `GetAllTradeRules` | `ui/addons/ego_detailmonitorhelper/helper.lua` |
 | `GetContainerTradeRuleID`, `HasContainerOwnTradeRule`, `SetContainerTradeRule`, `SetContainerWareIsBuyable`, `SetContainerWareIsSellable`, `ClearContainerBuyLimitOverride`, `ClearContainerSellLimitOverride`, `AddTradeWare`, `RemoveTradeWare`, `ShouldContainerFillWorkforceCapacity`, `SetContainerWorkforceFillCapacity`, `GetContainerBuildPriceFactor`, `SetContainerBuildPriceFactor` | `ui/addons/ego_detailmonitor/menu_station_overview.lua` |
+| `CreateTradeRule`, `UpdateTradeRule`, `RemoveTradeRule`, `GetTradeRuleInfo`, `GetTradeRuleInfoCounts`, `IsPlayerTradeRuleDefault`, `SetPlayerTradeRuleDefault` | `ui/addons/ego_detailmonitor/menu_playerinfo.lua` |
+| `GetMissionIDObjective2` | `ui/addons/ego_detailmonitor/menu_map.lua` |
+| `GetMissionIDObjectiveTarget` | `ui/addons/ego_detailmonitor/menu_missionbriefing.lua` |
+| `StartTerraformingProject`, `AbortActiveTerraformingProject`, `CanStartTerraformingProject`, `CanAbortActiveTerraformingProject`, `GetTerraformingActiveProject` | `ui/addons/ego_detailmonitor/menu_terraforming.lua` |
 
 The station settings also use the UI's own script functions for prices, storage limits and names
 (`GetContainerWarePrice`, `SetContainerWarePriceOverride`, `SetContainerStockLimitOverride`, `SetComponentName`
@@ -363,6 +368,11 @@ have from the shared save isn't shown twice. `/x4coop set missions 0` turns it o
 both logbooks, with "Co-op: <name>" as its source, and it stays in the host's save. Alerts, upkeep and news
 aren't shared, because both worlds write those themselves. `/x4coop set logbook_sync 0` turns it off.
 
+**Terraforming:** a terraforming project either of you starts or aborts is started or aborted in the other
+world too. How a project turns out is rolled in each world, so every 30 seconds the host's game sends each
+planet's stats (temperature, air, population and the rest) and the joiner's game sets the same.
+`/x4coop set terraform_sync 0` turns it off.
+
 **Cargo:** the empire's ships carry the same in both worlds. The host's world is in charge of what they carry,
 except for the ship the joiner flies, which the joiner's world is in charge of: what the joiner buys, sells,
 mines or collects is on board in the host's world too. `/x4coop set cargo_sync 0` turns it off.
@@ -569,7 +579,7 @@ game's own schema (`libraries/md.xsd`, `libraries/common.xsd`).
 
 Messages (one text line each): `S` snapshot (position, rotation, velocity, ship, hull, shield),
 `P`/`Q` ping, `M` chat, `L` world link, `K` kill, `D` hit, `F` firing at, `B` nearby ships (both
-ways), `E` station stock (host to joiner), `T` a joiner's trade, `V` relations, `U` research/blueprints/licences, `Z` SETA, `O` ownership, `Y` new ships, `G` orders, `J` behaviours and queues, `I` on foot, `b` station modules, `s` station settings, `c` assignments, `r` trade rules, `a` station accounts, `m` missions, `e` station modules removed/wrecked/repaired, `q` ship upgrades, `p` deployables, `n` map knowledge, `l` ship renames, `w` crews, `g` the wider world (host to joiner), `h` logbook entries, `d` loot taken, `f` cargo, `C` credits given; `R`/`W`/`N`/`X` are between a game and
+ways), `E` station stock (host to joiner), `T` a joiner's trade, `V` relations, `U` research/blueprints/licences, `Z` SETA, `O` ownership, `Y` new ships, `G` orders, `J` behaviours and queues, `I` on foot, `b` station modules, `s` station settings, `c` assignments, `r` trade rules, `a` station accounts, `m` missions, `e` station modules removed/wrecked/repaired, `q` ship upgrades, `p` deployables, `n` map knowledge, `l` ship renames, `w` crews, `g` the wider world (host to joiner), `h` logbook entries, `d` loot taken, `f` cargo, `t` terraforming, `C` credits given; `R`/`W`/`N`/`X` are between a game and
 its own bridge.
 
 Self-calibration: on first contact the proxy is nudged and read back (does `SetObjectSectorPos`
@@ -622,7 +632,8 @@ python extensions/x4_coop/dev/run_tests.py [--quick]
   translated), the wider world (summaries sent by the host only, checked; layouts asked for, sent, parsed;
   sector owners; stations destroyed both ways), the logbook both ways (new entries of the shared kinds once,
   none of the partner's back), cargo both ways (each ship from the world in charge of it, set exactly, an
-  empty hold too), loot both ways (lockboxes, drops, crates; checked, translated), crews both ways (counts and skills checked, translated, applied once), ship renames both ways (only the empire's ships, cleaned, applied once), deployables both ways (placed at the same spot once, paired, removed when gone), missions both ways (new, changed and ended ones sent once, alerts and guidance left out, ones
+  empty hold too), terraforming (projects started and aborted both ways, applied once; the host's planet
+  stats on the joiner), loot both ways (lockboxes, drops, crates; checked, translated), crews both ways (counts and skills checked, translated, applied once), ship renames both ways (only the empire's ships, cleaned, applied once), deployables both ways (placed at the same spot once, paired, removed when gone), missions both ways (new, changed and ended ones sent once, alerts and guidance left out, ones
   both worlds have not shown twice, ended ones dropped by the list), research, blueprints and licences both ways (sent until confirmed, added once), SETA both ways
   (followed; turned off for both when one side can't follow), ownership changes both ways (sent
   until confirmed, applied once), new ships both ways (made once, paired, kills and hits on them

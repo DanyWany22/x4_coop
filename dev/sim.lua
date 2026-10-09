@@ -55,6 +55,10 @@ local SC = {
 	                 role = "join", own_world = "abc123", partner_world = "abc123", foot_test = true },
 	stations     = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
 	                 role = "join", own_world = "abc123", partner_world = "abc123", station_test = true },
+	terraform_join = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30,
+	                 pipes = true, role = "join", own_world = "abc123", partner_world = "abc123", terraform_test = "join" },
+	terraform_host = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30,
+	                 pipes = true, role = "host", own_world = "abc123", partner_world = "abc123", terraform_test = "host" },
 	cargo        = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
 	                 role = "join", own_world = "abc123", partner_world = "abc123", cargo_test = true },
 	loot         = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
@@ -599,6 +603,18 @@ function GetLogbook(start, count, category)
 	for i = start, math.min(#sim_logbook, start + count - 1) do out[#out + 1] = sim_logbook[i] end
 	return out
 end
+-- terraforming: one planet, the menu, the game's project functions
+terra_calls, terra_requests, terra_active = {}, {}, ""
+SECTORS[900] = SECTORS[900] or "cluster_900_macro"
+function GetClusters() return { 900 } end
+C.StartTerraformingProject = function(c, p) terra_calls[#terra_calls + 1] = "start:" .. c .. ":" .. p; terra_active = p end
+C.AbortActiveTerraformingProject = function(c) terra_calls[#terra_calls + 1] = "abort:" .. c; terra_active = "" end
+C.CanStartTerraformingProject = function(c, p) return p ~= "impossible" end
+C.CanAbortActiveTerraformingProject = function(c) return terra_active ~= "" end
+C.GetTerraformingActiveProject = function(c) return terra_active end
+table.insert(Menus, { name = "TerraformingMenu", cluster = 900,
+	buttonStartProject = function(p) C.StartTerraformingProject(900, p) end,
+	buttonAbortProject = function() C.AbortActiveTerraformingProject(900) end })
 function GetPlayerMoney() return player_money end
 function SetNPCBlackboard(_, key, v) blackboard[key] = v end
 function ExecuteDebugCommand(cmd, param) say("  ego command /%s %s", cmd, tostring(param)) end
@@ -786,6 +802,10 @@ function AddUITriggeredEvent(screen, control, args)
 		galaxy_requests[#galaxy_requests + 1] = "world_layout:" .. table.concat(head, ":") .. ":" .. table.concat(mods, ";")
 	elseif control == "world_sync" then
 		-- md only remembers the switch
+	elseif control == "terraform_stats" then
+		terra_requests[#terra_requests + 1] = sim_args(args)
+	elseif control == "terraform_sync" then
+		-- md only remembers the switch
 	elseif control == "cargo" then
 		cargo_requests[#cargo_requests + 1] = sim_args(args)
 	elseif control == "cargo_sync" then
@@ -964,6 +984,8 @@ if sc.pipes then
 						msg = "X|profile|" .. f[3] .. "|" .. (sim_profiles[f[3]] or "none") }
 				elseif f[1] == "g" and f[2] == "msg" then
 					partner_queue[#partner_queue + 1] = { at = clock + 2 * ONE_WAY, msg = "g|ack|" .. f[3] }
+				elseif f[1] == "t" and f[2] == "msg" then
+					partner_queue[#partner_queue + 1] = { at = clock + 2 * ONE_WAY, msg = "t|ack|" .. f[3] }
 				elseif f[1] == "f" and f[2] == "msg" then
 					partner_queue[#partner_queue + 1] = { at = clock + 2 * ONE_WAY, msg = "f|ack|" .. f[3] }
 				elseif f[1] == "d" and f[2] == "msg" then
@@ -1646,6 +1668,30 @@ function cargo_script()
 	while cargo_steps[1] and clock >= cargo_steps[1][1] do table.remove(cargo_steps, 1)[2]() end
 end
 
+terraform_steps = {
+	{ 6, function()
+		if sc.terraform_test ~= "join" then return end
+		for _, m in ipairs(Menus) do if m.name == "TerraformingMenu" then m.buttonStartProject("tf_oxygen_1") end end
+	end },
+	{ 8, function()
+		if sc.terraform_test ~= "join" then return end
+		pipe_reader("t|st|" .. SECTORS[900] .. "|temperature=285,population=12000000000,bad stat=4")
+		pipe_reader("t|msg|0e91|abort|" .. SECTORS[900] .. "|")
+	end },
+	{ 9, function() if sc.terraform_test == "join" then pipe_reader("t|msg|0e92|start|" .. SECTORS[900] .. "|tf_methane_2") end end },
+	{ 9.3, function() if sc.terraform_test == "join" then pipe_reader("t|msg|0e92|start|" .. SECTORS[900] .. "|tf_methane_2") end end },
+	{ 10, function() if sc.terraform_test == "join" then pipe_reader("t|msg|0e93|start|" .. SECTORS[900] .. "|impossible") end end },
+	{ 7, function()
+		if sc.terraform_test ~= "host" then return end
+		blackboard["$x4coop_terraform"] = { { SECTORS[900], { "temperature", 285 }, { "population", 12000000000 } } }
+		queue("x4coop.terraform")
+	end },
+}
+function terraform_script()
+	if not sc.terraform_test or not pipe_reader then return end
+	while terraform_steps[1] and clock >= terraform_steps[1][1] do table.remove(terraform_steps, 1)[2]() end
+end
+
 function credit_script()
 	if not sc.credits_test or not pipe_reader then return end
 	while credit_steps[1] and clock >= credit_steps[1][1] do
@@ -1793,6 +1839,7 @@ while clock < sc.duration do
 	logbook_script()
 	loot_script()
 	cargo_script()
+	terraform_script()
 	if sc.partner_restart_at and clock >= sc.partner_restart_at and partner_clock_offset == 1000 then
 		partner_clock_offset = -500
 		say("t=%.1f partner restarted their game (clock jumped back)", clock)
@@ -2341,6 +2388,25 @@ if sc.foot_test then
 		and tostring(foot_status_seen):find("on foot at Harbour Bar Station", 1, true) ~= nil
 		and said:find("is on foot at Harbour Bar Station", 1, true) ~= nil
 		and said:find("is back aboard a ship", 1, true) ~= nil
+end
+if sc.terraform_test then
+	local sent, plain = {}, {}
+	for _, w in ipairs(pipe_writes) do
+		local id, rest = w:match("^t|msg|(%x+)|(.*)$")
+		if id then sent[id] = rest end
+		if w:sub(1, 5) == "t|st|" then plain[#plain + 1] = w end
+	end
+	local list = {}
+	for _, rest in pairs(sent) do list[#list + 1] = rest end
+	say("terraform: sent %s / %s; game calls %s; md %s", table.concat(list, " / "), table.concat(plain, " / "),
+		table.concat(terra_calls, " "), table.concat(terra_requests, " / "))
+	if sc.terraform_test == "join" then
+		ok = ok and #list == 1 and list[1] == "start|" .. SECTORS[900] .. "|tf_oxygen_1" and #plain == 0
+			and table.concat(terra_calls, " ") == "start:900:tf_oxygen_1 abort:900 start:900:tf_methane_2"
+			and table.concat(terra_requests, " / ") == SECTORS[900] .. ":temperature=285:population=12000000000"
+	else
+		ok = ok and #list == 0 and #plain == 1 and plain[1] == "t|st|" .. SECTORS[900] .. "|temperature=285,population=12000000000"
+	end
 end
 if sc.cargo_test then
 	local sent = {}
