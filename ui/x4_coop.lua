@@ -384,7 +384,7 @@ local function reset()
 		knowledge = { on = false, sent = 0, applied = 0 },
 		renames = { sent = 0, applied = 0 },
 		crew = { on = false, sent = 0, applied = 0 },
-		world = { key = nil, asked = {}, gone = 0, wanted = 0, layouts = 0, summaries = 0, built = 0 },
+		world = { key = nil, asked = {}, gone = 0, wanted = 0, layouts = 0, summaries = 0, built = 0, ships = 0 },
 		rules = { next = 0, base = nil, shared = {}, alias = { loaded = false, into = {}, out = {} }, sent = 0, applied = 0 },
 		ssettings = { list = {}, idx = 0, next = 0, ids = {}, base = {}, settle = {}, out = {}, expect = {}, sent = 0, applied = 0 },
 		foot = { on = false, walking = false, last = nil, gone_left = 0, gone_at = -1e9, partner = nil, avatar_on = false },
@@ -4496,6 +4496,9 @@ Feature.crew_tick = crew_tick
 -- answers with the layout ("layout": station, then "module:x:y:z:yaw:pitch:roll;..."), and the joiner's md makes it
 -- match, removing what the host doesn't have. A station destroyed in either world goes in the other ("gone").
 -- "g|msg|id|want|station|macro|sector", "g|msg|id|layout|...", "g|msg|id|gone|station|macro|sector", sent reliably.
+-- Ships too: the host's md goes round every ship and Lua sends "g|sh|round|ship|macro|owner|sector|x|y|z|hull|docked";
+-- the joiner's md moves its copy there unless it's near the joiner, follows hull and owner, makes ships it hasn't
+-- got and removes other factions' ships far from the joiner that the host hasn't mentioned for two rounds.
 
 local WORLD_ASK_AGAIN = 120   -- s before asking for the same station's layout again
 local WORLD_SECTORS = 40      -- sectors per "g|sec" message
@@ -4537,6 +4540,15 @@ local function on_world()
 				end
 			end
 			if #batch > 0 then net_send("g|sec|" .. table.concat(batch, ",")) end
+		elseif v[1] == "sh" and S.link.role == "host" and valid_world_ref(v[3], v[4], v[6]) and type(v[5]) == "string"
+			and v[5]:match("^[%w_]+$") and tonumber(v[2]) then
+			local fields = { "g", "sh", string.format("%d", tonumber(v[2])), alias_out(v[3]), v[4], v[5], v[6] }
+			for i = 7, 11 do
+				local n = world_number(v[i])
+				if not n then fields = nil break end
+				fields[#fields + 1] = n
+			end
+			if fields then net_send(table.concat(fields, "|")) end
 		elseif v[1] == "gone" and valid_world_ref(v[2], v[3], v[4]) then
 			reliable_send("g", { "gone", alias_out(v[2]), v[3], v[4] })
 			S.world.gone = S.world.gone + 1
@@ -4612,6 +4624,18 @@ Receive.g = function(f, now)
 		args[#args + 1] = f[4]
 		request("world_station", args)
 		W.summaries = W.summaries + 1
+		return
+	elseif f[2] == "sh" then
+		if S.link.role ~= "join" or not (valid_world_ref(f[4], f[5], f[7]) and type(f[6]) == "string" and f[6]:match("^[%w_]+$")) then return end
+		local args = { alias_in(f[4]), f[5], f[6], f[7] }
+		for i = 8, 12 do
+			local n = tonumber(f[i])
+			if not n then return end
+			args[#args + 1] = n
+		end
+		args[#args + 1] = tonumber(f[3]) or 0
+		request("galaxy_ship", args)
+		W.ships = W.ships + 1
 		return
 	elseif f[2] == "sec" then
 		if S.link.role ~= "join" then return end
@@ -4728,9 +4752,9 @@ local function status_text()
 			and string.format(" | station settings sent %d, applied %d", S.ssettings.sent, S.ssettings.applied) or "")
 		.. ((S.rules.sent + S.rules.applied > 0)
 			and string.format(" | trade rules sent %d, applied %d", S.rules.sent, S.rules.applied) or "")
-		.. ((S.world.summaries + S.world.layouts + S.world.gone > 0)
-			and string.format(" | world: stations checked %d, layouts asked %d / sent %d / built %d, destroyed sent %d",
-				S.world.summaries, S.world.wanted, S.world.layouts, S.world.built, S.world.gone) or "")
+		.. ((S.world.summaries + S.world.layouts + S.world.gone + S.world.ships > 0)
+			and string.format(" | world: stations checked %d, layouts asked %d / sent %d / built %d, destroyed sent %d, ships checked %d",
+				S.world.summaries, S.world.wanted, S.world.layouts, S.world.built, S.world.gone, S.world.ships) or "")
 		.. ((S.crew.sent + S.crew.applied > 0)
 			and string.format(" | crews sent %d, applied %d", S.crew.sent, S.crew.applied) or "")
 		.. ((S.knowledge.sent + S.knowledge.applied > 0)

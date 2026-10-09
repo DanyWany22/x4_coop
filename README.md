@@ -369,10 +369,17 @@ you typed `/x4coop loadshared`. `/x4coop set joiner_profile 0` turns it off.
 round all of them, a few each second, and the joiner's game follows each one's owner, builds any it doesn't
 have from the host's layout, adds and removes modules where the host's differ, and removes stations the host
 doesn't have. Sector owners follow the host's too. A station destroyed in either world is destroyed in the
-other. `/x4coop set world_sync 0` turns it off.
+other.
 
-Away from both of you, the two worlds still drift apart (far-away NPC ships, what they carry). The host's world
-is the real one: next session, share again.
+Ships away from the joiner follow the host's world the same way. The host's game goes round every ship, about
+twenty a second, and the joiner's game moves its copy to where it is in the host's world (if it is more than
+2 km off and not docked), follows its hull and owner, makes ships of other factions that the host has and it
+hasn't, and removes the ones the host hasn't had for two rounds. Nothing within 8 km of the joiner is touched,
+since the joiner's game is in charge there, and the empire's own ships are only moved, never made or removed.
+`/x4coop set world_sync 0` turns all of this off.
+
+Away from both of you, what ships carry, their exact routes between the host's reports, and fights there still
+differ between the two worlds. The host's world is the real one: next session, share again.
 
 ## Commands
 

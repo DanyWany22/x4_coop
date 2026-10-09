@@ -2702,6 +2702,105 @@
           </actions>
         </cue>
 
+        <!--
+          Ships away from the joiner (host to joiner, with 'world_sync'). Host: GalaxyHostShips goes round every ship
+          (S to XL, not mass traffic, not our proxies or the ship the player flies), twenty a second, and reports
+          ['sh', round, idcode, macro, owner id, sector macro, x, y, z, hull %, 1 if docked] (WorldReport).
+          Joiner: OnGalaxyShip (param3: [host idcode, macro, owner id, sector macro, x, y, z, hull, docked, round])
+          finds our copy (the same idcode, or one made here: Root.$GalaxyMade) and, unless it or that place is within
+          GALAXY_NEAR of the joiner, moves it there if it's elsewhere, follows its hull and, for other factions,
+          owner; a ship of another faction we don't have is made. Ships of other factions far from the joiner that
+          the host hasn't mentioned for two rounds are removed (GalaxySweep). The empire's ships are only moved.
+        -->
+        <cue name="GalaxyHostShips" instantiate="true" checkinterval="1s">
+          <conditions>
+            <check_value value="@Root.$WorldSyncOn == 1 and Root.$WorldRole == 'host'"/>
+          </conditions>
+          <actions>
+            <do_if value="not Root.$GalaxyShipQueue? or Root.$GalaxyShipQueue.count == 0">
+              <find_ship name="Root.$GalaxyShipQueue" space="player.galaxy" multiple="true"/>
+              <set_value name="Root.$GalaxyShipRound" exact="@Root.$GalaxyShipRound + 1"/>
+            </do_if>
+            <do_all exact="[20, Root.$GalaxyShipQueue.count].min">
+              <set_value name="$Ship" exact="Root.$GalaxyShipQueue.{1}"/>
+              <remove_value name="Root.$GalaxyShipQueue.{1}"/>
+              <do_if value="@$Ship.exists and @$Ship.sector and $Ship.owner and $Ship.isclass.{[class.ship_s, class.ship_m, class.ship_l, class.ship_xl]} and not $Ship.ismasstraffic and $Ship != player.occupiedship and not @Root.$AllProxies.indexof.{$Ship} and not @Root.$Adopted.indexof.{$Ship}">
+                <set_value name="$P" exact="$Ship.relativeposition.{$Ship.sector}"/>
+                <set_value name="$Entry" exact="['sh', Root.$GalaxyShipRound, $Ship.idcode, $Ship.macro.id, $Ship.owner.id, $Ship.sector.macro.id, $P.x / 1m, $P.y / 1m, $P.z / 1m, $Ship.hullpercentage, if @$Ship.dock then 1 else 0]"/>
+                <include_actions ref="WorldReport"/>
+              </do_if>
+            </do_all>
+          </actions>
+        </cue>
+
+        <cue name="OnGalaxyShip" instantiate="true">
+          <conditions>
+            <event_ui_triggered screen="'x4coop'" control="'galaxy_ship'"/>
+          </conditions>
+          <actions>
+            <set_value name="$G" exact="event.param3"/>
+            <set_value name="$Round" exact="$G.{10}"/>
+            <do_if value="not Root.$GalaxySeen?">
+              <set_value name="Root.$GalaxySeen" exact="table[]"/>
+              <set_value name="Root.$GalaxyMade" exact="table[]"/>
+              <set_value name="Root.$GalaxyIndex" exact="table[]"/>
+              <set_value name="Root.$GalaxyFirstRound" exact="$Round"/>
+              <set_value name="Root.$GalaxyLastRound" exact="$Round - 1"/>
+            </do_if>
+            <do_if value="$Round gt Root.$GalaxyLastRound">
+              <set_value name="Root.$GalaxyLastRound" exact="$Round"/>
+              <include_actions ref="GalaxySweep"/>
+            </do_if>
+            <set_value name="$Key" exact="'$' + $G.{1}"/>
+            <set_value name="$Ship" exact="null"/>
+            <do_if value="@Root.$GalaxyMade.{$Key}.exists">
+              <set_value name="$Ship" exact="Root.$GalaxyMade.{$Key}"/>
+            </do_if>
+            <do_elseif value="@Root.$GalaxyIndex.{$Key}.exists">
+              <set_value name="$Ship" exact="Root.$GalaxyIndex.{$Key}"/>
+            </do_elseif>
+            <find_sector name="$Sector" macro="@macro.{$G.{4}}"/>
+            <do_if value="$Sector">
+              <set_value name="$Pos" exact="position.[$G.{5}, $G.{6}, $G.{7}]"/>
+              <!-- the joiner's own area is the joiner's game's -->
+              <set_value name="$NearThere" exact="player.entity.sector == $Sector and player.entity.relativeposition.{$Sector}.distanceto.{$Pos} lt 8km"/>
+              <do_if value="$Ship">
+                <set_value name="Root.$GalaxySeen.{$Ship}" exact="$Round"/>
+                <set_value name="$NearHere" exact="$Ship.sector == player.entity.sector and $Ship.distanceto.{player.entity} lt 8km"/>
+                <do_if value="not $NearHere and not $NearThere and $Ship != player.occupiedship">
+                  <do_if value="not $Ship.isplayerowned and @faction.{$G.{3}} and $Ship.owner != faction.{$G.{3}}">
+                    <set_owner object="$Ship" faction="faction.{$G.{3}}"/>
+                  </do_if>
+                  <do_if value="($Ship.hullpercentage - $G.{8}) * ($Ship.hullpercentage - $G.{8}) gt 25 and $G.{8} gt 0">
+                    <set_object_hull object="$Ship" exact="$G.{8}"/>
+                  </do_if>
+                  <do_if value="$G.{9} == 0 and not @$Ship.dock and ($Ship.sector != $Sector or $Ship.relativeposition.{$Sector}.distanceto.{$Pos} gt 2km)">
+                    <warp object="$Ship" sector="$Sector">
+                      <position x="$G.{5}" y="$G.{6}" z="$G.{7}"/>
+                    </warp>
+                  </do_if>
+                </do_if>
+              </do_if>
+              <do_elseif value="not $NearThere and @macro.{$G.{2}}.isclass.ship and @faction.{$G.{3}} and $G.{3} != 'player'">
+                <create_ship name="$Ship" macro="macro.{$G.{2}}" sector="$Sector">
+                  <owner exact="faction.{$G.{3}}" overridenpc="true"/>
+                  <loadout>
+                    <level exact="0.6"/>
+                  </loadout>
+                  <pilot>
+                    <select faction="faction.{$G.{3}}" tags="tag.aipilot"/>
+                  </pilot>
+                  <position x="$G.{5}" y="$G.{6}" z="$G.{7}"/>
+                </create_ship>
+                <do_if value="@$Ship.exists">
+                  <set_value name="Root.$GalaxyMade.{$Key}" exact="$Ship"/>
+                  <set_value name="Root.$GalaxySeen.{$Ship}" exact="$Round"/>
+                </do_if>
+              </do_elseif>
+            </do_if>
+          </actions>
+        </cue>
+
         <cue name="OnNpcClear" instantiate="true">
           <conditions>
             <event_ui_triggered screen="'x4coop'" control="'npc_clear'"/>
@@ -3011,6 +3110,29 @@
                 <do_if value="$Last lt Root.$WorldLastRound - 2">
                   <include_actions ref="WorldRemoveStation"/>
                 </do_if>
+              </do_if>
+            </do_for_each>
+          </actions>
+        </library>
+
+        <library name="GalaxySweep">
+          <actions>
+            <!-- joiner, at a new round: index our ships by idcode; remove other factions' ships far from the joiner
+                 that the host hasn't mentioned for two whole rounds -->
+            <set_value name="Root.$GalaxyIndex" exact="table[]"/>
+            <find_ship name="$All" space="player.galaxy" multiple="true"/>
+            <do_for_each name="$S" in="$All">
+              <do_if value="@$S.sector and $S.owner and $S.isclass.{[class.ship_s, class.ship_m, class.ship_l, class.ship_xl]} and not $S.ismasstraffic">
+                <set_value name="Root.$GalaxyIndex.{'$' + $S.idcode}" exact="$S"/>
+                <set_value name="$Last" exact="if Root.$GalaxySeen.{$S}? then Root.$GalaxySeen.{$S} else Root.$GalaxyFirstRound"/>
+                <do_if value="$Last lt Root.$GalaxyLastRound - 2 and not $S.isplayerowned and $S != player.occupiedship and not @Root.$AllProxies.indexof.{$S} and not @Root.$Adopted.indexof.{$S} and not ($S.sector == player.entity.sector and $S.distanceto.{player.entity} lt 8km)">
+                  <destroy_object object="$S" explosion="false"/>
+                </do_if>
+              </do_if>
+            </do_for_each>
+            <do_for_each name="$S" in="Root.$GalaxySeen.keys.list">
+              <do_if value="not $S.exists">
+                <remove_value name="Root.$GalaxySeen.{$S}"/>
               </do_if>
             </do_for_each>
           </actions>

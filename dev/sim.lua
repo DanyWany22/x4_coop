@@ -751,7 +751,8 @@ function AddUITriggeredEvent(screen, control, args)
 		manager_requests[#manager_requests + 1] = tostring(args[1])
 	elseif control == "station_sync" then
 		-- md only remembers the switch
-	elseif control == "world_station" or control == "world_sectors" or control == "world_want" or control == "world_gone" then
+	elseif control == "world_station" or control == "world_sectors" or control == "world_want" or control == "world_gone"
+		or control == "galaxy_ship" then
 		galaxy_requests[#galaxy_requests + 1] = control .. ":" .. sim_args(args)
 	elseif control == "world_layout" then
 		local mods = {}
@@ -1527,6 +1528,11 @@ local galaxy_steps = {
 		pipe_reader("g|st|4|BAD-1|" .. ST_W .. "|argon|" .. SECTORS[500] .. "|1000.0|0.0|2000.0|0.0|0.0|0.0|12|0|x|0.0|-30.0")
 		pipe_reader("g|sec|" .. SECTORS[500] .. "=argon,cluster_02_sector001_macro=xenon,bad sector=argon")
 	end },
+	{ 7, function()
+		if sc.galaxy_test ~= "join" then return end
+		pipe_reader("g|sh|2|NPS-1|ship_arg_m_trans_container_01_a_macro|teladi|" .. SECTORS[500] .. "|5000.0|0.0|-8000.0|87.5|0.0")
+		pipe_reader("g|sh|2|NPS-2|ship_arg_m_trans_container_01_a_macro|teladi|" .. SECTORS[500] .. "|5000.0|0.0|nope|87.5|0.0")
+	end },
 	{ 8, function()
 		if sc.galaxy_test ~= "join" then return end
 		pipe_reader("g|msg|0a91|layout|NPC-2|" .. ST_W .. "|teladi|" .. SECTORS[500] .. "|0.0|0.0|0.0|90.0|0.0|0.0|"
@@ -1538,7 +1544,8 @@ local galaxy_steps = {
 		if sc.galaxy_test ~= "host" then return end
 		blackboard["$x4coop_galaxy"] = { { "st", 3, "NPC-1", ST_W, "argon", SECTORS[500], 1000, 0, 2000, 0, 0, 0, 12, 0, 10, 0, -30 },
 			{ "sectors", { SECTORS[500], "argon" }, { "cluster_02_sector001_macro", "" } },
-			{ "gone", "NPC-4", ST_W, SECTORS[500] } }
+			{ "gone", "NPC-4", ST_W, SECTORS[500] },
+			{ "sh", 2, "NPS-1", "ship_arg_m_trans_container_01_a_macro", "teladi", SECTORS[500], 5000, 0, -8000, 87.5, 0 } }
 		queue("x4coop.galaxy")
 	end },
 	{ 9, function() if sc.galaxy_test == "host" then pipe_reader("g|msg|0a93|want|NPC-1|" .. ST_W .. "|" .. SECTORS[500]) end end },
@@ -2257,7 +2264,9 @@ if sc.galaxy_test then
 	for _, rest in pairs(sent) do list[#list + 1] = rest end
 	table.sort(list)
 	local plain = {}
-	for _, w in ipairs(pipe_writes) do if w:sub(1, 5) == "g|st|" or w:sub(1, 6) == "g|sec|" then plain[#plain + 1] = w end end
+	for _, w in ipairs(pipe_writes) do
+		if w:sub(1, 5) == "g|st|" or w:sub(1, 6) == "g|sec|" or w:sub(1, 5) == "g|sh|" then plain[#plain + 1] = w end
+	end
 	local s = SECTORS[500]
 	say("world: sent %s / %s", table.concat(list, " / "), table.concat(plain, " / "))
 	say("world: md %s", table.concat(galaxy_requests, " / "))
@@ -2265,6 +2274,7 @@ if sc.galaxy_test then
 		ok = ok and #list == 0 and #plain == 0
 			and table.concat(galaxy_requests, " / ") == "world_station:NPC-1:" .. ST_W .. ":argon:" .. s .. ":1000:0:2000:0:0:0:12:0:10:0:-30:4:NPC-1"
 				.. " / world_sectors:" .. s .. ":argon:cluster_02_sector001_macro:xenon"
+				.. " / galaxy_ship:NPS-1:ship_arg_m_trans_container_01_a_macro:teladi:" .. s .. ":5000:0:-8000:87.5:0:2"
 				.. " / world_layout:NPC-2:" .. ST_W .. ":teladi:" .. s .. ":0:0:0:90:0:0:NPC-2:prod_gen_energycells_macro=0,0,0,0,0,0;dockarea_arg_m_station_01_macro=0,0,300,0,0,0"
 				.. " / world_gone:NPC-3:" .. ST_W .. ":" .. s
 	else
@@ -2272,6 +2282,7 @@ if sc.galaxy_test then
 				.. " / layout|NPC-1|" .. ST_W .. "|argon|" .. s .. "|1000.0|0.0|2000.0|0.0|0.0|0.0|prod_gen_energycells_macro:0.0:0.0:0.0:0.0:0.0:0.0;dockarea_arg_m_station_01_macro:0.0:0.0:300.0:0.0:0.0:0.0"
 			and table.concat(plain, " / ") == "g|st|3|NPC-1|" .. ST_W .. "|argon|" .. s .. "|1000.0|0.0|2000.0|0.0|0.0|0.0|12.0|0.0|10.0|0.0|-30.0"
 				.. " / g|sec|" .. s .. "=argon,cluster_02_sector001_macro="
+				.. " / g|sh|2|NPS-1|ship_arg_m_trans_container_01_a_macro|teladi|" .. s .. "|5000.0|0.0|-8000.0|87.5|0.0"
 			and table.concat(galaxy_requests, " / ") == "world_want:NPC-1:" .. ST_W .. ":" .. s
 	end
 end
