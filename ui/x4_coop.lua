@@ -122,6 +122,7 @@ local config = {
 	deploy_sync = 1,          -- shared world: satellites, beacons, probes, mines and laser towers in both worlds
 	knowledge_sync = 1,       -- shared world: sectors and stations discovered, stations scanned, factions met
 	rename_sync = 1,          -- shared world: ships renamed in either world get the same name in both
+	crew_sync = 1,            -- shared world: ships' crew and marines (numbers, skills) and pilots' skills
 	ghost_latency = 0.12,     -- s, simulated one-way latency in ghost mode
 	ghost_jitter = 0.03,      -- s, extra random delay per snapshot
 	ghost_loss = 0.0,         -- 0..1, fraction of snapshots dropped
@@ -381,6 +382,7 @@ local function reset()
 		deploys = { on = false, sent = 0, applied = 0 },
 		knowledge = { on = false, sent = 0, applied = 0 },
 		renames = { sent = 0, applied = 0 },
+		crew = { on = false, sent = 0, applied = 0 },
 		rules = { next = 0, base = nil, shared = {}, alias = { loaded = false, into = {}, out = {} }, sent = 0, applied = 0 },
 		ssettings = { list = {}, idx = 0, next = 0, ids = {}, base = {}, settle = {}, out = {}, expect = {}, sent = 0, applied = 0 },
 		foot = { on = false, walking = false, last = nil, gone_left = 0, gone_at = -1e9, partner = nil, avatar_on = false },
@@ -756,10 +758,7 @@ local accounts_receive  -- the partner's station account changes and balances (a
 local profile_receive   -- our bridge's answer about the joiner's own wallet and inventory, in the fourth block
 local missions_receive  -- the partner's missions (m), defined in the fourth feature block
 local module_changes_receive  -- station modules removed, wrecked or repaired (e), in the fourth block
-local refit_receive     -- the partner's ship upgrades (q), defined in the fourth feature block
-local deploys_receive   -- the partner's deployables (p), defined in the fourth feature block
-local knowledge_receive -- what the partner has discovered (n), defined in the fourth feature block
-local renames_receive   -- the partner's ship renames (l), defined in the fourth feature block
+local Receive = {}      -- later features' receivers, by message kind, defined in their blocks
 local send_link
 
 local function net_send(msg)
@@ -874,13 +873,15 @@ on_pipe_message = function(msg)
 	elseif kind == "e" then
 		if config.mode == "net" then module_changes_receive(f, now) end
 	elseif kind == "q" then
-		if config.mode == "net" then refit_receive(f, now) end
+		if config.mode == "net" then Receive.q(f, now) end
 	elseif kind == "p" then
-		if config.mode == "net" then deploys_receive(f, now) end
+		if config.mode == "net" then Receive.p(f, now) end
 	elseif kind == "n" then
-		if config.mode == "net" then knowledge_receive(f, now) end
+		if config.mode == "net" then Receive.n(f, now) end
 	elseif kind == "l" then
-		if config.mode == "net" then renames_receive(f, now) end
+		if config.mode == "net" then Receive.l(f, now) end
+	elseif kind == "w" then
+		if config.mode == "net" then Receive.w(f, now) end
 	elseif kind == "M" then
 		local text = clean_text(f[3], 200)
 		if text ~= "" then
@@ -4212,6 +4213,15 @@ end
 
 Feature.on_module_changes = on_module_changes
 
+Feature.commands_tick = commands_tick
+Feature.on_commands = on_commands
+Feature.on_command_missing = on_command_missing
+end
+
+-- Equipment, deployables, map knowledge, renames and crew: a fifth block, for the same reason.
+do
+local reliable_send, reliable_receive = Feature.reliable_send, Feature.reliable_receive
+
 -------------------------------------------------------------------------------
 -- Equipment (shared faction): when an upgrade finishes on one of the empire's ships (the one a player flies too), its
 -- whole equipment is sent, as wares and counts, and the partner's game gives its copy the same (md OnShipRefit,
@@ -4235,7 +4245,7 @@ local function on_refit()
 	end
 end
 
-refit_receive = function(f, now)
+Receive.q = function(f, now)
 	if not equipment_enabled() then return end
 	reliable_receive("q", f, now, function(m)
 		local equip = Feature.decode_equipment(m[7])
@@ -4283,7 +4293,7 @@ local function on_deploys()
 	end
 end
 
-deploys_receive = function(f, now)
+Receive.p = function(f, now)
 	if not deploy_enabled() then return end
 	reliable_receive("p", f, now, function(m)
 		local x, y, z = tonumber(m[8]), tonumber(m[9]), tonumber(m[10])
@@ -4343,7 +4353,7 @@ local function on_knowledge()
 	end
 end
 
-knowledge_receive = function(f, now)
+Receive.n = function(f, now)
 	if not knowledge_enabled() then return end
 	reliable_receive("n", f, now, function(m)
 		local args
@@ -4398,7 +4408,7 @@ local function on_renamed(component, name)
 	S.renames.sent = S.renames.sent + 1
 end
 
-renames_receive = function(f, now)
+Receive.l = function(f, now)
 	if not renames_enabled() then return end
 	reliable_receive("l", f, now, function(m)
 		local name = clean_text(m[7], 60)
@@ -4420,9 +4430,59 @@ end
 
 Feature.renames_tick = renames_tick
 
-Feature.commands_tick = commands_tick
-Feature.on_commands = on_commands
-Feature.on_command_missing = on_command_missing
+-------------------------------------------------------------------------------
+-- Crew (shared faction): each of the empire's ships' service crew and marines (how many, and their average skills) and
+-- its pilot's skills are the same in both worlds (md CrewWatch, OnCrew). Crew members' names and faces stay each
+-- world's own. "w|msg|id|ship|macro|sector|17 numbers" (service count and 5 skills, marine count and 5 skills, pilot's
+-- 5 skills or -1), sent reliably.
+
+local function crew_enabled()
+	return config.mode == "net" and S.link.linked and config.crew_sync == 1
+end
+
+local function on_crew()
+	local list = S.player and GetNPCBlackboard(S.player, "$x4coop_crew")
+	if S.player then SetNPCBlackboard(S.player, "$x4coop_crew", nil) end
+	if type(list) ~= "table" or not crew_enabled() then return end
+	for _, v in ipairs(list) do
+		local ok = type(v) == "table" and #v == 20 and valid_world_ref(v[1], v[2], v[3])
+		for i = 4, 20 do ok = ok and tonumber(v[i]) ~= nil end
+		if ok then
+			local fields = { alias_out(v[1]), v[2], v[3] }
+			for i = 4, 20 do fields[#fields + 1] = string.format("%d", tonumber(v[i])) end
+			reliable_send("w", fields)
+			S.crew.sent = S.crew.sent + 1
+		end
+	end
+end
+
+Receive.w = function(f, now)
+	if not crew_enabled() then return end
+	reliable_receive("w", f, now, function(m)
+		if not valid_world_ref(m[4], m[5], m[6]) then return end
+		local args = { alias_in(m[4]), m[5], m[6] }
+		for i = 7, 23 do
+			local n = tonumber(m[i])
+			local skill = i ~= 7 and i ~= 13  -- the two counts aren't skills
+			if not n or n < -1 or (skill and n > 15) or (not skill and (n < 0 or n > 2000)) then return end
+			args[#args + 1] = math.floor(n)
+		end
+		request("crew", args)
+		S.crew.applied = S.crew.applied + 1
+	end)
+end
+
+local function crew_tick()
+	local on = crew_enabled()
+	if on ~= S.crew.on then
+		S.crew.on = on
+		request("crew_sync", { on and 1 or 0 })
+	end
+end
+
+Feature.on_crew = on_crew
+Feature.crew_tick = crew_tick
+
 end
 
 -------------------------------------------------------------------------------
@@ -4478,6 +4538,8 @@ local function status_text()
 			and string.format(" | station settings sent %d, applied %d", S.ssettings.sent, S.ssettings.applied) or "")
 		.. ((S.rules.sent + S.rules.applied > 0)
 			and string.format(" | trade rules sent %d, applied %d", S.rules.sent, S.rules.applied) or "")
+		.. ((S.crew.sent + S.crew.applied > 0)
+			and string.format(" | crews sent %d, applied %d", S.crew.sent, S.crew.applied) or "")
 		.. ((S.knowledge.sent + S.knowledge.applied > 0)
 			and string.format(" | discoveries sent %d, applied %d", S.knowledge.sent, S.knowledge.applied) or "")
 		.. ((S.deploys.sent + S.deploys.applied > 0)
@@ -4738,6 +4800,7 @@ local function tick(now, dt)
 	Feature.deploy_tick()
 	Feature.knowledge_tick()
 	Feature.renames_tick()
+	Feature.crew_tick()
 end
 
 local function on_update()
@@ -4783,6 +4846,7 @@ local function init()
 	RegisterEvent("x4coop.deploys", Feature.on_deploys)
 	RegisterEvent("x4coop.deploy_made", Feature.on_deploy_made)
 	RegisterEvent("x4coop.knowledge", Feature.on_knowledge)
+	RegisterEvent("x4coop.crew", Feature.on_crew)
 	RegisterEvent("x4coop.commands", Feature.on_commands)
 	RegisterEvent("x4coop.command_missing", Feature.on_command_missing)
 	RegisterEvent("x4coop.empire_trade", Feature.on_empire_trade)

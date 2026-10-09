@@ -1220,6 +1220,10 @@
                 <set_value name="player.entity.$x4coop_newships" exact="[]"/>
               </do_if>
               <append_to_list name="player.entity.$x4coop_newships" exact="[$Args.{1}, $Ship]"/>
+              <do_if value="not Root.$ShipCopies?">
+                <set_value name="Root.$ShipCopies" exact="[]"/>
+              </do_if>
+              <append_to_list name="Root.$ShipCopies" exact="$Ship"/>
               <raise_lua_event name="'x4coop.newship_made'"/>
             </do_if>
           </actions>
@@ -2323,6 +2327,121 @@
           </actions>
         </cue>
 
+        <!--
+          Crew (shared faction): each of the empire's ships' service crew and marines (how many, and their average
+          skills) and its pilot's skills are the same in both worlds. CrewWatch looks at five ships every 2 s and
+          reports one whose crew changed (hired, moved, trained), or a new one (not a copy of the partner's) after the
+          first round: player.entity.$x4coop_crew gets [idcode, macro, sector macro, service count, its 5 average
+          skills, marine count, its 5 average skills, pilot's 5 skills (-1: no pilot)] (skills: piloting, management,
+          engineering, boarding, morale, 0 to 15), then 'x4coop.crew'. OnCrew (param3: the same) adds or removes
+          people and sets their skills to those, and the pilot's. 'crew_sync' (param3: [1 or 0]) turns it on.
+        -->
+        <cue name="OnCrewSyncConfig" instantiate="true">
+          <conditions>
+            <event_ui_triggered screen="'x4coop'" control="'crew_sync'"/>
+          </conditions>
+          <actions>
+            <set_value name="Root.$CrewSyncOn" exact="event.param3.{1}"/>
+          </actions>
+        </cue>
+
+        <cue name="CrewWatch" instantiate="true" checkinterval="2s">
+          <conditions>
+            <check_value value="@Root.$CrewSyncOn == 1"/>
+          </conditions>
+          <actions>
+            <do_if value="not Root.$CrewBase?">
+              <set_value name="Root.$CrewBase" exact="table[]"/>
+              <set_value name="Root.$CrewQuiet" exact="table[]"/>
+              <set_value name="Root.$CrewRounds" exact="0"/>
+            </do_if>
+            <do_if value="not Root.$CrewQueue? or Root.$CrewQueue.count == 0">
+              <find_ship name="Root.$CrewQueue" owner="faction.player" space="player.galaxy" multiple="true"/>
+              <set_value name="Root.$CrewRounds" exact="Root.$CrewRounds + 1"/>
+            </do_if>
+            <do_all exact="[5, Root.$CrewQueue.count].min">
+              <set_value name="$Ship" exact="Root.$CrewQueue.{1}"/>
+              <remove_value name="Root.$CrewQueue.{1}"/>
+              <do_if value="@$Ship.exists and $Ship.isplayerowned and @$Ship.sector and not @Root.$AllProxies.indexof.{$Ship}">
+                <include_actions ref="ReadCrew"/>
+                <set_value name="$Old" exact="@Root.$CrewBase.{$Ship}"/>
+                <set_value name="Root.$CrewBase.{$Ship}" exact="$Crew"/>
+                <set_value name="$Report" exact="false"/>
+                <!-- a crew just set from the partner's isn't reported -->
+                <set_value name="$Quiet" exact="@Root.$CrewQuiet.{$Ship} gt player.age"/>
+                <do_if value="not $Quiet and $Old">
+                  <do_all exact="$Crew.count" counter="$i">
+                    <do_if value="$Old.{$i} != $Crew.{$i}">
+                      <set_value name="$Report" exact="true"/>
+                    </do_if>
+                  </do_all>
+                </do_if>
+                <do_elseif value="not $Quiet and Root.$CrewRounds gt 1 and not @Root.$ShipCopies.indexof.{$Ship}">
+                  <set_value name="$Report" exact="true"/>
+                </do_elseif>
+                <do_if value="$Report">
+                  <do_if value="not player.entity.$x4coop_crew?">
+                    <set_value name="player.entity.$x4coop_crew" exact="[]"/>
+                  </do_if>
+                  <set_value name="$Entry" exact="[$Ship.idcode, $Ship.macro.id, $Ship.sector.macro.id]"/>
+                  <do_for_each name="$V" in="$Crew">
+                    <append_to_list name="$Entry" exact="$V"/>
+                  </do_for_each>
+                  <append_to_list name="player.entity.$x4coop_crew" exact="$Entry"/>
+                  <raise_lua_event name="'x4coop.crew'"/>
+                </do_if>
+              </do_if>
+            </do_all>
+          </actions>
+        </cue>
+
+        <cue name="OnCrew" instantiate="true">
+          <conditions>
+            <event_ui_triggered screen="'x4coop'" control="'crew'"/>
+          </conditions>
+          <actions>
+            <set_value name="$C" exact="event.param3"/>
+            <set_value name="$A" exact="[$C.{1}, $C.{2}, $C.{3}]"/>
+            <include_actions ref="FindContainer"/>
+            <do_if value="@$Container.isclass.ship and $Container.isplayerowned and $C.count == 20">
+              <set_value name="$Ship" exact="$Container"/>
+              <do_if value="not Root.$CrewQuiet?">
+                <set_value name="Root.$CrewQuiet" exact="table[]"/>
+              </do_if>
+              <set_value name="Root.$CrewQuiet.{$Ship}" exact="player.age + 10s"/>
+              <set_value name="$SkillTypes" exact="[skilltype.piloting, skilltype.management, skilltype.engineering, skilltype.boarding, skilltype.morale]"/>
+              <set_value name="$Roles" exact="[entityrole.service, entityrole.marine]"/>
+              <do_all exact="2" counter="$r">
+                <set_value name="$Role" exact="$Roles.{$r}"/>
+                <set_value name="$At" exact="4 + ($r - 1) * 6"/>
+                <set_value name="$Want" exact="$C.{$At}"/>
+                <set_value name="$Have" exact="$Ship.people.{$Role}.count"/>
+                <do_if value="$Want gt $Have">
+                  <transfer_people object="$Ship" result="$Added">
+                    <matching_people amounts="[$Want - $Have]" currentroles="[$Role]" newroles="[$Role]"/>
+                  </transfer_people>
+                </do_if>
+                <do_elseif value="$Want lt $Have">
+                  <set_value name="$List" exact="$Ship.people.{$Role}.list"/>
+                  <do_all exact="$Have - $Want" counter="$k">
+                    <remove_npc_template object="$Ship" template="$List.{$k}"/>
+                  </do_all>
+                </do_elseif>
+                <do_for_each name="$P" in="$Ship.people.{$Role}.list">
+                  <do_all exact="5" counter="$s">
+                    <set_skill object="$Ship" template="$P" type="$SkillTypes.{$s}" exact="$C.{$At + $s}"/>
+                  </do_all>
+                </do_for_each>
+              </do_all>
+              <do_if value="@$Ship.assignedpilot and $C.{16} ge 0">
+                <do_all exact="5" counter="$s">
+                  <set_skill entity="$Ship.assignedpilot" type="$SkillTypes.{$s}" exact="$C.{15 + $s}"/>
+                </do_all>
+              </do_if>
+            </do_if>
+          </actions>
+        </cue>
+
         <cue name="OnNpcClear" instantiate="true">
           <conditions>
             <event_ui_triggered screen="'x4coop'" control="'npc_clear'"/>
@@ -2555,6 +2674,29 @@
                 <apply_loadout object="$Obj" loadout="$Loadouts.{1}" flags="engines weapons shields turrets shieldgroups turretgroups software thrusters units add remove"/>
               </do_if>
             </do_if>
+          </actions>
+        </library>
+
+        <library name="ReadCrew">
+          <actions>
+            <!-- $Ship: $Crew = [service count, its 5 average skills, marine count, its 5 average skills, pilot's 5 skills] -->
+            <set_value name="$Crew" exact="[]"/>
+            <set_value name="$SkillTypes" exact="[skilltype.piloting, skilltype.management, skilltype.engineering, skilltype.boarding, skilltype.morale]"/>
+            <do_for_each name="$Role" in="[entityrole.service, entityrole.marine]">
+              <set_value name="$People" exact="$Ship.people.{$Role}.list"/>
+              <append_to_list name="$Crew" exact="$People.count"/>
+              <do_for_each name="$Skill" in="$SkillTypes">
+                <set_value name="$Sum" exact="0"/>
+                <do_for_each name="$P" in="$People">
+                  <set_value name="$Sum" exact="$Sum + $Ship.people.{$P}.skill.{$Skill}"/>
+                </do_for_each>
+                <append_to_list name="$Crew" exact="if $People.count gt 0 then ($Sum + $People.count / 2) / $People.count else 0"/>
+              </do_for_each>
+            </do_for_each>
+            <set_value name="$Pilot" exact="@$Ship.assignedpilot"/>
+            <do_for_each name="$Skill" in="$SkillTypes">
+              <append_to_list name="$Crew" exact="if $Pilot then $Pilot.skill.{$Skill} else -1"/>
+            </do_for_each>
           </actions>
         </library>
 

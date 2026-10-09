@@ -55,6 +55,8 @@ local SC = {
 	                 role = "join", own_world = "abc123", partner_world = "abc123", foot_test = true },
 	stations     = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
 	                 role = "join", own_world = "abc123", partner_world = "abc123", station_test = true },
+	crew         = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
+	                 role = "join", own_world = "abc123", partner_world = "abc123", crew_test = true },
 	rename       = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
 	                 role = "join", own_world = "abc123", partner_world = "abc123", rename_test = true },
 	knowledge    = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
@@ -392,6 +394,8 @@ refit_requests = {}
 deploy_requests = {}
 knowledge_requests = {}
 rename_requests = {}
+crew_requests = {}
+if sc.crew_test then blackboard["$x4coop_alias"] = "PSH-9=LSH-9" end
 if sc.rename_test then blackboard["$x4coop_alias"] = "PSH-9=LSH-9" end
 if sc.knowledge_test then blackboard["$x4coop_alias"] = "PST-7=LST-201" end
 if sc.refit_test then blackboard["$x4coop_alias"] = "PSH-9=LSH-9" end
@@ -742,6 +746,10 @@ function AddUITriggeredEvent(screen, control, args)
 		manager_requests[#manager_requests + 1] = tostring(args[1])
 	elseif control == "station_sync" then
 		-- md only remembers the switch
+	elseif control == "crew" then
+		crew_requests[#crew_requests + 1] = sim_args(args)
+	elseif control == "crew_sync" then
+		-- md only remembers the switch
 	elseif control == "rename" then
 		rename_requests[#rename_requests + 1] = sim_args(args)
 	elseif control == "knowledge" then
@@ -904,6 +912,8 @@ if sc.pipes then
 				elseif f[1] == "X" and f[2] == "profile_get" then
 					partner_queue[#partner_queue + 1] = { at = clock + 0.05,
 						msg = "X|profile|" .. f[3] .. "|" .. (sim_profiles[f[3]] or "none") }
+				elseif f[1] == "w" and f[2] == "msg" then
+					partner_queue[#partner_queue + 1] = { at = clock + 2 * ONE_WAY, msg = "w|ack|" .. f[3] }
 				elseif f[1] == "l" and f[2] == "msg" then
 					partner_queue[#partner_queue + 1] = { at = clock + 2 * ONE_WAY, msg = "l|ack|" .. f[3] }
 				elseif f[1] == "n" and f[2] == "msg" then
@@ -1471,6 +1481,22 @@ local function rename_script()
 	while rename_steps[1] and clock >= rename_steps[1][1] do table.remove(rename_steps, 1)[2]() end
 end
 
+local crew_steps = {
+	{ 6, function()
+		blackboard["$x4coop_crew"] = {
+			{ "SHP-501", "ship_arg_m_trans_container_01_a_macro", SECTORS[500], 12, 3, 4, 5, 2, 7, 4, 1, 1, 9, 2, 3, 10, 11, 4, 2, 12 },
+			{ "SHP-502", "ship_arg_m_trans_container_01_a_macro", SECTORS[500], 12, 3 } }
+		queue("x4coop.crew")
+	end },
+	{ 10, function() pipe_reader("w|msg|0a51|PSH-9|ship_arg_m_trans_container_01_a_macro|" .. SECTORS[500] .. "|8|1|2|3|4|5|0|0|0|0|0|0|-1|-1|-1|-1|-1") end },
+	{ 10.3, function() pipe_reader("w|msg|0a51|PSH-9|ship_arg_m_trans_container_01_a_macro|" .. SECTORS[500] .. "|8|1|2|3|4|5|0|0|0|0|0|0|-1|-1|-1|-1|-1") end },
+	{ 12, function() pipe_reader("w|msg|0a52|PSH-9|ship_arg_m_trans_container_01_a_macro|" .. SECTORS[500] .. "|8|99|2|3|4|5|0|0|0|0|0|0|-1|-1|-1|-1|-1") end },
+}
+local function crew_script()
+	if not sc.crew_test or not pipe_reader then return end
+	while crew_steps[1] and clock >= crew_steps[1][1] do table.remove(crew_steps, 1)[2]() end
+end
+
 local function credit_script()
 	if not sc.credits_test or not pipe_reader then return end
 	while credit_steps[1] and clock >= credit_steps[1][1] do
@@ -1613,6 +1639,7 @@ while clock < sc.duration do
 	deploy_script()
 	knowledge_script()
 	rename_script()
+	crew_script()
 	if sc.partner_restart_at and clock >= sc.partner_restart_at and partner_clock_offset == 1000 then
 		partner_clock_offset = -500
 		say("t=%.1f partner restarted their game (clock jumped back)", clock)
@@ -2161,6 +2188,19 @@ if sc.foot_test then
 		and tostring(foot_status_seen):find("on foot at Harbour Bar Station", 1, true) ~= nil
 		and said:find("is on foot at Harbour Bar Station", 1, true) ~= nil
 		and said:find("is back aboard a ship", 1, true) ~= nil
+end
+if sc.crew_test then
+	local sent = {}
+	for _, w in ipairs(pipe_writes) do
+		local id, rest = w:match("^w|msg|(%x+)|(.*)$")
+		if id then sent[id] = rest end
+	end
+	local list = {}
+	for _, rest in pairs(sent) do list[#list + 1] = rest end
+	local s = SECTORS[500]
+	say("crew: sent %s; md %s", table.concat(list, " / "), table.concat(crew_requests, " / "))
+	ok = ok and #list == 1 and list[1] == "SHP-501|ship_arg_m_trans_container_01_a_macro|" .. s .. "|12|3|4|5|2|7|4|1|1|9|2|3|10|11|4|2|12"
+		and table.concat(crew_requests, " / ") == "LSH-9:ship_arg_m_trans_container_01_a_macro:" .. s .. ":8:1:2:3:4:5:0:0:0:0:0:0:-1:-1:-1:-1:-1"
 end
 if sc.rename_test then
 	local sent = {}
