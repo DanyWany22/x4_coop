@@ -66,8 +66,9 @@ X4 (ui/x4_coop.lua) <-> named pipe <-> bridge (Python: UDP/TCP sockets) <-> netw
 
 The mod has **no DLLs, no native hooks, no injection, and reads or writes no memory addresses**. In
 Lua it wraps some of the UI's own script functions, so it can share the orders the player gives: the
-global `CreateOrder` and `SetOrderParam`, and the map menu's order-editing functions (for example
-`buttonDefaultOrderConfirm`). See Orders and Behaviours. That is ordinary UI scripting: each Lua function
+global `CreateOrder` and `SetOrderParam`, the map menu's order-editing functions (for example
+`buttonDefaultOrderConfirm`), and the station account functions `TransferPlayerMoneyTo`, `TransferMoneyToPlayer`,
+`SetMinBudget` and `SetMaxBudget`. See Orders, Behaviours and Station accounts. That is ordinary UI scripting: each Lua function
 is replaced by one that calls the original and then notes which ship's orders changed.
 [`demo/x4_memory_demo.py`](demo/x4_memory_demo.py) is a separate tool that shows reading and
 writing X4's memory is possible, on your credits; the mod never loads or calls it. The
@@ -272,8 +273,14 @@ too:
 A station whose original has a manager gets one too, with a defence officer if it has none. Each game looks
 at one of its stations every quarter second, and sends a station whose settings changed; the other game
 changes only what differs. A station copied from the other world, or one that gets a module from it, asks
-for the original's settings. The station's account isn't copied,
-since each of you has your own wallet. `/x4coop set station_settings 0` turns it off.
+for the original's settings. `/x4coop set station_settings 0` turns it off.
+
+**Station accounts:** money either of you puts into or takes out of a station's account, and the budget you
+set for it, is put in, taken out and set in the other world too. A station's account is the empire's, so there
+it doesn't touch anyone's wallet. Trades move the two worlds' balances apart, so every 30 seconds the host's
+game sends each station's balance and the joiner's game sets its copy to match. In the joiner's world, what
+the game pays from a station over its budget into the player's wallet is taken back out again, because that
+is the empire's income, and the host gets it. `/x4coop set station_accounts 0` turns it off.
 
 **Trade rules:** the empire's trade rules are the same in both worlds: a rule either of you makes, edits
 or deletes in the empire menu (name, factions, whitelist or blacklist, and whether it's the default for
@@ -420,6 +427,7 @@ change a value that already exists; it can't create anything.
 | inventory items | `add_inventory` | not yet |
 | stations built after the shared save | `create_station`, `create_module` | yes |
 | station trade settings, limits, prices, rules, name | the station menus' own functions (Lua) | yes |
+| station accounts and budgets | `transfer_money`, the account menu's own functions (Lua) | yes |
 | ownership (claims, boarding, captures) | `set_owner` | yes |
 | assignments to stations, fleets and the player | `set_object_commander`, `set_subordinate_group_assignment` | yes |
 | orders given from the menus | the UI's own `CreateOrder` (Lua) | yes |
@@ -483,7 +491,7 @@ game's own schema (`libraries/md.xsd`, `libraries/common.xsd`).
 
 Messages (one text line each): `S` snapshot (position, rotation, velocity, ship, hull, shield),
 `P`/`Q` ping, `M` chat, `L` world link, `K` kill, `D` hit, `F` firing at, `B` nearby ships (both
-ways), `E` station stock (host to joiner), `T` a joiner's trade, `V` relations, `U` research/blueprints/licences, `Z` SETA, `O` ownership, `Y` new ships, `G` orders, `J` behaviours and queues, `I` on foot, `b` station modules, `s` station settings, `c` assignments, `r` trade rules, `C` credits given; `R`/`W`/`N`/`X` are between a game and
+ways), `E` station stock (host to joiner), `T` a joiner's trade, `V` relations, `U` research/blueprints/licences, `Z` SETA, `O` ownership, `Y` new ships, `G` orders, `J` behaviours and queues, `I` on foot, `b` station modules, `s` station settings, `c` assignments, `r` trade rules, `a` station accounts, `C` credits given; `R`/`W`/`N`/`X` are between a game and
 its own bridge.
 
 Self-calibration: on first contact the proxy is nudged and read back (does `SetObjectSectorPos`
@@ -527,7 +535,8 @@ python extensions/x4_coop/dev/run_tests.py [--quick]
   original's; unknown trade rules and wares the station hasn't got yet left alone; a manager hired), assignments both ways
   (one change sent once, applied with the partner's codes translated, a ship not there yet tried again and
   then dropped), trade rules both ways (made, edited and deleted; ids that clash between the worlds kept
-  apart; defaults moved; nothing sent back), research, blueprints and licences both ways (sent until confirmed, added once), SETA both ways
+  apart; defaults moved; nothing sent back), station accounts both ways (one confirm sent as one change with
+  its budgets, applied once with the originals, the host's balances followed by the joiner), research, blueprints and licences both ways (sent until confirmed, added once), SETA both ways
   (followed; turned off for both when one side can't follow), ownership changes both ways (sent
   until confirmed, applied once), new ships both ways (made once, paired, kills and hits on them
   translated both ways), orders both ways (encoded, shared once, objects found again, queue cleared

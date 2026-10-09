@@ -1682,6 +1682,50 @@
           </actions>
         </cue>
 
+        <!--
+          Station accounts: change a player station's account by param3 [station idcode, credits] (negative: take out),
+          from and to nobody's wallet, since the partner's world paid or got that money.
+        -->
+        <cue name="OnStationMoney" instantiate="true">
+          <conditions>
+            <event_ui_triggered screen="'x4coop'" control="'station_money'"/>
+          </conditions>
+          <actions>
+            <set_value name="$Change" exact="event.param3.{2} * 1Cr"/>
+            <find_station name="$Stations" owner="faction.player" space="player.galaxy" multiple="true"/>
+            <do_for_each name="$Station" in="$Stations">
+              <do_if value="$Station.idcode == event.param3.{1}">
+                <do_if value="$Change gt 0Cr">
+                  <transfer_money from="faction.ownerless" to="$Station" amount="$Change"/>
+                </do_if>
+                <do_elseif value="$Change lt 0Cr and $Station.money gt 0Cr">
+                  <transfer_money from="$Station" to="faction.ownerless" amount="[-$Change, $Station.money].min"/>
+                </do_elseif>
+              </do_if>
+            </do_for_each>
+          </actions>
+        </cue>
+
+        <!--
+          Joiner: the game pays what a player station has over its budget into the player's wallet
+          (md.Notifications.PlayerOwnedMoneyUpdated). That is the empire's income, which is the host's, so in the
+          joiner's world the same amount is taken back out, worked out the same way from the same event.
+        -->
+        <cue name="OnStationSurplus" instantiate="true">
+          <conditions>
+            <event_player_owned_money_updated/>
+            <check_value value="@Root.$EmpireOn == 1 and event.object.isoperational and event.object.isaccountholder and not event.object.isclass.buildstorage and event.param2 and (event.object.maxbudget ge 0Cr)"/>
+          </conditions>
+          <actions>
+            <set_value name="$Max" exact="[event.object.maxbudget, (event.object.productionmoney * 3) / 2ct, 100000Cr].max"/>
+            <set_value name="$Min" exact="[event.object.minbudget, event.object.productionmoney].max"/>
+            <do_if value="event.param2 gt $Max and (event.param2 - $Min) ge 1Cr">
+              <transfer_money from="faction.player" to="faction.ownerless" amount="[event.param2 - $Min, player.money].min"/>
+              <raise_lua_event name="'x4coop.empire_trade'"/>
+            </do_if>
+          </actions>
+        </cue>
+
         <cue name="OnNpcClear" instantiate="true">
           <conditions>
             <event_ui_triggered screen="'x4coop'" control="'npc_clear'"/>

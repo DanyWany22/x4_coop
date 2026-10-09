@@ -55,6 +55,8 @@ local SC = {
 	                 role = "join", own_world = "abc123", partner_world = "abc123", foot_test = true },
 	stations     = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
 	                 role = "join", own_world = "abc123", partner_world = "abc123", station_test = true },
+	accounts     = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
+	                 role = "join", own_world = "abc123", partner_world = "abc123", accounts_test = true },
 	traderules   = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
 	                 role = "host", own_world = "abc123", partner_world = "abc123", rules_test = true },
 	commanders   = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 34, pipes = true,
@@ -341,6 +343,7 @@ function GetComponentData(id, key)
 		if key == "products" then return cfg.products end
 		if key == "name" then return cfg.name end
 		if key == "tradenpc" then return cfg.manager and 9001 or nil end
+		if key == "money" then return cfg.money end
 	end
 	if key == "macro" then return SECTORS[id] or (objects[id] and objects[id].macro) end
 	if key == "name" and SECTORS[id] then return "Sector " .. id end
@@ -372,7 +375,7 @@ station_requests, station_made_id = {}, nil
 command_requests, command_misses = {}, {}
 if sc.commands_test then blackboard["$x4coop_alias"] = "PSH-9=LSH-9" end
 function settings_world()
-	if not sc.settings_test then return end
+	if not (sc.settings_test or sc.accounts_test) then return end
 	for i, def in ipairs({ { 601, "Energy One", { "silicon", "energycells" }, { "siliconwafers" } },
 			{ 602, "Refinery 2", { "energycells", "ore" }, { "refinedmetals" } } }) do
 		objects[def[1]] = { sector = 500, x = -3000 * i, y = 0, z = 3000, yaw = 0, pitch = 0, roll = 0,
@@ -408,7 +411,8 @@ newship_requests, newship_made_id, newship_first_sent = {}, nil, nil
 station_cfg, settings_calls, manager_requests = {}, {}, {}
 function new_station_cfg(name, resources, products)
 	return { name = name, resources = resources, products = products, own = {}, buyable = {}, sellable = {}, buylimit = {},
-		selllimit = {}, stock = {}, price = { [true] = {}, [false] = {} }, rules = {}, fill = false, buildprice = 1, manager = false }
+		selllimit = {}, stock = {}, price = { [true] = {}, [false] = {} }, rules = {}, fill = false, buildprice = 1, manager = false,
+		money = 50000 }
 end
 local function scfg(id)
 	station_cfg[id] = station_cfg[id] or new_station_cfg("Station " .. tostring(id), {}, {})
@@ -497,6 +501,12 @@ function GetContainedStationsByOwner(owner)
 	table.sort(list)
 	return list
 end
+-- station accounts: the UI's own functions, which the mod wraps
+account_calls, money_requests_station = {}, {}
+function TransferPlayerMoneyTo(amount, id) account_calls[#account_calls + 1] = "to:" .. id .. ":" .. amount; scfg(id).money = scfg(id).money + amount end
+function TransferMoneyToPlayer(amount, id) account_calls[#account_calls + 1] = "from:" .. id .. ":" .. amount; scfg(id).money = scfg(id).money - amount end
+function SetMinBudget(id, v) account_calls[#account_calls + 1] = "min:" .. id .. ":" .. v end
+function SetMaxBudget(id, v) account_calls[#account_calls + 1] = "max:" .. id .. ":" .. v end
 function GetPlayerMoney() return player_money end
 function SetNPCBlackboard(_, key, v) blackboard[key] = v end
 function ExecuteDebugCommand(cmd, param) say("  ego command /%s %s", cmd, tostring(param)) end
@@ -644,6 +654,11 @@ function AddUITriggeredEvent(screen, control, args)
 			blackboard["$x4coop_command_missing"] = { args }
 			queue("x4coop.command_missing")
 		end
+	elseif control == "station_money" then
+		money_requests_station[#money_requests_station + 1] = args[1] .. ":" .. args[2]
+		for id, o in pairs(objects) do
+			if o.station and o.idcode == args[1] and station_cfg[id] then station_cfg[id].money = station_cfg[id].money + args[2] end
+		end
 	elseif control == "station_manager" then
 		manager_requests[#manager_requests + 1] = tostring(args[1])
 	elseif control == "station_sync" then
@@ -785,6 +800,8 @@ if sc.pipes then
 					partner_queue[#partner_queue + 1] = { at = clock + 2 * ONE_WAY, msg = reply }
 				elseif f[1] == "M" then
 					partner_queue[#partner_queue + 1] = { at = clock + 2 * ONE_WAY, msg = "M|Echo|you said: " .. tostring(f[3]) }
+				elseif f[1] == "a" and f[2] == "msg" then
+					partner_queue[#partner_queue + 1] = { at = clock + 2 * ONE_WAY, msg = "a|ack|" .. f[3] }
 				elseif f[1] == "r" and f[2] == "msg" then
 					partner_queue[#partner_queue + 1] = { at = clock + 2 * ONE_WAY, msg = "r|ack|" .. f[3] }
 				elseif f[1] == "c" and f[2] == "msg" then
@@ -1198,6 +1215,23 @@ local function rule_script()
 	while rule_steps[1] and clock >= rule_steps[1][1] do table.remove(rule_steps, 1)[2]() end
 end
 
+local account_steps = {
+	{ 0, function() settings_world() end },
+	{ 6, function()  -- the account menu's confirm: budgets, then the transfer
+		SetMaxBudget(601, 150000)
+		SetMinBudget(601, 100000)
+		TransferPlayerMoneyTo(40000, 601)
+	end },
+	{ 8, function() TransferMoneyToPlayer(5000, 602) end },
+	{ 10, function() pipe_reader("a|msg|00a1|STA-602|25000|200000|300000") end },
+	{ 10.3, function() pipe_reader("a|msg|00a1|STA-602|25000|200000|300000") end },
+	{ 12, function() pipe_reader("a|bal|STA-601=90000,STA-602=1000,ZZZ-1=5") end },
+}
+local function account_script()
+	if not sc.accounts_test or not pipe_reader then return end
+	while account_steps[1] and clock >= account_steps[1][1] do table.remove(account_steps, 1)[2]() end
+end
+
 local function credit_script()
 	if not sc.credits_test or not pipe_reader then return end
 	while credit_steps[1] and clock >= credit_steps[1][1] do
@@ -1332,6 +1366,7 @@ while clock < sc.duration do
 	settings_script()
 	command_script()
 	rule_script()
+	account_script()
 	if sc.partner_restart_at and clock >= sc.partner_restart_at and partner_clock_offset == 1000 then
 		partner_clock_offset = -500
 		say("t=%.1f partner restarted their game (clock jumped back)", clock)
@@ -1881,6 +1916,21 @@ if sc.foot_test then
 		and said:find("is on foot at Harbour Bar Station", 1, true) ~= nil
 		and said:find("is back aboard a ship", 1, true) ~= nil
 end
+if sc.accounts_test then
+	local sent = {}
+	for _, w in ipairs(pipe_writes) do
+		local id, rest = w:match("^a|msg|(%x+)|(.*)$")
+		if id then sent[id] = rest end
+	end
+	local list = {}
+	for _, rest in pairs(sent) do list[#list + 1] = rest end
+	table.sort(list)
+	say("accounts: sent %s", table.concat(list, " / "))
+	say("accounts: calls %s; md %s", table.concat(account_calls, " "), table.concat(money_requests_station, " "))
+	ok = ok and table.concat(list, " / ") == "STA-601|40000|100000|150000 / STA-602|-5000|-|-"
+		and table.concat(account_calls, " ") == "max:601:150000 min:601:100000 to:601:40000 from:602:5000 max:602:300000 min:602:200000"
+		and table.concat(money_requests_station, " ") == "STA-602:25000 STA-602:-69000"
+end
 if sc.rules_test then
 	local sent = {}
 	for _, w in ipairs(pipe_writes) do
@@ -1946,6 +1996,7 @@ if sc.settings_test then
 		and s2.sellable.refinedmetals == true and s2.rules["sell:refinedmetals"] == nil and s2.own.hullparts == true
 		and s2.sellable.hullparts == true and s2.buyable.teladianium == nil
 		and #manager_requests == 1 and manager_requests[1] == "STA-602" and s3.name == "Partner Yard"
+		and table.concat(pipe_writes, "\n"):find("a|bal|STA-601=50000,STA-602=50000", 1, true) ~= nil
 end
 if sc.station_test then
 	local ours = {}

@@ -53,7 +53,7 @@ STATS_EVERY_S = 30.0
 MAX_PACKETS_PER_S = 200  # a partner sends ~22/s; anything far above that is dropped
 TRACE_HEX_BYTES = 64     # telemetry: bytes of each datagram shown in hex (--trace-bytes; 0 = all)
 TRACE_DROPS_PER_S = 10   # telemetry: rejected/ignored/flooded datagrams recorded per second at most
-FROM_PARTNER = set("SPQMLKDFBECTVUZOYGJIbscr")  # message kinds a partner may send; R, W and N only come from this bridge
+FROM_PARTNER = set("SPQMLKDFBECTVUZOYGJIbscra")  # message kinds a partner may send; R, W and N only come from this bridge
 
 # Win32 named pipe API through ctypes, mirroring the parameters SirNukes' own server uses.
 PIPE_ACCESS_DUPLEX = 0x3
@@ -227,6 +227,7 @@ GAME_FIELDS = {  # field names of the game's messages (see ui/x4_coop.lua), for 
     "s": "what id op station name fill buildprice supplyrule buildrule manager wares",
     "c": "what id ship macro sector commander cmacro csector group assignment",
     "r": "what id op rule name whitelist defaults factions",
+    "a": "what id station change min max",
 }
 
 

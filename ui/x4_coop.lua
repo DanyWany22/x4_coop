@@ -114,6 +114,7 @@ local config = {
 	station_settings = 1,     -- shared world: station trade settings, limits, prices, rules, workforce, name match
 	command_sync = 1,         -- shared world: ships assigned to stations, fleets or a player's ship in both worlds
 	trade_rules = 1,          -- shared world: the empire's trade rules and their defaults match
+	station_accounts = 1,     -- shared world: money put into or taken from station accounts, budgets, balances
 	ghost_latency = 0.12,     -- s, simulated one-way latency in ghost mode
 	ghost_jitter = 0.03,      -- s, extra random delay per snapshot
 	ghost_loss = 0.0,         -- 0..1, fraction of snapshots dropped
@@ -365,6 +366,7 @@ local function reset()
 		behave = { dirty = {}, map_hooked = false, sent = 0, rebuilt = 0 },
 		stations_on = false,
 		commands = { on = false, last = {}, tries = {}, sent = 0, applied = 0 },
+		accounts = { pending = {}, next_balance = 0, sent = 0, applied = 0, matched = 0 },
 		rules = { next = 0, base = nil, shared = {}, alias = { loaded = false, into = {}, out = {} }, sent = 0, applied = 0 },
 		ssettings = { list = {}, idx = 0, next = 0, ids = {}, base = {}, settle = {}, out = {}, expect = {}, sent = 0, applied = 0 },
 		foot = { on = false, walking = false, last = nil, gone_left = 0, gone_at = -1e9, partner = nil, avatar_on = false },
@@ -736,6 +738,7 @@ local stations_receive  -- the partner's new station modules (b), defined with t
 local settings_receive  -- the partner's station settings (s), defined in the third feature block
 local commands_receive  -- the partner's ship assignments (c), defined in the third feature block
 local rules_receive     -- the partner's trade rules (r), defined in the third feature block
+local accounts_receive  -- the partner's station account changes and balances (a), defined in the third block
 local send_link
 
 local function net_send(msg)
@@ -843,6 +846,8 @@ on_pipe_message = function(msg)
 		if config.mode == "net" then commands_receive(f, now) end
 	elseif kind == "r" then
 		if config.mode == "net" then rules_receive(f, now) end
+	elseif kind == "a" then
+		if config.mode == "net" then accounts_receive(f, now) end
 	elseif kind == "M" then
 		local text = clean_text(f[3], 200)
 		if text ~= "" then
@@ -3730,6 +3735,141 @@ local function commands_tick(now)
 	end
 end
 
+-------------------------------------------------------------------------------
+-- Station accounts (shared faction): money either player puts into or takes out of a station's account, and the
+-- budget they set for it, happen in the partner's world too. The account is the empire's, so there the money comes
+-- from, and goes to, nobody's wallet. The station menus do this through the UI's global TransferPlayerMoneyTo,
+-- TransferMoneyToPlayer, SetMinBudget and SetMaxBudget, which we wrap. Trades move the balances apart, so the host
+-- also sends every station's balance every ACCOUNT_PERIOD seconds and the joiner's game sets its copy to match. In the
+-- joiner's world, what the game pays from a station over its budget into the player's wallet is taken back out
+-- (md OnStationSurplus), like the empire's trade income.
+-- "a|msg|id|station|change|min budget|max budget" (credits; "-": not set), sent reliably;
+-- "a|bal|station=credits,station=credits,..." (host to joiner).
+
+local ACCOUNT_GATHER = 0.5   -- s to gather one confirm's budget and transfer calls into one message
+local ACCOUNT_PERIOD = 30    -- s between the host's balance reports
+local ACCOUNT_BATCH = 20     -- stations per balance report
+local account_originals      -- the UI's own functions, once wrapped
+
+local function accounts_enabled()
+	return config.mode == "net" and S.link.linked and config.station_accounts == 1
+end
+
+local function station_code(container)  -- a player station's ID code, or nil
+	local id = container and to64(container)
+	if not id or id == 0 or not C.IsComponentClass(id, "station") or not GetComponentData(container, "isplayerowned") then
+		return nil
+	end
+	local code = C.GetObjectIDCode(id)
+	return code ~= nil and ffi.string(code) or nil
+end
+
+local function account_note(container, field, value)
+	if not (value and accounts_enabled()) then return end
+	local code = station_code(container)
+	if not code then return end
+	local A = S.accounts
+	local p = A.pending[code] or { change = 0, at = getElapsedTime() }
+	A.pending[code] = p
+	if field == "change" then p.change = p.change + value else p[field] = value end
+end
+
+local function install_account_hooks()
+	if account_originals or type(TransferPlayerMoneyTo) ~= "function" or type(TransferMoneyToPlayer) ~= "function"
+		or type(SetMinBudget) ~= "function" or type(SetMaxBudget) ~= "function" then return end
+	local O = { to = TransferPlayerMoneyTo, from = TransferMoneyToPlayer, min = SetMinBudget, max = SetMaxBudget }
+	account_originals = O
+	TransferPlayerMoneyTo = function(amount, container, ...)
+		local r = O.to(amount, container, ...)
+		account_note(container, "change", tonumber(amount))
+		return r
+	end
+	TransferMoneyToPlayer = function(amount, container, ...)
+		local r = O.from(amount, container, ...)
+		account_note(container, "change", tonumber(amount) and -tonumber(amount))
+		return r
+	end
+	SetMinBudget = function(container, value, ...)
+		local r = O.min(container, value, ...)
+		account_note(container, "min", tonumber(value))
+		return r
+	end
+	SetMaxBudget = function(container, value, ...)
+		local r = O.max(container, value, ...)
+		account_note(container, "max", tonumber(value))
+		return r
+	end
+end
+
+local function credits_field(v)
+	return v and string.format("%.0f", v) or "-"
+end
+
+accounts_receive = function(f, now)
+	if not accounts_enabled() then return end
+	local A = S.accounts
+	if f[2] == "bal" then
+		if S.link.role ~= "join" then return end
+		for theirs, credits in tostring(f[3] or ""):gmatch("([%w%-]+)=(%-?%d+)") do
+			local code = alias_in(theirs)
+			local id = find_station(code)
+			local have = id and tonumber(GetComponentData(id, "money"))
+			local want = tonumber(credits)
+			if have and want and math.abs(want - have) >= 1 then
+				request("station_money", { code, want - have })
+				A.matched = A.matched + 1
+			end
+		end
+		return
+	end
+	reliable_receive("a", f, now, function(m)
+		local code = m[4] and m[4]:match("^[%w%-]+$") and alias_in(m[4])
+		local id = code and find_station(code)
+		local change, low, high = tonumber(m[5]), tonumber(m[6]), tonumber(m[7])
+		if not (id and change) then return end
+		if account_originals then  -- the originals: what we set isn't sent back
+			if high and high >= 0 then account_originals.max(id, high) end
+			if low and low >= 0 then account_originals.min(id, low) end
+		end
+		if change ~= 0 then request("station_money", { code, change }) end
+		A.applied = A.applied + 1
+	end)
+end
+
+local function accounts_tick(now)
+	install_account_hooks()
+	local A = S.accounts
+	if not accounts_enabled() then
+		A.pending = {}
+		return
+	end
+	for code, p in pairs(A.pending) do
+		if now - p.at >= ACCOUNT_GATHER then
+			A.pending[code] = nil
+			reliable_send("a", { alias_out(code), credits_field(p.change), credits_field(p.min), credits_field(p.max) })
+			A.sent = A.sent + 1
+		end
+	end
+	if S.link.role == "host" and now >= A.next_balance then
+		A.next_balance = now + ACCOUNT_PERIOD
+		local batch = {}
+		for _, id in ipairs(GetContainedStationsByOwner("player", nil, true) or {}) do
+			local code = IsValidComponent(id) and C.GetObjectIDCode(to64(id))
+			local credits = code and tonumber(GetComponentData(id, "money"))
+			if credits then
+				batch[#batch + 1] = alias_out(ffi.string(code)) .. "=" .. string.format("%.0f", credits)
+				if #batch == ACCOUNT_BATCH then
+					net_send("a|bal|" .. table.concat(batch, ","))
+					batch = {}
+				end
+			end
+		end
+		if #batch > 0 then net_send("a|bal|" .. table.concat(batch, ",")) end
+	end
+end
+
+Feature.accounts_tick = accounts_tick
+
 Feature.commands_tick = commands_tick
 Feature.on_commands = on_commands
 Feature.on_command_missing = on_command_missing
@@ -3788,6 +3928,9 @@ local function status_text()
 			and string.format(" | station settings sent %d, applied %d", S.ssettings.sent, S.ssettings.applied) or "")
 		.. ((S.rules.sent + S.rules.applied > 0)
 			and string.format(" | trade rules sent %d, applied %d", S.rules.sent, S.rules.applied) or "")
+		.. ((S.accounts.sent + S.accounts.applied + S.accounts.matched > 0)
+			and string.format(" | station accounts sent %d, applied %d, balances matched %d", S.accounts.sent,
+				S.accounts.applied, S.accounts.matched) or "")
 		.. ((S.commands.sent + S.commands.applied > 0)
 			and string.format(" | assignments sent %d, applied %d", S.commands.sent, S.commands.applied) or "")) or "-"
 	return string.format("mode %s | backend %s (%s) | proxy %s%s | partner %s %s, last snapshot %s | link %s | rotation %s %s",
@@ -4029,6 +4172,7 @@ local function tick(now, dt)
 	Feature.rules_tick(now)
 	Feature.settings_tick(now)
 	Feature.commands_tick(now)
+	Feature.accounts_tick(now)
 end
 
 local function on_update()
