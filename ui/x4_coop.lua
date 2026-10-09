@@ -107,6 +107,8 @@ local config = {
 	new_ships = 1,            -- shared world: ships either player buys appear in both worlds
 	orders = 1,               -- shared world: orders given to empire ships are carried out in both worlds
 	behaviours = 1,           -- shared world: default behaviours and order queues edited in the map, in both worlds
+	foot = 1,                 -- on foot: tell the partner where you walk (station, room, position)
+	foot_avatar = 1,          -- shared world: show a partner on foot as a crew member walking in the same room
 	ghost_latency = 0.12,     -- s, simulated one-way latency in ghost mode
 	ghost_jitter = 0.03,      -- s, extra random delay per snapshot
 	ghost_loss = 0.0,         -- 0..1, fraction of snapshots dropped
@@ -356,6 +358,7 @@ local function reset()
 		newships_on = false,
 		orders = { seq = 0, waiting = {}, applied = 0 },
 		behave = { dirty = {}, map_hooked = false, sent = 0, rebuilt = 0 },
+		foot = { on = false, walking = false, last = nil, gone_left = 0, gone_at = -1e9, partner = nil, avatar_on = false },
 		alias = { loaded = false, into = {}, out = {} },
 		net = { api = nil, status = "idle", reading = false, connected = false, retry_at = 0, last_ping = -1e9, rtt = nil,
 			partner = kept_partner },
@@ -718,6 +721,8 @@ local owners_receive    -- ownership changes (O), defined with the credits
 local newships_receive  -- the partner's new ships (Y), defined with the credits
 local orders_receive    -- orders given to empire ships (G), defined with the credits
 local behaviours_receive -- default behaviours and order queues (J), defined with the credits
+local foot_receive      -- the partner on foot (I), defined with the credits
+local partner_on_foot   -- "on foot at <station>" or nil, defined with the credits
 local send_link
 
 local function net_send(msg)
@@ -815,6 +820,8 @@ on_pipe_message = function(msg)
 		if config.mode == "net" then orders_receive(f, now) end
 	elseif kind == "J" then
 		if config.mode == "net" then behaviours_receive(f, now) end
+	elseif kind == "I" then
+		if config.mode == "net" then foot_receive(f, now) end
 	elseif kind == "M" then
 		local text = clean_text(f[3], 200)
 		if text ~= "" then
@@ -940,6 +947,8 @@ end
 -- "in <sector>, 1.2 km away" for the partner's proxy, or nil while there is none.
 local function partner_whereabouts()
 	local P = S.proxy
+	local walking = partner_on_foot and partner_on_foot()
+	if walking then return walking end
 	if P.state ~= "live" or P.sector == 0 then return nil end
 	local text = "in " .. tostring(GetComponentData(to64(P.sector), "name") or P.sector_macro)
 	local ship = C.GetPlayerOccupiedShipID()
@@ -1943,6 +1952,11 @@ local function on_probe_result()
 	end
 end
 
+-- The feature sections below (credits to on foot) live in one block, so their helpers don't count against
+-- LuaJIT's 200 locals per function; what the frame loop, the events and the commands need is in Feature.
+local Feature = {}
+do
+
 -------------------------------------------------------------------------------
 -- Credits (shared world: one empire, two wallets). The empire's income is the host's: the host's game runs
 -- the empire's trades for real, so in the joiner's game md takes back what the empire's own ships earn on
@@ -2439,6 +2453,32 @@ local function newships_tick()
 	end
 end
 
+Feature.credits_tick = credits_tick
+Feature.give_credits = give_credits
+Feature.on_empire_trade = on_empire_trade
+Feature.relations_tick = relations_tick
+Feature.on_relations = on_relations
+Feature.on_relation_changed = on_relation_changed
+Feature.on_relation_applied = on_relation_applied
+Feature.unlocks_tick = unlocks_tick
+Feature.on_unlock = on_unlock
+Feature.warp_tick = warp_tick
+Feature.on_timewarp = on_timewarp
+Feature.reliable_tick = reliable_tick
+Feature.owners_tick = owners_tick
+Feature.on_owner = on_owner
+Feature.newships_tick = newships_tick
+Feature.on_ship_built = on_ship_built
+Feature.on_newship_made = on_newship_made
+Feature.reliable_send = reliable_send
+Feature.reliable_receive = reliable_receive
+end
+
+-- Orders, behaviours and on foot: a second block, so the first one's helpers are released before these are
+-- declared; the reliable messaging comes from the first block.
+do
+local reliable_send, reliable_receive = Feature.reliable_send, Feature.reliable_receive
+
 -------------------------------------------------------------------------------
 -- Orders (shared faction): an order the player gives an empire ship is carried out in the partner's world too.
 -- The menus give orders through the global CreateOrder(ship, order id, params, ...); we wrap it, and encode the
@@ -2878,6 +2918,98 @@ local function orders_tick(now)
 end
 
 -------------------------------------------------------------------------------
+-- On foot. While the player is off their ship, md reports where they walk (FootWatch); we send it
+-- ("I|at|station|macro|sector|room|room index|x|y|z|speed|name", four times a second; "I|gone" once they're
+-- aboard a ship again). The partner's game shows it in /x4coop status and check, /x4coop join flies there, and
+-- in the shared world a stand-in walks in the same room (md OnFootAvatar).
+
+local FOOT_STALE = 3       -- s without reports before the partner counts as no longer on foot
+
+local function foot_enabled()
+	return config.mode == "net" and S.net.connected and config.foot == 1
+end
+
+local function on_foot()
+	local F = S.foot
+	local v = S.player and GetNPCBlackboard(S.player, "$x4coop_foot")
+	if not foot_enabled() then return end
+	local now = getElapsedTime()
+	if type(v) ~= "table" or #v == 0 then
+		if F.walking then
+			F.walking, F.last, F.gone_left, F.gone_at = false, nil, 3, -1e9
+		end
+		return
+	end
+	local code, macro, sector, room, index = v[1], v[2], v[3], v[4], tonumber(v[5])
+	local x, y, z = tonumber(v[6]), tonumber(v[7]), tonumber(v[8])
+	if not (valid_world_ref(code, macro, sector) and type(room) == "string" and room:match("^[%w_]+$") and index and x and y and z) then
+		return
+	end
+	local speed = 1.5
+	if F.last and F.last.room == room and now - F.last.t > 0.05 then
+		speed = math.max(0.5, math.min(6, math.sqrt((x - F.last.x) ^ 2 + (y - F.last.y) ^ 2 + (z - F.last.z) ^ 2) / (now - F.last.t)))
+	end
+	F.last = { room = room, x = x, y = y, z = z, t = now }
+	F.walking, F.gone_left = true, 0
+	net_send(string.format("I|at|%s|%s|%s|%s|%d|%.2f|%.2f|%.2f|%.2f|%s", alias_out(code), macro, sector, room, index, x, y, z,
+		speed, clean_text(v[9], 40)))
+end
+
+local function foot_clear()
+	local F = S.foot
+	if F.avatar_on then request("foot_avatar_clear", {}) end
+	F.avatar_on, F.partner = false, nil
+end
+
+foot_receive = function(f, now)
+	local F = S.foot
+	if f[2] == "gone" then
+		if F.partner then notify("%s is back aboard a ship", S.rem.name or "your partner") end
+		foot_clear()
+		return
+	end
+	if f[2] ~= "at" then return end
+	local code, macro, sector, room, index = f[3], f[4], f[5], f[6], tonumber(f[7])
+	local x, y, z, speed = tonumber(f[8]), tonumber(f[9]), tonumber(f[10]), tonumber(f[11])
+	if not (valid_world_ref(code, macro, sector) and room and room:match("^[%w_]+$") and index and x and y and z and speed) then return end
+	local first = not F.partner
+	F.partner = { code = alias_in(code), macro = macro, sector = sector, room = room, index = index, name = clean_text(f[12], 40), at = now }
+	if first then notify("%s is on foot at %s", S.rem.name or "your partner", F.partner.name) end
+	if config.foot_avatar == 1 and S.link.linked then
+		F.avatar_on = true
+		request("foot_avatar", { F.partner.code, macro, sector, room, index, x, y, z, math.max(0.5, math.min(6, speed)),
+			clean_text(S.rem.name or "Partner", 32) })
+	end
+end
+
+-- "on foot at <station>", while the partner is walking
+partner_on_foot = function()
+	local p = S.foot.partner
+	return p and getElapsedTime() - p.at < FOOT_STALE and ("on foot at " .. p.name) or nil
+end
+
+local function foot_tick(now)
+	local F = S.foot
+	local on = foot_enabled()
+	if on ~= F.on then
+		F.on = on
+		request("foot", { on and 1 or 0 })
+	end
+	if F.gone_left > 0 and now - F.gone_at >= 0.5 then  -- "back aboard", said a few times
+		F.gone_left, F.gone_at = F.gone_left - 1, now
+		if on then net_send("I|gone") end
+	end
+	if F.partner and now - F.partner.at > FOOT_STALE then foot_clear() end
+end
+
+Feature.orders_tick = orders_tick
+Feature.on_resolved = on_resolved
+Feature.behaviours_tick = behaviours_tick
+Feature.foot_tick = foot_tick
+Feature.on_foot = on_foot
+end
+
+-------------------------------------------------------------------------------
 -- Chat commands
 
 -- The first thing standing in the way of co-op, with what to do about it; "all good" when nothing does.
@@ -2911,6 +3043,8 @@ local function diagnosis()
 		return "you are both in the same ship: " .. (K.role == "join" and "type /x4coop takeship" or "the joiner should take the guest ship")
 	end
 	if P.state ~= "live" then
+		local walking = partner_on_foot()
+		if walking then return "linked; your partner is " .. walking .. ": /x4coop join flies you there" end
 		return "linked, but your partner's ship isn't here yet (are they in a ship's pilot seat?)"
 	end
 	return "all good: linked shared world, partner " .. (partner_whereabouts() or "visible")
@@ -3036,7 +3170,12 @@ local function command(param)
 	elseif cmd == "check" then
 		notify("check: %s", diagnosis())
 	elseif cmd == "join" then
-		request("join", {})
+		local p = partner_on_foot() and S.foot.partner
+		if p then
+			request("join_at", { p.code, p.macro, p.sector })
+		else
+			request("join", {})
+		end
 	elseif cmd == "guestship" then
 		request("guestship", {})
 	elseif cmd == "takeship" then
@@ -3046,7 +3185,7 @@ local function command(param)
 	elseif cmd == "loadshared" then
 		load_shared()
 	elseif cmd == "give" then
-		give_credits(args[2])
+		Feature.give_credits(args[2])
 	elseif cmd == "pipeclient" then
 		local choice = args[2]
 		if choice == "auto" or choice == "own" or choice == "sirnukes" then
@@ -3136,15 +3275,16 @@ local function tick(now, dt)
 	proxy_tick(now, dt)
 	npc_tick(now, dt)
 	econ_tick(now, dt)
-	credits_tick(now)
-	relations_tick(now)
-	unlocks_tick(now)
-	warp_tick(now)
-	reliable_tick(now)
-	owners_tick()
-	newships_tick()
-	orders_tick(now)
-	behaviours_tick(now)
+	Feature.credits_tick(now)
+	Feature.relations_tick(now)
+	Feature.unlocks_tick(now)
+	Feature.warp_tick(now)
+	Feature.reliable_tick(now)
+	Feature.owners_tick()
+	Feature.newships_tick()
+	Feature.orders_tick(now)
+	Feature.behaviours_tick(now)
+	Feature.foot_tick(now)
 end
 
 local function on_update()
@@ -3173,16 +3313,17 @@ local function init()
 	RegisterEvent("x4coop.joiner_trade", on_joiner_trade)
 	RegisterEvent("x4coop.stock_applied", on_stock_applied)
 	RegisterEvent("x4coop.area_death", on_area_death)
-	RegisterEvent("x4coop.relations", on_relations)
-	RegisterEvent("x4coop.relation_changed", on_relation_changed)
-	RegisterEvent("x4coop.relation_applied", on_relation_applied)
-	RegisterEvent("x4coop.unlock", on_unlock)
-	RegisterEvent("x4coop.timewarp", on_timewarp)
-	RegisterEvent("x4coop.owner", on_owner)
-	RegisterEvent("x4coop.ship_built", on_ship_built)
-	RegisterEvent("x4coop.newship_made", on_newship_made)
-	RegisterEvent("x4coop.resolved", on_resolved)
-	RegisterEvent("x4coop.empire_trade", on_empire_trade)
+	RegisterEvent("x4coop.relations", Feature.on_relations)
+	RegisterEvent("x4coop.relation_changed", Feature.on_relation_changed)
+	RegisterEvent("x4coop.relation_applied", Feature.on_relation_applied)
+	RegisterEvent("x4coop.unlock", Feature.on_unlock)
+	RegisterEvent("x4coop.timewarp", Feature.on_timewarp)
+	RegisterEvent("x4coop.owner", Feature.on_owner)
+	RegisterEvent("x4coop.ship_built", Feature.on_ship_built)
+	RegisterEvent("x4coop.newship_made", Feature.on_newship_made)
+	RegisterEvent("x4coop.resolved", Feature.on_resolved)
+	RegisterEvent("x4coop.foot", Feature.on_foot)
+	RegisterEvent("x4coop.empire_trade", Feature.on_empire_trade)
 	RegisterEvent("x4coop.npc_mirror", on_npc_mirror)
 
 	-- Chat window "/x4coop ..." commands; everything else goes to the original handler.

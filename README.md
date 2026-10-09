@@ -169,6 +169,16 @@ mod double-checks the engine's rotation convention (`probe:` in the log).
 3. When both are in a ship, your partner appears ("Nova is in Mars, 412 km away"). `/x4coop join`
    warps you beside them. `/x4coop say <text>` chats.
 
+**On foot:** when you leave your ship and walk around a station (or another ship's interior), your game
+tells your partner where you are: which station, which room, and where in it. Their `/x4coop status` and
+`check` show "on foot at <station>", and `/x4coop join` flies them to that station. In the shared world they
+also see a stand-in: a crew member titled with your name, in the same room, walking to the standing spot
+nearest you as you move, and following you from room to room. It disappears when you're back aboard a ship.
+NPCs only stop at a room's standing spots. Those are usually 1–3 m apart (about 1.5 m in bars, under 2 m in
+the big station areas), so the stand-in stays within a step or two of you; in corridors, which only have a
+spot at each end, it walks to the nearer end. It's a generic crew member: the game doesn't let a script give
+it your character's look. `/x4coop set foot 0` stops sending where you walk; `foot_avatar 0` hides the stand-in.
+
 **SETA (time acceleration):** whichever of you switches it on or off, the other's game follows, at
 the same speed. If the other can't follow (no SETA in their inventory, or not allowed right now, for
 example with enemies near), it's switched off again for both of you, and you're both told.
@@ -278,7 +288,7 @@ is the real one: next session, share again.
 | `/x4coop status` | mode, link, RTT, proxy state, where your partner is, rotation convention |
 | `/x4coop check` | the first thing standing in the way of co-op, and what to do about it |
 | `/x4coop ghost` / `net` / `off` | mode (remembered in the savegame) |
-| `/x4coop join` | warp beside your partner (pilot seat, undocked) |
+| `/x4coop join` | warp beside your partner (pilot seat, undocked); next to their station if they're on foot |
 | `/x4coop say <text>` | chat line to your partner |
 | `/x4coop give <credits>` | send credits to your partner (e.g. `give 50000`) |
 | `/x4coop guestship` | host: park a spare ship for the joiner (before sharing) |
@@ -433,7 +443,7 @@ game's own schema (`libraries/md.xsd`, `libraries/common.xsd`).
 
 Messages (one text line each): `S` snapshot (position, rotation, velocity, ship, hull, shield),
 `P`/`Q` ping, `M` chat, `L` world link, `K` kill, `D` hit, `F` firing at, `B` nearby ships (both
-ways), `E` station stock (host to joiner), `T` a joiner's trade, `V` relations, `U` research/blueprints/licences, `Z` SETA, `O` ownership, `Y` new ships, `G` orders, `J` behaviours and queues, `C` credits given; `R`/`W`/`N`/`X` are between a game and
+ways), `E` station stock (host to joiner), `T` a joiner's trade, `V` relations, `U` research/blueprints/licences, `Z` SETA, `O` ownership, `Y` new ships, `G` orders, `J` behaviours and queues, `I` on foot, `C` credits given; `R`/`W`/`N`/`X` are between a game and
 its own bridge.
 
 Self-calibration: on first contact the proxy is nudged and read back (does `SetObjectSectorPos`
@@ -469,7 +479,8 @@ python extensions/x4_coop/dev/run_tests.py [--quick]
   the joiner's trades counted on the host (once, named in its reports, never reverted on the joiner),
   deaths near either player reported from any sector (only by the game that rules that area),
   relations both ways (the host's followed; a joiner's change counted once and never undone in flight),
-  research, blueprints and licences both ways (sent until confirmed, added once), SETA both ways
+  on foot both ways (where you walk sent; status, join to the station, the stand-in walking in the same
+  room and removed when back aboard), research, blueprints and licences both ways (sent until confirmed, added once), SETA both ways
   (followed; turned off for both when one side can't follow), ownership changes both ways (sent
   until confirmed, applied once), new ships both ways (made once, paired, kills and hits on them
   translated both ways), orders both ways (encoded, shared once, objects found again, queue cleared

@@ -51,6 +51,8 @@ local SC = {
 	                 role = "join", own_world = "abc123", partner_world = "abc123", order_test = true },
 	behaviour    = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
 	                 role = "join", own_world = "abc123", partner_world = "abc123", behaviour_test = true },
+	onfoot       = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
+	                 role = "join", own_world = "abc123", partner_world = "abc123", foot_test = true },
 	credits      = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
 	                 role = "join", own_world = "abc123", partner_world = "abc123", credits_test = true },
 	npc_apart_join = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
@@ -147,6 +149,10 @@ local HOST_STOCK = {  -- the host's stations; STN-9 doesn't exist in the joiner'
 	["STN-3"] = { energycells = 100, water = 2500, ice = 0 }, ["STN-4"] = {}, ["STN-5"] = { claytronics = 75 },
 	["STN-9"] = { energycells = 1 },
 }
+if sc.foot_test then
+	objects[701] = { sector = 500, x = 50000, y = 0, z = 0, yaw = 0, pitch = 0, roll = 0, macro = "station_gen_factory_base_01_macro",
+		idcode = "STN-1", station = true, cargo = {} }
+end
 if sc.behaviour_test then
 	for i = 1, 4 do  -- the empire's ships near us
 		objects[400 + i] = { sector = 500, x = 1000 + 300 * i, y = 0, z = -2000, yaw = 0, pitch = 0, roll = 0, macro = SHIP_MACRO,
@@ -335,6 +341,7 @@ order_book = {
 	[402] = { queue = { { def = "Attack", params = { { name = "destination", type = "object", value = 403 } } } } },
 }
 behaviour_calls, set_param_calls = {}, {}
+foot_requests, foot_status_seen = {}, nil
 function GetOrderParams(ship, which)
 	local book = order_book[ship] or {}
 	local order = which == "default" and book.default or (book.queue or {})[which]
@@ -495,6 +502,14 @@ function AddUITriggeredEvent(screen, control, args)
 		end
 		blackboard["$x4coop_resolved"] = out
 		queue("x4coop.resolved")
+	elseif control == "foot" then
+		foot_requests[#foot_requests + 1] = "foot:" .. tostring(args[1])
+	elseif control == "foot_avatar" then
+		foot_requests[#foot_requests + 1] = "avatar:" .. table.concat(args, ":")
+	elseif control == "foot_avatar_clear" then
+		foot_requests[#foot_requests + 1] = "avatar_clear"
+	elseif control == "join_at" then
+		foot_requests[#foot_requests + 1] = "join_at:" .. table.concat(args, ":")
 	elseif control == "owners" then
 		owner_switch[#owner_switch + 1] = tostring(args[1])
 	elseif control == "owner" then
@@ -886,6 +901,38 @@ local function behaviour_script()
 	while behaviour_steps[1] and clock >= behaviour_steps[1][1] do table.remove(behaviour_steps, 1)[2]() end
 end
 
+local foot_next = 0
+local function foot_script()
+	if not sc.foot_test or not pipe_reader then return end
+	if clock >= 8 and clock < 11 and clock >= foot_next then  -- we walk across the bar of STN-1 at 1.5 m/s
+		foot_next = clock + 0.25
+		blackboard["$x4coop_foot"] = { "STN-1", "station_gen_factory_base_01_macro", SECTORS[500], "room_gen_bar_01", 2,
+			1.5 * (clock - 8), 0, 2, "Ministry Station" }
+		queue("x4coop.foot")
+	elseif clock >= 11.5 and blackboard["$x4coop_foot"] and #blackboard["$x4coop_foot"] > 0 then  -- aboard again
+		blackboard["$x4coop_foot"] = {}
+		queue("x4coop.foot")
+	end
+	if clock >= 14 and clock < 18 and clock >= foot_next then  -- the partner walks on another station's bar
+		foot_next = clock + 0.25
+		partner_queue[#partner_queue + 1] = { at = clock + ONE_WAY, msg = string.format(
+			"I|at|STN-1|station_gen_factory_base_01_macro|%s|room_gen_bar_01|3|%.2f|0.00|1.00|1.40|Harbour Bar Station",
+			SECTORS[500], 1.4 * (clock - 14)) }
+	end
+	if clock >= 15 and not foot_joined then
+		foot_joined = true
+		ExecuteDebugCommand("x4coop", "join")
+	end
+	if clock >= 16 and not foot_status_seen then
+		ExecuteDebugCommand("x4coop", "status")
+		foot_status_seen = notifications[#notifications]
+	end
+	if clock >= 18.5 and not foot_gone_sent then
+		foot_gone_sent = true
+		pipe_reader("I|gone")
+	end
+end
+
 local function credit_script()
 	if not sc.credits_test or not pipe_reader then return end
 	while credit_steps[1] and clock >= credit_steps[1][1] do
@@ -1015,6 +1062,7 @@ while clock < sc.duration do
 	newship_script()
 	order_script()
 	behaviour_script()
+	foot_script()
 	if sc.partner_restart_at and clock >= sc.partner_restart_at and partner_clock_offset == 1000 then
 		partner_clock_offset = -500
 		say("t=%.1f partner restarted their game (clock jumped back)", clock)
@@ -1542,6 +1590,27 @@ if sc.behaviour_test then
 		and sets:find("403:planneddefault:1:500", 1, true) ~= nil and sets:find("403:planneddefault:2:5000", 1, true) ~= nil
 		and sets:find(":1:701", 1, true) ~= nil
 		and #cleared_orders >= 1
+end
+if sc.foot_test then
+	local ats, gone, first_at = 0, 0, nil
+	for _, w in ipairs(pipe_writes) do
+		if w:sub(1, 5) == "I|at|" then ats = ats + 1; first_at = first_at or w end
+		if w == "I|gone" then gone = gone + 1 end
+	end
+	local reqs = table.concat(foot_requests, " ")
+	say("onfoot: we sent %d positions (first %s), 'back aboard' %d times; md: %s", ats, tostring(first_at), gone, reqs:sub(1, 300))
+	say("onfoot: status while the partner walked: %s", tostring(foot_status_seen))
+	ok = ok and ats >= 8 and first_at:find("I|at|STN-1|station_gen_factory_base_01_macro|" .. SECTORS[500] .. "|room_gen_bar_01|2|", 1, true) ~= nil
+		and first_at:find("|Ministry Station", 1, true) ~= nil
+		and gone >= 1 and reqs:find("foot:1", 1, true) ~= nil
+		and select(2, reqs:gsub("avatar:STN%-1:", "")) >= 10
+		and reqs:find("avatar:STN-1:station_gen_factory_base_01_macro:" .. SECTORS[500] .. ":room_gen_bar_01:3:", 1, true) ~= nil
+		and reqs:find(":Echo", 1, true) ~= nil
+		and reqs:find("join_at:STN-1:station_gen_factory_base_01_macro:" .. SECTORS[500], 1, true) ~= nil
+		and reqs:find("avatar_clear", 1, true) ~= nil
+		and tostring(foot_status_seen):find("on foot at Harbour Bar Station", 1, true) ~= nil
+		and said:find("is on foot at Harbour Bar Station", 1, true) ~= nil
+		and said:find("is back aboard a ship", 1, true) ~= nil
 end
 if sc.credits_test then
 	local acks = 0

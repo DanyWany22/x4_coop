@@ -1262,6 +1262,148 @@
           </actions>
         </cue>
 
+        <!--
+          On foot. While the player is off their ship, FootWatch reports where they walk, four times a second:
+          player.entity.$x4coop_foot = [container idcode, container macro, sector macro, room macro, room index (in
+          find_room's list for that container), x, y, z (relative to the room), container name], then 'x4coop.foot';
+          an empty list once they're aboard a ship again. 'foot' (param3: [1 or 0]) turns reporting on.
+          The partner's game shows a stand-in (OnFootAvatar): a crew member in the same room of the same station or
+          ship, titled with the partner's name, walking to the standing point nearest them; OnFootAvatarClear removes
+          it. OnJoinAt (/x4coop join while the partner is on foot) warps our ship next to their station.
+        -->
+        <cue name="OnFootConfig" instantiate="true">
+          <conditions>
+            <event_ui_triggered screen="'x4coop'" control="'foot'"/>
+          </conditions>
+          <actions>
+            <set_value name="Root.$FootOn" exact="event.param3.{1}"/>
+          </actions>
+        </cue>
+
+        <cue name="FootWatch" instantiate="true" checkinterval="250ms">
+          <conditions>
+            <check_value value="@Root.$FootOn == 1 and not @player.occupiedship and @player.room and @player.container.idcode"/>
+          </conditions>
+          <actions>
+            <do_if value="player.room != @Root.$FootRoomSeen">
+              <find_room name="$Rooms" object="player.container" multiple="true"/>
+              <set_value name="Root.$FootRoomIndex" exact="$Rooms.indexof.{player.room}"/>
+              <set_value name="Root.$FootRoomSeen" exact="player.room"/>
+            </do_if>
+            <set_value name="$Pos" exact="player.entity.relativeposition.{player.room}"/>
+            <set_value name="Root.$FootReported" exact="1"/>
+            <set_value name="player.entity.$x4coop_foot" exact="[player.container.idcode, player.container.macro.id, player.container.sector.macro.id, player.room.macro.id, Root.$FootRoomIndex, $Pos.x, $Pos.y, $Pos.z, player.container.knownname]"/>
+            <raise_lua_event name="'x4coop.foot'"/>
+          </actions>
+        </cue>
+
+        <cue name="FootBack" instantiate="true" checkinterval="250ms">
+          <conditions>
+            <check_value value="@Root.$FootReported == 1 and (@player.occupiedship or @Root.$FootOn != 1)"/>
+          </conditions>
+          <actions>
+            <set_value name="Root.$FootReported" exact="0"/>
+            <set_value name="Root.$FootRoomSeen" exact="null"/>
+            <set_value name="player.entity.$x4coop_foot" exact="[]"/>
+            <raise_lua_event name="'x4coop.foot'"/>
+          </actions>
+        </cue>
+
+        <!-- Holds the stand-in actor (create_cue_actor needs a cue that stays). -->
+        <cue name="FootAvatar">
+          <actions>
+            <set_value name="Root.$FootActor" exact="null"/>
+          </actions>
+        </cue>
+
+        <!-- param3: [container idcode, container macro, sector macro, room macro, room index, x, y, z, speed, title] -->
+        <cue name="OnFootAvatar" instantiate="true">
+          <conditions>
+            <event_ui_triggered screen="'x4coop'" control="'foot_avatar'"/>
+          </conditions>
+          <actions>
+            <set_value name="$A" exact="event.param3"/>
+            <include_actions ref="FindContainer"/>
+            <set_value name="$Room" exact="null"/>
+            <do_if value="$Container">
+              <find_room name="$Rooms" object="$Container" multiple="true"/>
+              <do_if value="$A.{5} gt 0 and $Rooms.count ge $A.{5} and $Rooms.{$A.{5}}.macro.id == $A.{4}">
+                <set_value name="$Room" exact="$Rooms.{$A.{5}}"/>
+              </do_if>
+            </do_if>
+            <do_if value="not $Room">
+              <include_actions ref="ClearFootAvatar"/>
+            </do_if>
+            <do_else>
+              <set_value name="$Pos" exact="position.[$A.{6}, $A.{7}, $A.{8}]"/>
+              <find_npc_slot name="$Slots" object="$Room" multiple="true"/>
+              <find_npc_waypoint name="$Slots" object="$Room" multiple="true" append="true"/>
+              <set_value name="$Best" exact="null"/>
+              <do_for_each name="$Slot" in="$Slots">
+                <do_if value="not $Best or $Slot.distanceto.[$Room, $Pos] lt $Best.distanceto.[$Room, $Pos]">
+                  <set_value name="$Best" exact="$Slot"/>
+                </do_if>
+              </do_for_each>
+              <do_if value="$Best">
+                <do_if value="not @Root.$FootActor.exists">
+                  <create_cue_actor cue="FootAvatar" name="$Actor"/>
+                  <set_value name="Root.$FootActor" exact="$Actor"/>
+                  <set_value name="Root.$FootRoom" exact="null"/>
+                </do_if>
+                <do_if value="@Root.$FootActor.exists">
+                  <do_if value="Root.$FootRoom != $Room">
+                    <do_if value="Root.$FootRoom">
+                      <remove_actor_from_room actor="Root.$FootActor"/>
+                    </do_if>
+                    <add_actor_to_room actor="Root.$FootActor" object="$Room" slot="$Best"/>
+                    <set_entity_overrides entity="Root.$FootActor" title="$A.{10}"/>
+                    <set_value name="Root.$FootRoom" exact="$Room"/>
+                    <set_value name="Root.$FootTarget" exact="$Best"/>
+                  </do_if>
+                  <do_elseif value="Root.$FootTarget != $Best">
+                    <start_actor_walk actor="Root.$FootActor" target="$Best" speed="$A.{9}"/>
+                    <set_value name="Root.$FootTarget" exact="$Best"/>
+                  </do_elseif>
+                </do_if>
+              </do_if>
+            </do_else>
+          </actions>
+        </cue>
+
+        <cue name="OnFootAvatarClear" instantiate="true">
+          <conditions>
+            <event_ui_triggered screen="'x4coop'" control="'foot_avatar_clear'"/>
+          </conditions>
+          <actions>
+            <include_actions ref="ClearFootAvatar"/>
+          </actions>
+        </cue>
+
+        <!-- param3: [container idcode, container macro, sector macro] -->
+        <cue name="OnJoinAt" instantiate="true">
+          <conditions>
+            <event_ui_triggered screen="'x4coop'" control="'join_at'"/>
+          </conditions>
+          <actions>
+            <set_value name="$A" exact="event.param3"/>
+            <include_actions ref="FindContainer"/>
+            <set_value name="$Ship" exact="player.occupiedship"/>
+            <do_if value="not $Container">
+              <show_notification text="'Co-op: the station your partner is on is not in your world'" timeout="6s"/>
+            </do_if>
+            <do_elseif value="not @$Ship.isoperational or @$Ship.dock or not @$Ship.parent.isclass.space">
+              <show_notification text="'Co-op: sit in the pilot seat of an undocked ship to join your partner'" timeout="6s"/>
+            </do_elseif>
+            <do_else>
+              <create_position name="$Pos" object="$Container" x="$Container.size + $Ship.size" space="$Container.sector"/>
+              <warp object="$Ship" sector="$Container.sector">
+                <safepos value="$Pos"/>
+              </warp>
+              <show_notification text="'Co-op: you are at ' + $Container.knownname + ', where your partner is on foot'" timeout="6s"/>
+            </do_else>
+          </actions>
+        </cue>
+
         <cue name="OnNpcClear" instantiate="true">
           <conditions>
             <event_ui_triggered screen="'x4coop'" control="'npc_clear'"/>
@@ -1373,6 +1515,38 @@
         </cue>
 
         <!-- In: $Args = [idcode, ship_macro, sector_macro, ...]. Out: $Target, the matching ship or null. Never the player's ship or a proxy. -->
+        <!-- In: $A = [container idcode, container macro, sector macro, ...]. Out: $Container (station or ship) or null. -->
+        <library name="FindContainer">
+          <actions>
+            <set_value name="$Container" exact="null"/>
+            <find_sector name="$ContainerSector" macro="@macro.{$A.{3}}"/>
+            <do_if value="$ContainerSector and @macro.{$A.{2}}">
+              <do_if value="macro.{$A.{2}}.isclass.station">
+                <find_station name="$Candidates" space="$ContainerSector" multiple="true"/>
+              </do_if>
+              <do_else>
+                <find_ship name="$Candidates" space="$ContainerSector" macro="macro.{$A.{2}}" multiple="true"/>
+              </do_else>
+              <do_for_each name="$Candidate" in="$Candidates">
+                <do_if value="not $Container and $Candidate.idcode == $A.{1}">
+                  <set_value name="$Container" exact="$Candidate"/>
+                </do_if>
+              </do_for_each>
+            </do_if>
+          </actions>
+        </library>
+
+        <library name="ClearFootAvatar">
+          <actions>
+            <do_if value="@Root.$FootActor.exists">
+              <remove_actor_from_room actor="Root.$FootActor" destroy="true"/>
+            </do_if>
+            <set_value name="Root.$FootActor" exact="null"/>
+            <set_value name="Root.$FootRoom" exact="null"/>
+            <set_value name="Root.$FootTarget" exact="null"/>
+          </actions>
+        </library>
+
         <library name="FindWorldShip">
           <actions>
             <set_value name="$Target" exact="null"/>
