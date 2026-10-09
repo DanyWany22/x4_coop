@@ -124,6 +124,7 @@ local config = {
 	rename_sync = 1,          -- shared world: ships renamed in either world get the same name in both
 	crew_sync = 1,            -- shared world: ships' crew and marines (numbers, skills) and pilots' skills
 	world_sync = 1,           -- shared world: other factions' stations and sector owners follow the host's world
+	logbook_sync = 1,         -- shared world: missions, general and diplomacy logbook entries in both logbooks
 	ghost_latency = 0.12,     -- s, simulated one-way latency in ghost mode
 	ghost_jitter = 0.03,      -- s, extra random delay per snapshot
 	ghost_loss = 0.0,         -- 0..1, fraction of snapshots dropped
@@ -384,6 +385,7 @@ local function reset()
 		knowledge = { on = false, sent = 0, applied = 0 },
 		renames = { sent = 0, applied = 0 },
 		crew = { on = false, sent = 0, applied = 0 },
+		logbook = { next = 0, last = nil, sent = 0, applied = 0 },
 		world = { key = nil, asked = {}, gone = 0, wanted = 0, layouts = 0, summaries = 0, built = 0, ships = 0 },
 		rules = { next = 0, base = nil, shared = {}, alias = { loaded = false, into = {}, out = {} }, sent = 0, applied = 0 },
 		ssettings = { list = {}, idx = 0, next = 0, ids = {}, base = {}, settle = {}, out = {}, expect = {}, sent = 0, applied = 0 },
@@ -886,6 +888,8 @@ on_pipe_message = function(msg)
 		if config.mode == "net" then Receive.w(f, now) end
 	elseif kind == "g" then
 		if config.mode == "net" then Receive.g(f, now) end
+	elseif kind == "h" then
+		if config.mode == "net" then Receive.h(f, now) end
 	elseif kind == "M" then
 		local text = clean_text(f[3], 200)
 		if text ~= "" then
@@ -4488,6 +4492,57 @@ Feature.on_crew = on_crew
 Feature.crew_tick = crew_tick
 
 -------------------------------------------------------------------------------
+-- Shared logbook: what either player achieves (the missions, general and diplomacy entries) is written in both
+-- logbooks, with "Co-op: <partner>" as the source (md OnLogbook). Alerts, upkeep and news aren't sent: both worlds
+-- write their own. Each game reads the newest entries every LOG_POLL seconds and sends those newer than the last it
+-- saw (by time: a full logbook drops old entries, so the count doesn't always grow).
+-- "h|msg|id|category|title|text|credits", sent reliably.
+
+local LOG_POLL = 5
+local LOG_LOOK = 25          -- newest entries read each time
+local LOG_SHARED = { missions = true, general = true, diplomacy = true }
+local LOG_TAG = "Co-op: "
+
+local function logbook_enabled()
+	return config.mode == "net" and S.link.linked and config.logbook_sync == 1
+		and type(GetNumLogbook) == "function" and type(GetLogbook) == "function"
+end
+
+local function logbook_tick(now)
+	local L = S.logbook
+	if now < L.next or not logbook_enabled() then return end
+	L.next = now + LOG_POLL
+	local n = tonumber(GetNumLogbook("all")) or 0
+	local entries = n > 0 and GetLogbook(math.max(1, n - LOG_LOOK + 1), math.min(n, LOG_LOOK), "all") or {}
+	local newest = L.last
+	for _, e in ipairs(entries) do
+		local t = type(e) == "table" and tonumber(e.time)
+		if t and L.last and t > L.last and LOG_SHARED[e.category]
+			and not tostring(e.entityname or ""):find(LOG_TAG, 1, true) then
+			local title = clean_text(e.title, 80)
+			if title ~= "" then
+				reliable_send("h", { e.category, title, clean_text(e.text, 400), string.format("%.0f", tonumber(e.money) or 0) })
+				L.sent = L.sent + 1
+			end
+		end
+		if t and (not newest or t > newest) then newest = t end
+	end
+	L.last = newest or L.last or -1  -- the first look only takes note: what's there is in both worlds
+end
+
+Receive.h = function(f, now)
+	if not logbook_enabled() then return end
+	reliable_receive("h", f, now, function(m)
+		local title = clean_text(m[5], 80)
+		if not (LOG_SHARED[m[4]] and title ~= "") then return end
+		request("logbook", { m[4], title, clean_text(m[6], 400), tonumber(m[7]) or 0, clean_text(S.rem.name or "partner", 32) })
+		S.logbook.applied = S.logbook.applied + 1
+	end)
+end
+
+Feature.logbook_tick = logbook_tick
+
+-------------------------------------------------------------------------------
 -- The wider world (host to joiner): every other faction's stations, as they are in the host's world (built,
 -- expanded, changing owner), and sector owners. The host's md goes round all stations, eight a second, and Lua sends
 -- each one's summary ("g|st|round|station|macro|owner|sector|x|y|z|yaw|pitch|roll|modules|wrecks|sum x|sum y|sum z",
@@ -5019,6 +5074,7 @@ local function tick(now, dt)
 	Feature.renames_tick()
 	Feature.crew_tick()
 	Feature.world_tick()
+	Feature.logbook_tick(now)
 end
 
 local function on_update()

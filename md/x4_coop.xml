@@ -2801,6 +2801,30 @@
           </actions>
         </cue>
 
+        <!--
+          Shared logbook: an entry from the partner's world (param3: [category, title, text, credits, partner name])
+          is written to ours, with "Co-op: <partner>" as its source, so it isn't sent back.
+        -->
+        <cue name="OnLogbook" instantiate="true">
+          <conditions>
+            <event_ui_triggered screen="'x4coop'" control="'logbook'"/>
+          </conditions>
+          <actions>
+            <set_value name="$H" exact="event.param3"/>
+            <set_value name="$Who" exact="'Co-op: ' + $H.{5}"/>
+            <set_value name="$Money" exact="$H.{4} * 1Cr"/>
+            <do_if value="$H.{1} == 'missions'">
+              <write_to_logbook category="missions" title="$H.{2}" text="$H.{3}" entity="$Who" money="$Money"/>
+            </do_if>
+            <do_elseif value="$H.{1} == 'diplomacy'">
+              <write_to_logbook category="diplomacy" title="$H.{2}" text="$H.{3}" entity="$Who" money="$Money"/>
+            </do_elseif>
+            <do_else>
+              <write_to_logbook category="general" title="$H.{2}" text="$H.{3}" entity="$Who" money="$Money"/>
+            </do_else>
+          </actions>
+        </cue>
+
         <cue name="OnNpcClear" instantiate="true">
           <conditions>
             <event_ui_triggered screen="'x4coop'" control="'npc_clear'"/>

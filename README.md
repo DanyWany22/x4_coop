@@ -359,6 +359,15 @@ shows the ones that arrive from the partner. `/x4coop set unlocks 0` turns it of
 count in both worlds, so helping works, and the reward goes to whoever took the mission. A mission you both
 have from the shared save isn't shown twice. `/x4coop set missions 0` turns it off.
 
+**Shared logbook:** what either of you achieves, the missions, general and diplomacy entries, is written in
+both logbooks, with "Co-op: <name>" as its source, and it stays in the host's save. Alerts, upkeep and news
+aren't shared, because both worlds write those themselves. `/x4coop set logbook_sync 0` turns it off.
+
+**The story is the host's:** the story moves on in the host's world, and each session starts from the host's
+save, so you play it together. The joiner helps along: what they destroy, capture or change counts in the
+host's world, and the host's story missions show in their mission list. Story steps the joiner finishes on
+their own copy aren't kept.
+
 **Your own wallet and inventory (joiner):** loading the host's save makes you the host's player, with the
 host's credits and inventory. So while you play, your game has your bridge keep your own credits and
 inventory in a small file next to your saves (`x4coop_profile_<world>.txt`, every 30 seconds), and puts
@@ -552,7 +561,7 @@ game's own schema (`libraries/md.xsd`, `libraries/common.xsd`).
 
 Messages (one text line each): `S` snapshot (position, rotation, velocity, ship, hull, shield),
 `P`/`Q` ping, `M` chat, `L` world link, `K` kill, `D` hit, `F` firing at, `B` nearby ships (both
-ways), `E` station stock (host to joiner), `T` a joiner's trade, `V` relations, `U` research/blueprints/licences, `Z` SETA, `O` ownership, `Y` new ships, `G` orders, `J` behaviours and queues, `I` on foot, `b` station modules, `s` station settings, `c` assignments, `r` trade rules, `a` station accounts, `m` missions, `e` station modules removed/wrecked/repaired, `q` ship upgrades, `p` deployables, `n` map knowledge, `l` ship renames, `w` crews, `g` the wider world (host to joiner), `C` credits given; `R`/`W`/`N`/`X` are between a game and
+ways), `E` station stock (host to joiner), `T` a joiner's trade, `V` relations, `U` research/blueprints/licences, `Z` SETA, `O` ownership, `Y` new ships, `G` orders, `J` behaviours and queues, `I` on foot, `b` station modules, `s` station settings, `c` assignments, `r` trade rules, `a` station accounts, `m` missions, `e` station modules removed/wrecked/repaired, `q` ship upgrades, `p` deployables, `n` map knowledge, `l` ship renames, `w` crews, `g` the wider world (host to joiner), `h` logbook entries, `C` credits given; `R`/`W`/`N`/`X` are between a game and
 its own bridge.
 
 Self-calibration: on first contact the proxy is nudged and read back (does `SetObjectSectorPos`
@@ -603,7 +612,8 @@ python extensions/x4_coop/dev/run_tests.py [--quick]
   loading), ship upgrades and module equipment both ways (wares counted, sent once, translated, applied
   once), map knowledge both ways (sectors, stations with how much is revealed, factions; checked and
   translated), the wider world (summaries sent by the host only, checked; layouts asked for, sent, parsed;
-  sector owners; stations destroyed both ways), crews both ways (counts and skills checked, translated, applied once), ship renames both ways (only the empire's ships, cleaned, applied once), deployables both ways (placed at the same spot once, paired, removed when gone), missions both ways (new, changed and ended ones sent once, alerts and guidance left out, ones
+  sector owners; stations destroyed both ways), the logbook both ways (new entries of the shared kinds once,
+  none of the partner's back), crews both ways (counts and skills checked, translated, applied once), ship renames both ways (only the empire's ships, cleaned, applied once), deployables both ways (placed at the same spot once, paired, removed when gone), missions both ways (new, changed and ended ones sent once, alerts and guidance left out, ones
   both worlds have not shown twice, ended ones dropped by the list), research, blueprints and licences both ways (sent until confirmed, added once), SETA both ways
   (followed; turned off for both when one side can't follow), ownership changes both ways (sent
   until confirmed, applied once), new ships both ways (made once, paired, kills and hits on them

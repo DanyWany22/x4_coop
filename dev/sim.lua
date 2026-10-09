@@ -55,6 +55,8 @@ local SC = {
 	                 role = "join", own_world = "abc123", partner_world = "abc123", foot_test = true },
 	stations     = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
 	                 role = "join", own_world = "abc123", partner_world = "abc123", station_test = true },
+	logbook      = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
+	                 role = "join", own_world = "abc123", partner_world = "abc123", logbook_test = true },
 	galaxy_join  = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
 	                 role = "join", own_world = "abc123", partner_world = "abc123", galaxy_test = "join" },
 	galaxy_host  = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
@@ -579,6 +581,16 @@ C.GetMissionIDObjective2 = function(id)
 	return { objectiveText = m and m.objective or "", numTargets = (m and m.target) and 1 or 0 }
 end
 C.GetMissionIDObjectiveTarget = function(id, i) local m = sim_mission(id); return (m and i == 1 and m.target) or 0 end
+-- the logbook, oldest first
+sim_logbook, logbook_requests = {
+	{ time = 10, category = "missions", title = "Old mission", text = "done before", money = 0 },
+}, {}
+function GetNumLogbook(category) return #sim_logbook end
+function GetLogbook(start, count, category)
+	local out = {}
+	for i = start, math.min(#sim_logbook, start + count - 1) do out[#out + 1] = sim_logbook[i] end
+	return out
+end
 function GetPlayerMoney() return player_money end
 function SetNPCBlackboard(_, key, v) blackboard[key] = v end
 function ExecuteDebugCommand(cmd, param) say("  ego command /%s %s", cmd, tostring(param)) end
@@ -766,6 +778,8 @@ function AddUITriggeredEvent(screen, control, args)
 		galaxy_requests[#galaxy_requests + 1] = "world_layout:" .. table.concat(head, ":") .. ":" .. table.concat(mods, ";")
 	elseif control == "world_sync" then
 		-- md only remembers the switch
+	elseif control == "logbook" then
+		logbook_requests[#logbook_requests + 1] = sim_args(args)
 	elseif control == "crew" then
 		crew_requests[#crew_requests + 1] = sim_args(args)
 	elseif control == "crew_sync" then
@@ -934,6 +948,8 @@ if sc.pipes then
 						msg = "X|profile|" .. f[3] .. "|" .. (sim_profiles[f[3]] or "none") }
 				elseif f[1] == "g" and f[2] == "msg" then
 					partner_queue[#partner_queue + 1] = { at = clock + 2 * ONE_WAY, msg = "g|ack|" .. f[3] }
+				elseif f[1] == "h" and f[2] == "msg" then
+					partner_queue[#partner_queue + 1] = { at = clock + 2 * ONE_WAY, msg = "h|ack|" .. f[3] }
 				elseif f[1] == "w" and f[2] == "msg" then
 					partner_queue[#partner_queue + 1] = { at = clock + 2 * ONE_WAY, msg = "w|ack|" .. f[3] }
 				elseif f[1] == "l" and f[2] == "msg" then
@@ -1561,6 +1577,21 @@ local function galaxy_script()
 	while galaxy_steps[1] and clock >= galaxy_steps[1][1] do table.remove(galaxy_steps, 1)[2]() end
 end
 
+local logbook_steps = {
+	{ 8, function()
+		table.insert(sim_logbook, { time = 108, category = "missions", title = "Mission completed", text = "Destroy | the\npirate", money = 25000 })
+		table.insert(sim_logbook, { time = 108.5, category = "alerts", title = "Ship attacked", text = "x", money = 0 })
+		table.insert(sim_logbook, { time = 109, category = "general", title = "From partner", text = "y", money = 0, entityname = "Co-op: Echo" })
+	end },
+	{ 10, function() pipe_reader("h|msg|0b61|diplomacy|Embassy opened|With the Argon|0") end },
+	{ 10.3, function() pipe_reader("h|msg|0b61|diplomacy|Embassy opened|With the Argon|0") end },
+	{ 11, function() pipe_reader("h|msg|0b62|alerts|Ship attacked|x|0") end },
+}
+local function logbook_script()
+	if not sc.logbook_test or not pipe_reader then return end
+	while logbook_steps[1] and clock >= logbook_steps[1][1] do table.remove(logbook_steps, 1)[2]() end
+end
+
 local function credit_script()
 	if not sc.credits_test or not pipe_reader then return end
 	while credit_steps[1] and clock >= credit_steps[1][1] do
@@ -1705,6 +1736,7 @@ while clock < sc.duration do
 	rename_script()
 	crew_script()
 	galaxy_script()
+	logbook_script()
 	if sc.partner_restart_at and clock >= sc.partner_restart_at and partner_clock_offset == 1000 then
 		partner_clock_offset = -500
 		say("t=%.1f partner restarted their game (clock jumped back)", clock)
@@ -2253,6 +2285,18 @@ if sc.foot_test then
 		and tostring(foot_status_seen):find("on foot at Harbour Bar Station", 1, true) ~= nil
 		and said:find("is on foot at Harbour Bar Station", 1, true) ~= nil
 		and said:find("is back aboard a ship", 1, true) ~= nil
+end
+if sc.logbook_test then
+	local sent = {}
+	for _, w in ipairs(pipe_writes) do
+		local id, rest = w:match("^h|msg|(%x+)|(.*)$")
+		if id then sent[id] = rest end
+	end
+	local list = {}
+	for _, rest in pairs(sent) do list[#list + 1] = rest end
+	say("logbook: sent %s; md %s", table.concat(list, " / "), table.concat(logbook_requests, " / "))
+	ok = ok and #list == 1 and list[1] == "missions|Mission completed|Destroy the pirate|25000"
+		and table.concat(logbook_requests, " / ") == "diplomacy:Embassy opened:With the Argon:0:Echo"
 end
 if sc.galaxy_test then
 	local sent = {}
