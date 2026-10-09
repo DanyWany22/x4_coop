@@ -55,6 +55,8 @@ local SC = {
 	                 role = "join", own_world = "abc123", partner_world = "abc123", foot_test = true },
 	stations     = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
 	                 role = "join", own_world = "abc123", partner_world = "abc123", station_test = true },
+	knowledge    = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
+	                 role = "join", own_world = "abc123", partner_world = "abc123", knowledge_test = true },
 	deploy       = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
 	                 role = "host", own_world = "abc123", partner_world = "abc123", deploy_test = true },
 	refit        = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
@@ -386,6 +388,8 @@ command_requests, command_misses = {}, {}
 module_requests = {}
 refit_requests = {}
 deploy_requests = {}
+knowledge_requests = {}
+if sc.knowledge_test then blackboard["$x4coop_alias"] = "PST-7=LST-201" end
 if sc.refit_test then blackboard["$x4coop_alias"] = "PSH-9=LSH-9" end
 local function sim_args(args)  -- md's arguments as text; lists of [ware, count] as "ware=count"
 	local parts = {}
@@ -734,6 +738,10 @@ function AddUITriggeredEvent(screen, control, args)
 		manager_requests[#manager_requests + 1] = tostring(args[1])
 	elseif control == "station_sync" then
 		-- md only remembers the switch
+	elseif control == "knowledge" then
+		knowledge_requests[#knowledge_requests + 1] = sim_args(args)
+	elseif control == "knowledge_sync" then
+		-- md only remembers the switch
 	elseif control == "deploy" then
 		deploy_requests[#deploy_requests + 1] = sim_args(args)
 		if args[1] == "add" then  -- md made the copy
@@ -890,6 +898,8 @@ if sc.pipes then
 				elseif f[1] == "X" and f[2] == "profile_get" then
 					partner_queue[#partner_queue + 1] = { at = clock + 0.05,
 						msg = "X|profile|" .. f[3] .. "|" .. (sim_profiles[f[3]] or "none") }
+				elseif f[1] == "n" and f[2] == "msg" then
+					partner_queue[#partner_queue + 1] = { at = clock + 2 * ONE_WAY, msg = "n|ack|" .. f[3] }
 				elseif f[1] == "p" and f[2] == "msg" then
 					partner_queue[#partner_queue + 1] = { at = clock + 2 * ONE_WAY, msg = "p|ack|" .. f[3] }
 				elseif f[1] == "q" and f[2] == "msg" then
@@ -1419,6 +1429,23 @@ local function deploy_script()
 	while deploy_steps[1] and clock >= deploy_steps[1][1] do table.remove(deploy_steps, 1)[2]() end
 end
 
+local knowledge_steps = {
+	{ 6, function()
+		blackboard["$x4coop_knowledge"] = { { "sector", SECTORS[500] }, { "station", "STN-5", "station_gen_factory_base_01_macro", SECTORS[500], 40 },
+			{ "faction", "boron" }, { "planet", "x" }, { "station", "STN-6", "bad macro!", SECTORS[500], 40 } }
+		queue("x4coop.knowledge")
+	end },
+	{ 10, function() pipe_reader("n|msg|0c01|sector|cluster_02_sector001_macro") end },
+	{ 10.3, function() pipe_reader("n|msg|0c01|sector|cluster_02_sector001_macro") end },
+	{ 11, function() pipe_reader("n|msg|0c02|station|PST-7|station_gen_factory_base_01_macro|" .. SECTORS[500] .. "|250") end },
+	{ 12, function() pipe_reader("n|msg|0c03|faction|terran") end },
+	{ 13, function() pipe_reader("n|msg|0c04|moon|x") end },
+}
+local function knowledge_script()
+	if not sc.knowledge_test or not pipe_reader then return end
+	while knowledge_steps[1] and clock >= knowledge_steps[1][1] do table.remove(knowledge_steps, 1)[2]() end
+end
+
 local function credit_script()
 	if not sc.credits_test or not pipe_reader then return end
 	while credit_steps[1] and clock >= credit_steps[1][1] do
@@ -1559,6 +1586,7 @@ while clock < sc.duration do
 	module_script()
 	refit_script()
 	deploy_script()
+	knowledge_script()
 	if sc.partner_restart_at and clock >= sc.partner_restart_at and partner_clock_offset == 1000 then
 		partner_clock_offset = -500
 		say("t=%.1f partner restarted their game (clock jumped back)", clock)
@@ -2107,6 +2135,22 @@ if sc.foot_test then
 		and tostring(foot_status_seen):find("on foot at Harbour Bar Station", 1, true) ~= nil
 		and said:find("is on foot at Harbour Bar Station", 1, true) ~= nil
 		and said:find("is back aboard a ship", 1, true) ~= nil
+end
+if sc.knowledge_test then
+	local sent = {}
+	for _, w in ipairs(pipe_writes) do
+		local id, rest = w:match("^n|msg|(%x+)|(.*)$")
+		if id then sent[id] = rest end
+	end
+	local list = {}
+	for _, rest in pairs(sent) do list[#list + 1] = rest end
+	table.sort(list)
+	local s = SECTORS[500]
+	say("knowledge: sent %s", table.concat(list, " / "))
+	say("knowledge: md %s", table.concat(knowledge_requests, " / "))
+	ok = ok and table.concat(list, " / ") == "faction|boron / sector|" .. s .. " / station|STN-5|station_gen_factory_base_01_macro|" .. s .. "|40"
+		and table.concat(knowledge_requests, " / ") == "sector:cluster_02_sector001_macro / station:LST-201:station_gen_factory_base_01_macro:"
+			.. s .. ":100 / faction:terran"
 end
 if sc.deploy_test then
 	local sent = {}

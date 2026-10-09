@@ -120,6 +120,7 @@ local config = {
 	missions = 1,             -- shared world: see your partner's missions as guidance in your mission list
 	equipment_sync = 1,       -- shared world: ship upgrades, and new station modules' equipment, in both worlds
 	deploy_sync = 1,          -- shared world: satellites, beacons, probes, mines and laser towers in both worlds
+	knowledge_sync = 1,       -- shared world: sectors and stations discovered, stations scanned, factions met
 	ghost_latency = 0.12,     -- s, simulated one-way latency in ghost mode
 	ghost_jitter = 0.03,      -- s, extra random delay per snapshot
 	ghost_loss = 0.0,         -- 0..1, fraction of snapshots dropped
@@ -377,6 +378,7 @@ local function reset()
 		modules = { sent = 0, applied = 0 },
 		equipment = { on = false, sent = 0, applied = 0 },
 		deploys = { on = false, sent = 0, applied = 0 },
+		knowledge = { on = false, sent = 0, applied = 0 },
 		rules = { next = 0, base = nil, shared = {}, alias = { loaded = false, into = {}, out = {} }, sent = 0, applied = 0 },
 		ssettings = { list = {}, idx = 0, next = 0, ids = {}, base = {}, settle = {}, out = {}, expect = {}, sent = 0, applied = 0 },
 		foot = { on = false, walking = false, last = nil, gone_left = 0, gone_at = -1e9, partner = nil, avatar_on = false },
@@ -754,6 +756,7 @@ local missions_receive  -- the partner's missions (m), defined in the fourth fea
 local module_changes_receive  -- station modules removed, wrecked or repaired (e), in the fourth block
 local refit_receive     -- the partner's ship upgrades (q), defined in the fourth feature block
 local deploys_receive   -- the partner's deployables (p), defined in the fourth feature block
+local knowledge_receive -- what the partner has discovered (n), defined in the fourth feature block
 local send_link
 
 local function net_send(msg)
@@ -871,6 +874,8 @@ on_pipe_message = function(msg)
 		if config.mode == "net" then refit_receive(f, now) end
 	elseif kind == "p" then
 		if config.mode == "net" then deploys_receive(f, now) end
+	elseif kind == "n" then
+		if config.mode == "net" then knowledge_receive(f, now) end
 	elseif kind == "M" then
 		local text = clean_text(f[3], 200)
 		if text ~= "" then
@@ -2546,6 +2551,7 @@ Feature.newships_tick = newships_tick
 Feature.on_ship_built = on_ship_built
 Feature.on_newship_made = on_newship_made
 Feature.reliable_send = reliable_send
+Feature.all_factions = all_factions
 Feature.reliable_receive = reliable_receive
 end
 
@@ -4304,6 +4310,65 @@ Feature.on_deploys = on_deploys
 Feature.on_deploy_made = on_deploy_made
 Feature.deploy_tick = deploy_tick
 
+-------------------------------------------------------------------------------
+-- Map knowledge (shared): sectors and stations either player discovers, how much of a station they reveal by scanning,
+-- and factions they meet become known in the partner's world too (md KnowledgeWatch, every 30 s; OnKnowledge).
+-- "n|msg|id|sector|macro", "n|msg|id|station|station|macro|sector|revealed %", "n|msg|id|faction|id", sent reliably.
+
+local function knowledge_enabled()
+	return config.mode == "net" and S.link.linked and config.knowledge_sync == 1
+end
+
+local function on_knowledge()
+	local list = S.player and GetNPCBlackboard(S.player, "$x4coop_knowledge")
+	if S.player then SetNPCBlackboard(S.player, "$x4coop_knowledge", nil) end
+	if type(list) ~= "table" or not knowledge_enabled() then return end
+	for _, v in ipairs(list) do
+		if type(v) ~= "table" then
+		elseif v[1] == "sector" and type(v[2]) == "string" and v[2]:match("^[%w_]+$") then
+			reliable_send("n", { "sector", v[2] })
+			S.knowledge.sent = S.knowledge.sent + 1
+		elseif v[1] == "station" and valid_world_ref(v[2], v[3], v[4]) and tonumber(v[5]) then
+			reliable_send("n", { "station", alias_out(v[2]), v[3], v[4], string.format("%d", tonumber(v[5])) })
+			S.knowledge.sent = S.knowledge.sent + 1
+		elseif v[1] == "faction" and type(v[2]) == "string" and v[2]:match("^[%w_]+$") then
+			reliable_send("n", { "faction", v[2] })
+			S.knowledge.sent = S.knowledge.sent + 1
+		end
+	end
+end
+
+knowledge_receive = function(f, now)
+	if not knowledge_enabled() then return end
+	reliable_receive("n", f, now, function(m)
+		local args
+		if m[4] == "sector" and type(m[5]) == "string" and m[5]:match("^[%w_]+$") then
+			args = { "sector", m[5] }
+		elseif m[4] == "station" and valid_world_ref(m[5], m[6], m[7]) and tonumber(m[8]) then
+			args = { "station", alias_in(m[5]), m[6], m[7], math.max(0, math.min(100, tonumber(m[8]))) }
+		elseif m[4] == "faction" and type(m[5]) == "string" and m[5]:match("^[%w_]+$") then
+			args = { "faction", m[5] }
+		end
+		if args then
+			request("knowledge", args)
+			S.knowledge.applied = S.knowledge.applied + 1
+		end
+	end)
+end
+
+local function knowledge_tick()
+	local on = knowledge_enabled()
+	if on ~= S.knowledge.on then
+		S.knowledge.on = on
+		local args = { on and 1 or 0 }
+		for _, id in ipairs(on and Feature.all_factions() or {}) do args[#args + 1] = id end
+		request("knowledge_sync", args)
+	end
+end
+
+Feature.on_knowledge = on_knowledge
+Feature.knowledge_tick = knowledge_tick
+
 Feature.commands_tick = commands_tick
 Feature.on_commands = on_commands
 Feature.on_command_missing = on_command_missing
@@ -4362,6 +4427,8 @@ local function status_text()
 			and string.format(" | station settings sent %d, applied %d", S.ssettings.sent, S.ssettings.applied) or "")
 		.. ((S.rules.sent + S.rules.applied > 0)
 			and string.format(" | trade rules sent %d, applied %d", S.rules.sent, S.rules.applied) or "")
+		.. ((S.knowledge.sent + S.knowledge.applied > 0)
+			and string.format(" | discoveries sent %d, applied %d", S.knowledge.sent, S.knowledge.applied) or "")
 		.. ((S.deploys.sent + S.deploys.applied > 0)
 			and string.format(" | deployables sent %d, applied %d", S.deploys.sent, S.deploys.applied) or "")
 		.. ((S.equipment.sent + S.equipment.applied > 0)
@@ -4618,6 +4685,7 @@ local function tick(now, dt)
 	Feature.missions_tick(now)
 	Feature.equipment_tick()
 	Feature.deploy_tick()
+	Feature.knowledge_tick()
 end
 
 local function on_update()
@@ -4662,6 +4730,7 @@ local function init()
 	RegisterEvent("x4coop.refit", Feature.on_refit)
 	RegisterEvent("x4coop.deploys", Feature.on_deploys)
 	RegisterEvent("x4coop.deploy_made", Feature.on_deploy_made)
+	RegisterEvent("x4coop.knowledge", Feature.on_knowledge)
 	RegisterEvent("x4coop.commands", Feature.on_commands)
 	RegisterEvent("x4coop.command_missing", Feature.on_command_missing)
 	RegisterEvent("x4coop.empire_trade", Feature.on_empire_trade)
