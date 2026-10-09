@@ -1488,7 +1488,8 @@
                 </do_if>
               </do_if>
             </do_if>
-            <!-- a build that was under way when the save was shared finishes in both worlds: don't add it twice -->
+            <!-- a build that was under way when the save was shared finishes in both worlds: don't add it twice;
+                 a module rebuilt where this world still has the wreck replaces the wreck -->
             <set_value name="$Already" exact="false"/>
             <do_if value="@$Container.isoperational and @macro.{$A.{10}}">
               <do_for_each name="$Existing" in="$Container.modules.all.list">
@@ -1498,6 +1499,15 @@
                   <set_value name="$DY" exact="$EP.y / 1m - $A.{12}"/>
                   <set_value name="$DZ" exact="$EP.z / 1m - $A.{13}"/>
                   <set_value name="$Already" exact="$DX * $DX + $DY * $DY + $DZ * $DZ lt 25"/>
+                  <do_if value="$Already and $Existing.iswreck">
+                    <set_value name="$Found" exact="$Existing"/>
+                    <set_value name="$Recreate" exact="[$Container, $A.{10}, $A.{11}, $A.{12}, $A.{13}, $A.{14}, $A.{15}, $A.{16}]"/>
+                    <include_actions ref="QueueModuleRemoval"/>
+                    <do_if value="not Root.$ModuleQuiet?">
+                      <set_value name="Root.$ModuleQuiet" exact="table[]"/>
+                    </do_if>
+                    <set_value name="Root.$ModuleQuiet.{$Container}" exact="player.age + 30s"/>
+                  </do_if>
                 </do_if>
               </do_for_each>
             </do_if>
@@ -1863,6 +1873,168 @@
           </actions>
         </cue>
 
+        <!--
+          Station modules removed, wrecked or repaired, and stations gone (shared faction). ModuleWatch looks at the
+          empire's stations, MODULES_PER_LOOK a second, and compares each module with the last look
+          (Root.$ModuleBase.{station} = [idcode, macro, sector macro, table[{module} = [state o/w/c, macro, x, y, z,
+          yaw, pitch, roll]]]). A module that is gone, went from working to wreck, or from wreck to working, and a
+          station that is gone, is reported: player.entity.$x4coop_module_changes gets [station idcode, station
+          macro, sector macro, change (gone/wreck/fixed/station_gone), state before, module macro, x, y, z, yaw,
+          pitch, roll], then 'x4coop.module_changes'. New modules are OnModulesBuilt's. OnModuleChange (param3: the
+          same) does it to our copy: the module of that macro nearest that spot (within 5 m). For a while after
+          that, the station's own changes aren't reported (Root.$ModuleQuiet), so they don't come back.
+          A module is removed by destroying it, and its wreck too (ModuleRemovals); a wreck being repaired is
+          removed and the module made again.
+        -->
+        <cue name="ModuleWatch" instantiate="true" checkinterval="1s">
+          <conditions>
+            <check_value value="@Root.$StationSyncOn == 1"/>
+          </conditions>
+          <actions>
+            <do_if value="not Root.$ModuleBase?">
+              <set_value name="Root.$ModuleBase" exact="table[]"/>
+              <set_value name="Root.$ModuleQuiet" exact="table[]"/>
+            </do_if>
+            <do_if value="not Root.$ModuleQueue? or Root.$ModuleQueue.count == 0">
+              <!-- a new round: first, stations that are gone since the last one -->
+              <do_for_each name="$S" in="Root.$ModuleBase.keys.list">
+                <do_if value="not $S.exists">
+                  <set_value name="$Base" exact="Root.$ModuleBase.{$S}"/>
+                  <do_if value="not player.entity.$x4coop_module_changes?">
+                    <set_value name="player.entity.$x4coop_module_changes" exact="[]"/>
+                  </do_if>
+                  <append_to_list name="player.entity.$x4coop_module_changes" exact="[$Base.{1}, $Base.{2}, $Base.{3}, 'station_gone', 'o', '', 0, 0, 0, 0, 0, 0]"/>
+                  <remove_value name="Root.$ModuleBase.{$S}"/>
+                  <raise_lua_event name="'x4coop.module_changes'"/>
+                </do_if>
+              </do_for_each>
+              <find_station name="Root.$ModuleQueue" owner="faction.player" space="player.galaxy" multiple="true"/>
+            </do_if>
+            <do_all exact="[3, Root.$ModuleQueue.count].min">
+              <set_value name="$S" exact="Root.$ModuleQueue.{1}"/>
+              <remove_value name="Root.$ModuleQueue.{1}"/>
+              <do_if value="@$S.exists and $S.isplayerowned and @$S.sector">
+                <set_value name="$Now" exact="table[]"/>
+                <do_for_each name="$Mod" in="$S.modules.all.list">
+                  <set_value name="$St" exact="'c'"/>
+                  <do_if value="$Mod.iswreck">
+                    <set_value name="$St" exact="'w'"/>
+                  </do_if>
+                  <do_elseif value="$Mod.isoperational">
+                    <set_value name="$St" exact="'o'"/>
+                  </do_elseif>
+                  <set_value name="$MP" exact="$Mod.relativeposition.{$S}"/>
+                  <set_value name="$MR" exact="$Mod.relativerotation.{$S}"/>
+                  <set_value name="$Now.{$Mod}" exact="[$St, $Mod.macro.id, $MP.x / 1m, $MP.y / 1m, $MP.z / 1m, $MR.yaw / 1deg, $MR.pitch / 1deg, $MR.roll / 1deg]"/>
+                </do_for_each>
+                <set_value name="$Old" exact="@Root.$ModuleBase.{$S}.{4}"/>
+                <do_if value="$Old and not (@Root.$ModuleQuiet.{$S} gt player.age)">
+                  <do_for_each name="$Mod" valuename="$E" in="$Old">
+                    <set_value name="$Change" exact="''"/>
+                    <do_if value="not $Now.{$Mod}?">
+                      <set_value name="$Change" exact="'gone'"/>
+                    </do_if>
+                    <do_elseif value="$E.{1} == 'o' and $Now.{$Mod}.{1} == 'w'">
+                      <set_value name="$Change" exact="'wreck'"/>
+                    </do_elseif>
+                    <do_elseif value="$E.{1} == 'w' and $Now.{$Mod}.{1} == 'o'">
+                      <set_value name="$Change" exact="'fixed'"/>
+                    </do_elseif>
+                    <do_if value="$Change != ''">
+                      <do_if value="not player.entity.$x4coop_module_changes?">
+                        <set_value name="player.entity.$x4coop_module_changes" exact="[]"/>
+                      </do_if>
+                      <append_to_list name="player.entity.$x4coop_module_changes" exact="[$S.idcode, $S.macro.id, $S.sector.macro.id, $Change, $E.{1}, $E.{2}, $E.{3}, $E.{4}, $E.{5}, $E.{6}, $E.{7}, $E.{8}]"/>
+                      <raise_lua_event name="'x4coop.module_changes'"/>
+                    </do_if>
+                  </do_for_each>
+                </do_if>
+                <set_value name="Root.$ModuleBase.{$S}" exact="[$S.idcode, $S.macro.id, $S.sector.macro.id, $Now]"/>
+              </do_if>
+            </do_all>
+          </actions>
+        </cue>
+
+        <cue name="OnModuleChange" instantiate="true">
+          <conditions>
+            <event_ui_triggered screen="'x4coop'" control="'module_change'"/>
+          </conditions>
+          <actions>
+            <set_value name="$M" exact="event.param3"/>
+            <set_value name="$A" exact="[$M.{1}, $M.{2}, $M.{3}]"/>
+            <include_actions ref="FindContainer"/>
+            <do_if value="@$Container.isplayerowned and $Container.isclass.station">
+              <do_if value="not Root.$ModuleQuiet?">
+                <set_value name="Root.$ModuleQuiet" exact="table[]"/>
+              </do_if>
+              <set_value name="Root.$ModuleQuiet.{$Container}" exact="player.age + 30s"/>
+              <do_if value="$M.{4} == 'station_gone'">
+                <do_for_each name="$Mod" in="$Container.modules.all.list">
+                  <destroy_object object="$Mod" explosion="false"/>
+                </do_for_each>
+                <destroy_object object="$Container" explosion="false"/>
+              </do_if>
+              <do_else>
+                <set_value name="$Found" exact="null"/>
+                <set_value name="$Best" exact="25"/>
+                <do_for_each name="$Mod" in="$Container.modules.all.list">
+                  <do_if value="$Mod.macro.id == $M.{6}">
+                    <set_value name="$MP" exact="$Mod.relativeposition.{$Container}"/>
+                    <set_value name="$DX" exact="$MP.x / 1m - $M.{7}"/>
+                    <set_value name="$DY" exact="$MP.y / 1m - $M.{8}"/>
+                    <set_value name="$DZ" exact="$MP.z / 1m - $M.{9}"/>
+                    <do_if value="$DX * $DX + $DY * $DY + $DZ * $DZ lt $Best">
+                      <set_value name="$Found" exact="$Mod"/>
+                      <set_value name="$Best" exact="$DX * $DX + $DY * $DY + $DZ * $DZ"/>
+                    </do_if>
+                  </do_if>
+                </do_for_each>
+                <do_if value="$Found and $M.{4} == 'wreck'">
+                  <do_if value="$Found.isoperational">
+                    <destroy_object object="$Found" explosion="true"/>
+                  </do_if>
+                </do_if>
+                <do_elseif value="$Found and $M.{4} == 'gone'">
+                  <!-- a wreck that went (cleared, or replaced by a rebuilt module) only takes a wreck with it here -->
+                  <do_if value="$M.{5} != 'w' or $Found.iswreck">
+                    <set_value name="$Recreate" exact="null"/>
+                    <include_actions ref="QueueModuleRemoval"/>
+                  </do_if>
+                </do_elseif>
+                <do_elseif value="$Found and $M.{4} == 'fixed' and $Found.iswreck">
+                  <set_value name="$Recreate" exact="[$Container, $M.{6}, $M.{7}, $M.{8}, $M.{9}, $M.{10}, $M.{11}, $M.{12}]"/>
+                  <include_actions ref="QueueModuleRemoval"/>
+                </do_elseif>
+              </do_else>
+            </do_if>
+          </actions>
+        </cue>
+
+        <cue name="ModuleRemovals" instantiate="true" checkinterval="2s">
+          <conditions>
+            <check_value value="@Root.$ModuleRemovals.count gt 0"/>
+          </conditions>
+          <actions>
+            <do_for_each name="$E" in="Root.$ModuleRemovals" reverse="true">
+              <do_if value="$E.{1}.exists and $E.{2} gt player.age">
+                <!-- destroying a module leaves a wreck: clear that too -->
+                <do_if value="$E.{1}.iswreck">
+                  <destroy_object object="$E.{1}" explosion="false"/>
+                </do_if>
+              </do_if>
+              <do_else>
+                <do_if value="not $E.{1}.exists and $E.{3} and @$E.{3}.{1}.isoperational and @macro.{$E.{3}.{2}}">
+                  <create_module name="$New" macro="macro.{$E.{3}.{2}}" object="$E.{3}.{1}">
+                    <position x="$E.{3}.{3}" y="$E.{3}.{4}" z="$E.{3}.{5}"/>
+                    <rotation yaw="$E.{3}.{6} * 1deg" pitch="$E.{3}.{7} * 1deg" roll="$E.{3}.{8} * 1deg"/>
+                  </create_module>
+                </do_if>
+                <remove_value name="Root.$ModuleRemovals.{loop.index}"/>
+              </do_else>
+            </do_for_each>
+          </actions>
+        </cue>
+
         <cue name="OnNpcClear" instantiate="true">
           <conditions>
             <event_ui_triggered screen="'x4coop'" control="'npc_clear'"/>
@@ -2023,6 +2195,17 @@
               <append_to_list name="player.entity.$x4coop_commands" exact="$Entry"/>
               <raise_lua_event name="'x4coop.commands'"/>
             </do_if>
+          </actions>
+        </library>
+
+        <library name="QueueModuleRemoval">
+          <actions>
+            <!-- $Found: the module; $Recreate: null, or [station, macro id, x, y, z, yaw, pitch, roll] to make again -->
+            <do_if value="not Root.$ModuleRemovals?">
+              <set_value name="Root.$ModuleRemovals" exact="[]"/>
+            </do_if>
+            <destroy_object object="$Found" explosion="false"/>
+            <append_to_list name="Root.$ModuleRemovals" exact="[$Found, player.age + 20s, $Recreate]"/>
           </actions>
         </library>
 

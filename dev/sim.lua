@@ -55,6 +55,8 @@ local SC = {
 	                 role = "join", own_world = "abc123", partner_world = "abc123", foot_test = true },
 	stations     = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
 	                 role = "join", own_world = "abc123", partner_world = "abc123", station_test = true },
+	modules      = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
+	                 role = "join", own_world = "abc123", partner_world = "abc123", modules_test = true },
 	missions     = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
 	                 role = "host", own_world = "abc123", partner_world = "abc123", missions_test = true },
 	profile      = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
@@ -377,6 +379,8 @@ behaviour_calls, set_param_calls = {}, {}
 foot_requests, foot_status_seen = {}, nil
 station_requests, station_made_id = {}, nil
 command_requests, command_misses = {}, {}
+module_requests = {}
+if sc.modules_test then blackboard["$x4coop_alias"] = "PST-7=LST-201" end
 if sc.commands_test then blackboard["$x4coop_alias"] = "PSH-9=LSH-9" end
 function settings_world()
 	if not (sc.settings_test or sc.accounts_test) then return end
@@ -683,6 +687,10 @@ function AddUITriggeredEvent(screen, control, args)
 			blackboard["$x4coop_command_missing"] = { args }
 			queue("x4coop.command_missing")
 		end
+	elseif control == "module_change" then
+		local parts = {}
+		for _, v in ipairs(args) do parts[#parts + 1] = tostring(v) end
+		module_requests[#module_requests + 1] = table.concat(parts, ":")
 	elseif control == "partner_mission" or control == "partner_missions_keep" then
 		local parts = { control }
 		for _, v in ipairs(args) do parts[#parts + 1] = tostring(v) end
@@ -846,6 +854,8 @@ if sc.pipes then
 				elseif f[1] == "X" and f[2] == "profile_get" then
 					partner_queue[#partner_queue + 1] = { at = clock + 0.05,
 						msg = "X|profile|" .. f[3] .. "|" .. (sim_profiles[f[3]] or "none") }
+				elseif f[1] == "e" and f[2] == "msg" then
+					partner_queue[#partner_queue + 1] = { at = clock + 2 * ONE_WAY, msg = "e|ack|" .. f[3] }
 				elseif f[1] == "m" and f[2] == "msg" then
 					partner_queue[#partner_queue + 1] = { at = clock + 2 * ONE_WAY, msg = "m|ack|" .. f[3] }
 				elseif f[1] == "a" and f[2] == "msg" then
@@ -1310,6 +1320,28 @@ local function mission_script()
 	while mission_steps[1] and clock >= mission_steps[1][1] do table.remove(mission_steps, 1)[2]() end
 end
 
+local MOD_M, ST_M = "prod_gen_energycells_macro", "station_gen_factory_base_01_macro"
+local module_steps = {
+	{ 6, function()  -- md saw: a module deconstructed, one wrecked, one repaired, a station gone, and junk
+		blackboard["$x4coop_module_changes"] = {
+			{ "STN-1", ST_M, SECTORS[500], "gone", "c", MOD_M, 0, 0, 300, 0, 0, 0 },
+			{ "STN-1", ST_M, SECTORS[500], "wreck", "o", MOD_M, 0, 0, -300, 90, 0, 0 },
+			{ "STN-1", ST_M, SECTORS[500], "fixed", "w", MOD_M, 0, 400, 0, 0, 0, 0 },
+			{ "STN-2", ST_M, SECTORS[500], "station_gone", "o", "", 0, 0, 0, 0, 0, 0 },
+			{ "STN-1", ST_M, SECTORS[500], "explode", "o", MOD_M, 0, 0, 0, 0, 0, 0 },
+			{ "STN-1", ST_M, SECTORS[500], "gone", "o", "bad macro!", 0, 0, 0, 0, 0, 0 } }
+		queue("x4coop.module_changes")
+	end },
+	{ 10, function() pipe_reader("e|msg|0e01|gone|o|PST-7|" .. ST_M .. "|" .. SECTORS[500] .. "|" .. MOD_M .. "|0.000|0.000|300.000|0.000|0.000|0.000") end },
+	{ 10.4, function() pipe_reader("e|msg|0e01|gone|o|PST-7|" .. ST_M .. "|" .. SECTORS[500] .. "|" .. MOD_M .. "|0.000|0.000|300.000|0.000|0.000|0.000") end },
+	{ 12, function() pipe_reader("e|msg|0e02|station_gone|o|STN-9|" .. ST_M .. "|" .. SECTORS[500] .. "||0|0|0|0|0|0") end },
+	{ 14, function() pipe_reader("e|msg|0e03|melt|o|STN-9|" .. ST_M .. "|" .. SECTORS[500] .. "||0|0|0|0|0|0") end },
+}
+local function module_script()
+	if not sc.modules_test or not pipe_reader then return end
+	while module_steps[1] and clock >= module_steps[1][1] do table.remove(module_steps, 1)[2]() end
+end
+
 local function credit_script()
 	if not sc.credits_test or not pipe_reader then return end
 	while credit_steps[1] and clock >= credit_steps[1][1] do
@@ -1447,6 +1479,7 @@ while clock < sc.duration do
 	account_script()
 	profile_script()
 	mission_script()
+	module_script()
 	if sc.partner_restart_at and clock >= sc.partner_restart_at and partner_clock_offset == 1000 then
 		partner_clock_offset = -500
 		say("t=%.1f partner restarted their game (clock jumped back)", clock)
@@ -1995,6 +2028,26 @@ if sc.foot_test then
 		and tostring(foot_status_seen):find("on foot at Harbour Bar Station", 1, true) ~= nil
 		and said:find("is on foot at Harbour Bar Station", 1, true) ~= nil
 		and said:find("is back aboard a ship", 1, true) ~= nil
+end
+if sc.modules_test then
+	local sent = {}
+	for _, w in ipairs(pipe_writes) do
+		local id, rest = w:match("^e|msg|(%x+)|(.*)$")
+		if id then sent[id] = rest end
+	end
+	local list = {}
+	for _, rest in pairs(sent) do list[#list + 1] = rest end
+	table.sort(list)
+	local s = SECTORS[500]
+	say("modules: sent %s", table.concat(list, " / "))
+	say("modules: md %s", table.concat(module_requests, " / "))
+	ok = ok and #list == 4
+		and list[1] == "fixed|w|STN-1|" .. ST_M .. "|" .. s .. "|" .. MOD_M .. "|0.000|400.000|0.000|0.000|0.000|0.000"
+		and list[2] == "gone|c|STN-1|" .. ST_M .. "|" .. s .. "|" .. MOD_M .. "|0.000|0.000|300.000|0.000|0.000|0.000"
+		and list[3] == "station_gone|o|STN-2|" .. ST_M .. "|" .. s .. "||0.000|0.000|0.000|0.000|0.000|0.000"
+		and list[4] == "wreck|o|STN-1|" .. ST_M .. "|" .. s .. "|" .. MOD_M .. "|0.000|0.000|-300.000|90.000|0.000|0.000"
+		and table.concat(module_requests, " / ") == "LST-201:" .. ST_M .. ":" .. s .. ":gone:o:" .. MOD_M .. ":0:0:300:0:0:0"
+			.. " / STN-9:" .. ST_M .. ":" .. s .. ":station_gone:o::0:0:0:0:0:0"
 end
 if sc.missions_test then
 	local sent = {}

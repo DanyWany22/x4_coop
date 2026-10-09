@@ -372,6 +372,7 @@ local function reset()
 		accounts = { pending = {}, next_balance = 0, sent = 0, applied = 0, matched = 0 },
 		profile = { asked = nil, retry = 0, restored = false, next = 0 },
 		missions = { next = 0, next_list = 0, own = {}, sent = {}, shown = 0 },
+		modules = { sent = 0, applied = 0 },
 		rules = { next = 0, base = nil, shared = {}, alias = { loaded = false, into = {}, out = {} }, sent = 0, applied = 0 },
 		ssettings = { list = {}, idx = 0, next = 0, ids = {}, base = {}, settle = {}, out = {}, expect = {}, sent = 0, applied = 0 },
 		foot = { on = false, walking = false, last = nil, gone_left = 0, gone_at = -1e9, partner = nil, avatar_on = false },
@@ -746,6 +747,7 @@ local rules_receive     -- the partner's trade rules (r), defined in the third f
 local accounts_receive  -- the partner's station account changes and balances (a), defined in the third block
 local profile_receive   -- our bridge's answer about the joiner's own wallet and inventory, in the fourth block
 local missions_receive  -- the partner's missions (m), defined in the fourth feature block
+local module_changes_receive  -- station modules removed, wrecked or repaired (e), in the fourth block
 local send_link
 
 local function net_send(msg)
@@ -857,6 +859,8 @@ on_pipe_message = function(msg)
 		if config.mode == "net" then accounts_receive(f, now) end
 	elseif kind == "m" then
 		if config.mode == "net" then missions_receive(f, now) end
+	elseif kind == "e" then
+		if config.mode == "net" then module_changes_receive(f, now) end
 	elseif kind == "M" then
 		local text = clean_text(f[3], 200)
 		if text ~= "" then
@@ -4110,6 +4114,56 @@ end
 
 Feature.missions_tick = missions_tick
 
+-------------------------------------------------------------------------------
+-- Station modules removed, wrecked or repaired, and stations gone (shared faction): md ModuleWatch looks at the
+-- empire's stations and reports a module that is gone (deconstructed, or a wreck cleared), wrecked or repaired, and a
+-- station that is gone; the partner's game does the same to its copy (md OnModuleChange: the module of that type
+-- nearest that spot). New modules are the Stations section's ("b").
+-- "e|msg|id|change|before|station|station macro|sector|module macro|x|y|z|yaw|pitch|roll" (change: gone, wreck,
+-- fixed or station_gone; before: the module's state before it, o working, w wreck, c being built), sent reliably.
+
+local MODULE_CHANGES = { gone = true, wreck = true, fixed = true, station_gone = true }
+local MODULE_STATES = { o = true, w = true, c = true }
+
+local function modules_enabled()
+	return config.mode == "net" and S.link.linked and config.station_sync == 1
+end
+
+local function on_module_changes()
+	local list = S.player and GetNPCBlackboard(S.player, "$x4coop_module_changes")
+	if S.player then SetNPCBlackboard(S.player, "$x4coop_module_changes", nil) end
+	if type(list) ~= "table" or not modules_enabled() then return end
+	for _, v in ipairs(list) do
+		local ok = type(v) == "table" and valid_world_ref(v[1], v[2], v[3]) and MODULE_CHANGES[v[4]] and MODULE_STATES[v[5]]
+			and type(v[6]) == "string" and (v[6] == "" or v[6]:match("^[%w_]+$"))
+		for i = 7, 12 do ok = ok and tonumber(v[i]) ~= nil end
+		if ok then
+			local fields = { v[4], v[5], alias_out(v[1]), v[2], v[3], v[6] }
+			for i = 7, 12 do fields[#fields + 1] = string.format("%.3f", tonumber(v[i])) end
+			reliable_send("e", fields)
+			S.modules.sent = S.modules.sent + 1
+		end
+	end
+end
+
+module_changes_receive = function(f, now)
+	if not modules_enabled() then return end
+	reliable_receive("e", f, now, function(m)
+		if not (MODULE_CHANGES[m[4]] and MODULE_STATES[m[5]] and valid_world_ref(m[6], m[7], m[8])
+			and type(m[9]) == "string" and (m[9] == "" or m[9]:match("^[%w_]+$"))) then return end
+		local args = { alias_in(m[6]), m[7], m[8], m[4], m[5], m[9] }
+		for i = 10, 15 do
+			local n = tonumber(m[i])
+			if n == nil then return end
+			args[#args + 1] = n
+		end
+		request("module_change", args)
+		S.modules.applied = S.modules.applied + 1
+	end)
+end
+
+Feature.on_module_changes = on_module_changes
+
 Feature.commands_tick = commands_tick
 Feature.on_commands = on_commands
 Feature.on_command_missing = on_command_missing
@@ -4168,6 +4222,8 @@ local function status_text()
 			and string.format(" | station settings sent %d, applied %d", S.ssettings.sent, S.ssettings.applied) or "")
 		.. ((S.rules.sent + S.rules.applied > 0)
 			and string.format(" | trade rules sent %d, applied %d", S.rules.sent, S.rules.applied) or "")
+		.. ((S.modules.sent + S.modules.applied > 0)
+			and string.format(" | station module changes sent %d, applied %d", S.modules.sent, S.modules.applied) or "")
 		.. ((S.accounts.sent + S.accounts.applied + S.accounts.matched > 0)
 			and string.format(" | station accounts sent %d, applied %d, balances matched %d", S.accounts.sent,
 				S.accounts.applied, S.accounts.matched) or "")
@@ -4456,6 +4512,7 @@ local function init()
 	RegisterEvent("x4coop.foot", Feature.on_foot)
 	RegisterEvent("x4coop.modules", Feature.on_modules)
 	RegisterEvent("x4coop.station_made", Feature.on_station_made)
+	RegisterEvent("x4coop.module_changes", Feature.on_module_changes)
 	RegisterEvent("x4coop.commands", Feature.on_commands)
 	RegisterEvent("x4coop.command_missing", Feature.on_command_missing)
 	RegisterEvent("x4coop.empire_trade", Feature.on_empire_trade)

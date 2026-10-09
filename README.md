@@ -261,8 +261,17 @@ are built in both worlds anyway, so they aren't copied. `/x4coop set new_ships 0
 other world too, at the same place on the same station, so a station grows the same way in both. A station
 the other world doesn't have yet, such as a new one either of you founds, is created there with its first
 finished module and paired with the original like a new ship. Builds already under way in the shared save
-finish in both worlds by themselves and aren't copied. Modules removed later aren't. `/x4coop set station_sync 0`
-turns it off.
+finish in both worlds by themselves and aren't copied.
+
+Changes to modules after that are copied too. Each game looks at the empire's stations, a few each second,
+so a change shows up in the other world within a minute or so even with dozens of stations:
+* a module that's deconstructed is removed
+* a module that's destroyed becomes a wreck
+* a wreck that's repaired is replaced by a working module
+* a station that's gone, destroyed or deconstructed, goes too
+
+The other game finds the module by type and place on the station. Any wreck left by removing it is cleared.
+`/x4coop set station_sync 0` turns all of this off.
 
 **Station settings:** what either of you sets on one of the empire's stations is set on it in the other world
 too:
@@ -502,7 +511,7 @@ game's own schema (`libraries/md.xsd`, `libraries/common.xsd`).
 
 Messages (one text line each): `S` snapshot (position, rotation, velocity, ship, hull, shield),
 `P`/`Q` ping, `M` chat, `L` world link, `K` kill, `D` hit, `F` firing at, `B` nearby ships (both
-ways), `E` station stock (host to joiner), `T` a joiner's trade, `V` relations, `U` research/blueprints/licences, `Z` SETA, `O` ownership, `Y` new ships, `G` orders, `J` behaviours and queues, `I` on foot, `b` station modules, `s` station settings, `c` assignments, `r` trade rules, `a` station accounts, `m` missions, `C` credits given; `R`/`W`/`N`/`X` are between a game and
+ways), `E` station stock (host to joiner), `T` a joiner's trade, `V` relations, `U` research/blueprints/licences, `Z` SETA, `O` ownership, `Y` new ships, `G` orders, `J` behaviours and queues, `I` on foot, `b` station modules, `s` station settings, `c` assignments, `r` trade rules, `a` station accounts, `m` missions, `e` station modules removed/wrecked/repaired, `C` credits given; `R`/`W`/`N`/`X` are between a game and
 its own bridge.
 
 Self-calibration: on first contact the proxy is nudged and read back (does `SetObjectSectorPos`
@@ -513,7 +522,7 @@ axis vectors. In-game results so far: degrees, YXZ+--.
 
 * Ships in the shared world match by ID code. Ships bought after the shared save are copied to the
   other world and paired with their copy. Stations built after it are copied module by module as each one
-  is finished, and their settings follow, but modules removed later don't.
+  is finished; modules removed, wrecked or repaired later, and stations that are gone, follow.
 * Proxies are player-owned (friendly, but listed in your property).
 * No highway or travel-drive visuals for the partner; they reappear when they leave the highway.
 * The bridge's encryption uses Python's standard library only: scrypt for the key, a SHAKE-256
@@ -541,7 +550,8 @@ python extensions/x4_coop/dev/run_tests.py [--quick]
   relations both ways (the host's followed; a joiner's change counted once and never undone in flight),
   on foot both ways (where you walk sent; status, join to the station, the stand-in walking in the same
   room and removed when back aboard), stations both ways (finished modules sent until confirmed, the
-  station created once, paired, later modules added to the copy), station settings both ways (a change sent
+  station created once, paired, later modules added to the copy; removed, wrecked, repaired modules and
+  stations gone sent once, translated, checked, applied once), station settings both ways (a change sent
   once, only what differs applied, never sent back; new wares from a module and copied stations ask for the
   original's; unknown trade rules and wares the station hasn't got yet left alone; a manager hired), assignments both ways
   (one change sent once, applied with the partner's codes translated, a ship not there yet tried again and
