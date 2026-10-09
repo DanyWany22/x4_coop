@@ -55,6 +55,8 @@ local SC = {
 	                 role = "join", own_world = "abc123", partner_world = "abc123", foot_test = true },
 	stations     = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
 	                 role = "join", own_world = "abc123", partner_world = "abc123", station_test = true },
+	commanders   = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 34, pipes = true,
+	                 role = "join", own_world = "abc123", partner_world = "abc123", commands_test = true },
 	station_settings = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30,
 	                 pipes = true, role = "host", own_world = "abc123", partner_world = "abc123", settings_test = true },
 	credits      = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
@@ -361,6 +363,8 @@ order_book = {
 behaviour_calls, set_param_calls = {}, {}
 foot_requests, foot_status_seen = {}, nil
 station_requests, station_made_id = {}, nil
+command_requests, command_misses = {}, {}
+if sc.commands_test then blackboard["$x4coop_alias"] = "PSH-9=LSH-9" end
 function settings_world()
 	if not sc.settings_test then return end
 	for i, def in ipairs({ { 601, "Energy One", { "silicon", "energycells" }, { "siliconwafers" } },
@@ -582,6 +586,17 @@ function AddUITriggeredEvent(screen, control, args)
 		end
 		blackboard["$x4coop_resolved"] = out
 		queue("x4coop.resolved")
+	elseif control == "command_sync" then
+		-- md only remembers the switch
+	elseif control == "command" then
+		command_requests[#command_requests + 1] = table.concat(args, ":")
+		-- NEW-1: its copy turns up after two tries; GNE-1 never does
+		local key = args[1]
+		command_misses[key] = (command_misses[key] or 0) + 1
+		if (key == "NEW-1" and command_misses[key] <= 2) or key == "GNE-1" then
+			blackboard["$x4coop_command_missing"] = { args }
+			queue("x4coop.command_missing")
+		end
 	elseif control == "station_manager" then
 		manager_requests[#manager_requests + 1] = tostring(args[1])
 	elseif control == "station_sync" then
@@ -723,6 +738,8 @@ if sc.pipes then
 					partner_queue[#partner_queue + 1] = { at = clock + 2 * ONE_WAY, msg = reply }
 				elseif f[1] == "M" then
 					partner_queue[#partner_queue + 1] = { at = clock + 2 * ONE_WAY, msg = "M|Echo|you said: " .. tostring(f[3]) }
+				elseif f[1] == "c" and f[2] == "msg" then
+					partner_queue[#partner_queue + 1] = { at = clock + 2 * ONE_WAY, msg = "c|ack|" .. f[3] }
 				elseif f[1] == "s" and f[2] == "msg" then
 					partner_queue[#partner_queue + 1] = { at = clock + 2 * ONE_WAY, msg = "s|ack|" .. f[3] }
 				elseif f[1] == "b" and f[2] == "msg" then
@@ -1088,6 +1105,32 @@ local function settings_script()
 	while settings_steps[1] and clock >= settings_steps[1][1] do table.remove(settings_steps, 1)[2]() end
 end
 
+local SHIP_M = "ship_arg_m_trans_container_01_a_macro"
+local STATION_M = "station_gen_factory_base_01_macro"
+local command_steps = {
+	{ 6, function()  -- one change, three events: the ship is assigned to trade for station STA-601
+		local e = { "SHP-501", SHIP_M, SECTORS[500], "STA-601", STATION_M, SECTORS[500], 0, 8 }
+		blackboard["$x4coop_commands"] = { e, e }
+		queue("x4coop.commands")
+	end },
+	{ 6.2, function()
+		blackboard["$x4coop_commands"] = { { "SHP-501", SHIP_M, SECTORS[500], "STA-601", STATION_M, SECTORS[500], 0, 8 } }
+		queue("x4coop.commands")
+	end },
+	{ 8, function()  -- and taken off it again
+		blackboard["$x4coop_commands"] = { { "SHP-501", SHIP_M, SECTORS[500], "", "", "", 0, 0 } }
+		queue("x4coop.commands")
+	end },
+	{ 10, function() pipe_reader("c|msg|00e1|PSH-9|" .. SHIP_M .. "|" .. SECTORS[500] .. "|STA-602|" .. STATION_M .. "|" .. SECTORS[500] .. "|2|7") end },
+	{ 10.5, function() pipe_reader("c|msg|00e1|PSH-9|" .. SHIP_M .. "|" .. SECTORS[500] .. "|STA-602|" .. STATION_M .. "|" .. SECTORS[500] .. "|2|7") end },
+	{ 12, function() pipe_reader("c|msg|00e2|NEW-1|" .. SHIP_M .. "|" .. SECTORS[500] .. "|PLY-100|ship_arg_s_fighter_01_a_macro|" .. SECTORS[500] .. "|1|1") end },
+	{ 14, function() pipe_reader("c|msg|00e3|GNE-1|" .. SHIP_M .. "|" .. SECTORS[500] .. "||||0|0") end },
+}
+local function command_script()
+	if not sc.commands_test or not pipe_reader then return end
+	while command_steps[1] and clock >= command_steps[1][1] do table.remove(command_steps, 1)[2]() end
+end
+
 local function credit_script()
 	if not sc.credits_test or not pipe_reader then return end
 	while credit_steps[1] and clock >= credit_steps[1][1] do
@@ -1220,6 +1263,7 @@ while clock < sc.duration do
 	foot_script()
 	station_script()
 	settings_script()
+	command_script()
 	if sc.partner_restart_at and clock >= sc.partner_restart_at and partner_clock_offset == 1000 then
 		partner_clock_offset = -500
 		say("t=%.1f partner restarted their game (clock jumped back)", clock)
@@ -1768,6 +1812,25 @@ if sc.foot_test then
 		and tostring(foot_status_seen):find("on foot at Harbour Bar Station", 1, true) ~= nil
 		and said:find("is on foot at Harbour Bar Station", 1, true) ~= nil
 		and said:find("is back aboard a ship", 1, true) ~= nil
+end
+if sc.commands_test then
+	local ours = {}
+	for _, w in ipairs(pipe_writes) do
+		local id, rest = w:match("^c|msg|(%x+)|(.*)$")
+		if id then ours[id] = rest end
+	end
+	local list = {}
+	for _, rest in pairs(ours) do list[#list + 1] = rest end
+	table.sort(list)
+	local per = {}
+	for _, r in ipairs(command_requests) do local k = r:match("^[^:]*"); per[k] = (per[k] or 0) + 1 end
+	say("commanders: sent %s", table.concat(list, " / "))
+	say("commanders: md requests %s", table.concat(command_requests, " / "):sub(1, 700))
+	ok = ok and #list == 2
+		and table.concat(list, "/") == "SHP-501|" .. SHIP_M .. "|" .. SECTORS[500] .. "|STA-601|" .. STATION_M .. "|" .. SECTORS[500] .. "|0|8/"
+			.. "SHP-501|" .. SHIP_M .. "|" .. SECTORS[500] .. "||||0|0"
+		and per["LSH-9"] == 1 and command_requests[1] == "LSH-9:" .. SHIP_M .. ":" .. SECTORS[500] .. ":STA-602:" .. STATION_M .. ":" .. SECTORS[500] .. ":2:7"
+		and per["NEW-1"] == 3 and per["GNE-1"] == 4
 end
 if sc.settings_test then
 	local sets, wants = {}, {}

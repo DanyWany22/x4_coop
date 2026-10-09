@@ -276,6 +276,12 @@ for the original's settings. Trade rules apply only if the other world has the s
 before the host shared the save work, and rules made after it don't yet. The station's account isn't copied,
 since each of you has your own wallet. `/x4coop set station_settings 0` turns it off.
 
+**Assignments:** a ship of the empire that one of you assigns to a station (to trade, mine or defend it),
+to another ship's fleet or to your own ship, or takes off one, is assigned the same way in the other world:
+the same commander, subordinate group and assignment. A ship the other world doesn't have yet, such as one
+just bought whose copy is still being made, is tried again a few times. `/x4coop set command_sync 0` turns
+it off.
+
 **Orders:** an order either of you gives one of the empire's ships from the map or the right-click menu
 (fly to, attack, dock, follow, protect, mine, explore, collect, salvage, withdraw and the rest) is
 carried out in the other world too. If it replaced the ship's whole queue there, it does here as well.
@@ -411,6 +417,7 @@ change a value that already exists; it can't create anything.
 | stations built after the shared save | `create_station`, `create_module` | yes |
 | station trade settings, limits, prices, rules, name | the station menus' own functions (Lua) | yes |
 | ownership (claims, boarding, captures) | `set_owner` | yes |
+| assignments to stations, fleets and the player | `set_object_commander`, `set_subordinate_group_assignment` | yes |
 | orders given from the menus | the UI's own `CreateOrder` (Lua) | yes |
 | default behaviours, order queues | `GetDefaultOrder`, `GetOrders`, `SetOrderParam`, `EnablePlannedDefaultOrder` | yes |
 | missions | `create_mission` | not yet |
@@ -472,7 +479,7 @@ game's own schema (`libraries/md.xsd`, `libraries/common.xsd`).
 
 Messages (one text line each): `S` snapshot (position, rotation, velocity, ship, hull, shield),
 `P`/`Q` ping, `M` chat, `L` world link, `K` kill, `D` hit, `F` firing at, `B` nearby ships (both
-ways), `E` station stock (host to joiner), `T` a joiner's trade, `V` relations, `U` research/blueprints/licences, `Z` SETA, `O` ownership, `Y` new ships, `G` orders, `J` behaviours and queues, `I` on foot, `b` station modules, `s` station settings, `C` credits given; `R`/`W`/`N`/`X` are between a game and
+ways), `E` station stock (host to joiner), `T` a joiner's trade, `V` relations, `U` research/blueprints/licences, `Z` SETA, `O` ownership, `Y` new ships, `G` orders, `J` behaviours and queues, `I` on foot, `b` station modules, `s` station settings, `c` assignments, `C` credits given; `R`/`W`/`N`/`X` are between a game and
 its own bridge.
 
 Self-calibration: on first contact the proxy is nudged and read back (does `SetObjectSectorPos`
@@ -514,7 +521,9 @@ python extensions/x4_coop/dev/run_tests.py [--quick]
   room and removed when back aboard), stations both ways (finished modules sent until confirmed, the
   station created once, paired, later modules added to the copy), station settings both ways (a change sent
   once, only what differs applied, never sent back; new wares from a module and copied stations ask for the
-  original's; unknown trade rules and wares the station hasn't got yet left alone; a manager hired), research, blueprints and licences both ways (sent until confirmed, added once), SETA both ways
+  original's; unknown trade rules and wares the station hasn't got yet left alone; a manager hired), assignments both ways
+  (one change sent once, applied with the partner's codes translated, a ship not there yet tried again and
+  then dropped), research, blueprints and licences both ways (sent until confirmed, added once), SETA both ways
   (followed; turned off for both when one side can't follow), ownership changes both ways (sent
   until confirmed, applied once), new ships both ways (made once, paired, kills and hits on them
   translated both ways), orders both ways (encoded, shared once, objects found again, queue cleared

@@ -1544,6 +1544,144 @@
           </actions>
         </cue>
 
+        <!--
+          Commanders (shared faction): an empire ship getting a commander (a ship or a station), changing assignment or
+          subordinate group, or losing its commander, does the same in the partner's world. CommandWatch.$Objects holds
+          the empire's ships and stations (refreshed every 20 s) and the cues under it report the subordinate's whole
+          state: player.entity.$x4coop_commands gets [ship idcode, ship macro, sector macro, commander idcode, macro,
+          sector macro ('' for none), subordinate group (0: none), assignment (index in CommandWatch.$Assignments, 0:
+          none)], then 'x4coop.commands'. OnCommand (param3: the same) applies it; a ship or commander it can't find is
+          reported back (player.entity.$x4coop_command_missing, 'x4coop.command_missing') for Lua to try again. What
+          OnCommand changes isn't reported back. 'command_sync' (param3: [1 or 0]) turns it on.
+        -->
+        <cue name="OnCommandSyncConfig" instantiate="true">
+          <conditions>
+            <event_ui_triggered screen="'x4coop'" control="'command_sync'"/>
+          </conditions>
+          <actions>
+            <set_value name="Root.$CommandSyncOn" exact="event.param3.{1}"/>
+            <do_if value="Root.$CommandSyncOn == 1">
+              <include_actions ref="RefreshCommandWatch"/>
+            </do_if>
+          </actions>
+        </cue>
+
+        <cue name="CommandWatch">
+          <actions>
+            <create_group groupname="$Objects"/>
+            <set_value name="$Assignments" exact="[assignment.defence, assignment.attack, assignment.interception, assignment.bombardment, assignment.positiondefence, assignment.assist, assignment.mining, assignment.trade, assignment.build, assignment.supplyfleet, assignment.tradeforbuildstorage, assignment.salvage, assignment.prospect, assignment.follow, assignment.police, assignment.watchdog]"/>
+            <set_value name="$Quiet" exact="table[]"/>
+          </actions>
+          <cues>
+            <cue name="CommandRefresh" instantiate="true" checkinterval="20s">
+              <conditions>
+                <check_value value="@Root.$CommandSyncOn == 1"/>
+              </conditions>
+              <actions>
+                <include_actions ref="RefreshCommandWatch"/>
+              </actions>
+            </cue>
+            <cue name="CommandSet" instantiate="true">
+              <conditions>
+                <event_object_commander_set group="CommandWatch.$Objects"/>
+                <check_value value="@Root.$CommandSyncOn == 1"/>
+              </conditions>
+              <actions>
+                <set_value name="$Ship" exact="event.object"/>
+                <include_actions ref="ReportCommand"/>
+              </actions>
+            </cue>
+            <cue name="CommandRemoved" instantiate="true">
+              <conditions>
+                <event_object_subordinate_removed group="CommandWatch.$Objects"/>
+                <check_value value="@Root.$CommandSyncOn == 1"/>
+              </conditions>
+              <actions>
+                <set_value name="$Ship" exact="event.param"/>
+                <include_actions ref="ReportCommand"/>
+              </actions>
+            </cue>
+            <cue name="CommandAssignment" instantiate="true">
+              <conditions>
+                <event_object_changed_assignment group="CommandWatch.$Objects"/>
+                <check_value value="@Root.$CommandSyncOn == 1"/>
+              </conditions>
+              <actions>
+                <set_value name="$Ship" exact="event.param"/>
+                <include_actions ref="ReportCommand"/>
+              </actions>
+            </cue>
+            <cue name="CommandAssignmentByPlayer" instantiate="true">
+              <conditions>
+                <event_object_changed_assignment object="player.entity"/>
+                <check_value value="@Root.$CommandSyncOn == 1"/>
+              </conditions>
+              <actions>
+                <set_value name="$Ship" exact="event.param"/>
+                <include_actions ref="ReportCommand"/>
+              </actions>
+            </cue>
+            <cue name="CommandGroup" instantiate="true">
+              <conditions>
+                <event_object_changed_subordinategroup group="CommandWatch.$Objects"/>
+                <check_value value="@Root.$CommandSyncOn == 1"/>
+              </conditions>
+              <actions>
+                <set_value name="$Ship" exact="event.param"/>
+                <include_actions ref="ReportCommand"/>
+              </actions>
+            </cue>
+          </cues>
+        </cue>
+
+        <cue name="OnCommand" instantiate="true">
+          <conditions>
+            <event_ui_triggered screen="'x4coop'" control="'command'"/>
+          </conditions>
+          <actions>
+            <set_value name="$Args" exact="event.param3"/>
+            <include_actions ref="FindWorldShip"/>
+            <set_value name="$Commander" exact="null"/>
+            <do_if value="$Args.{4} != ''">
+              <set_value name="$A" exact="[$Args.{4}, $Args.{5}, $Args.{6}]"/>
+              <include_actions ref="FindContainer"/>
+              <set_value name="$Commander" exact="$Container"/>
+            </do_if>
+            <do_if value="not $Target or ($Args.{4} != '' and not $Commander)">
+              <do_if value="not player.entity.$x4coop_command_missing?">
+                <set_value name="player.entity.$x4coop_command_missing" exact="[]"/>
+              </do_if>
+              <append_to_list name="player.entity.$x4coop_command_missing" exact="$Args"/>
+              <raise_lua_event name="'x4coop.command_missing'"/>
+            </do_if>
+            <do_elseif value="$Target.isplayerowned">
+              <set_value name="CommandWatch.$Quiet.{$Target}" exact="player.age + 3s"/>
+              <do_if value="not $Commander">
+                <do_if value="$Target.commander">
+                  <remove_object_commander object="$Target"/>
+                </do_if>
+              </do_if>
+              <do_elseif value="$Commander != $Target">
+                <set_value name="$Assignment" exact="@CommandWatch.$Assignments.{$Args.{8}}"/>
+                <do_if value="$Target.commander != $Commander or ($Args.{7} gt 0 and @$Target.subordinategroupid != $Args.{7})">
+                  <do_if value="$Args.{7} gt 0">
+                    <set_object_commander object="$Target" commander="$Commander" subordinategroupid="$Args.{7}"/>
+                  </do_if>
+                  <do_elseif value="$Assignment">
+                    <set_object_commander object="$Target" commander="$Commander" assignment="$Assignment"/>
+                  </do_elseif>
+                  <do_else>
+                    <set_object_commander object="$Target" commander="$Commander"/>
+                  </do_else>
+                </do_if>
+                <do_if value="$Assignment and $Args.{7} gt 0 and @$Target.assignment != $Assignment">
+                  <set_subordinate_group_assignment object="$Target" commander="$Commander" subordinategroupid="$Args.{7}" assignment="$Assignment"/>
+                </do_if>
+              </do_elseif>
+            </do_elseif>
+          </actions>
+        </cue>
+
         <cue name="OnNpcClear" instantiate="true">
           <conditions>
             <event_ui_triggered screen="'x4coop'" control="'npc_clear'"/>
@@ -1672,6 +1810,37 @@
                   <set_value name="$Container" exact="$Candidate"/>
                 </do_if>
               </do_for_each>
+            </do_if>
+          </actions>
+        </library>
+
+        <library name="RefreshCommandWatch">
+          <actions>
+            <find_ship name="$CommandShips" owner="faction.player" space="player.galaxy" multiple="true"/>
+            <find_station name="$CommandStations" owner="faction.player" space="player.galaxy" multiple="true"/>
+            <clear_group group="CommandWatch.$Objects"/>
+            <add_to_group groupname="CommandWatch.$Objects" list="$CommandShips"/>
+            <add_to_group groupname="CommandWatch.$Objects" list="$CommandStations"/>
+          </actions>
+        </library>
+
+        <library name="ReportCommand">
+          <actions>
+            <do_if value="@$Ship.isclass.ship and $Ship.isplayerowned and @$Ship.sector and not @Root.$AllProxies.indexof.{$Ship} and not (@CommandWatch.$Quiet.{$Ship} gt player.age)">
+              <set_value name="$Commander" exact="@$Ship.commander"/>
+              <set_value name="$Entry" exact="[$Ship.idcode, $Ship.macro.id, $Ship.sector.macro.id, '', '', '', 0, 0]"/>
+              <do_if value="@$Commander.sector and @$Commander.macro">
+                <set_value name="$Entry.{4}" exact="$Commander.idcode"/>
+                <set_value name="$Entry.{5}" exact="$Commander.macro.id"/>
+                <set_value name="$Entry.{6}" exact="$Commander.sector.macro.id"/>
+                <set_value name="$Entry.{7}" exact="if @$Ship.subordinategroupid then $Ship.subordinategroupid else 0"/>
+                <set_value name="$Entry.{8}" exact="if @$Ship.assignment then CommandWatch.$Assignments.indexof.{$Ship.assignment} else 0"/>
+              </do_if>
+              <do_if value="not player.entity.$x4coop_commands?">
+                <set_value name="player.entity.$x4coop_commands" exact="[]"/>
+              </do_if>
+              <append_to_list name="player.entity.$x4coop_commands" exact="$Entry"/>
+              <raise_lua_event name="'x4coop.commands'"/>
             </do_if>
           </actions>
         </library>

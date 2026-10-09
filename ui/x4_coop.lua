@@ -112,6 +112,7 @@ local config = {
 	foot_avatar = 1,          -- shared world: show a partner on foot as a crew member walking in the same room
 	station_sync = 1,         -- shared world: station modules either player builds appear in both worlds
 	station_settings = 1,     -- shared world: station trade settings, limits, prices, rules, workforce, name match
+	command_sync = 1,         -- shared world: ships assigned to stations, fleets or a player's ship in both worlds
 	ghost_latency = 0.12,     -- s, simulated one-way latency in ghost mode
 	ghost_jitter = 0.03,      -- s, extra random delay per snapshot
 	ghost_loss = 0.0,         -- 0..1, fraction of snapshots dropped
@@ -362,6 +363,7 @@ local function reset()
 		orders = { seq = 0, waiting = {}, applied = 0 },
 		behave = { dirty = {}, map_hooked = false, sent = 0, rebuilt = 0 },
 		stations_on = false,
+		commands = { on = false, last = {}, tries = {}, sent = 0, applied = 0 },
 		ssettings = { list = {}, idx = 0, next = 0, ids = {}, base = {}, settle = {}, out = {}, expect = {}, sent = 0, applied = 0 },
 		foot = { on = false, walking = false, last = nil, gone_left = 0, gone_at = -1e9, partner = nil, avatar_on = false },
 		alias = { loaded = false, into = {}, out = {} },
@@ -730,6 +732,7 @@ local foot_receive      -- the partner on foot (I), defined with the credits
 local partner_on_foot   -- "on foot at <station>" or nil, defined with the credits
 local stations_receive  -- the partner's new station modules (b), defined with the orders
 local settings_receive  -- the partner's station settings (s), defined in the third feature block
+local commands_receive  -- the partner's ship assignments (c), defined in the third feature block
 local send_link
 
 local function net_send(msg)
@@ -833,6 +836,8 @@ on_pipe_message = function(msg)
 		if config.mode == "net" then stations_receive(f, now) end
 	elseif kind == "s" then
 		if config.mode == "net" then settings_receive(f, now) end
+	elseif kind == "c" then
+		if config.mode == "net" then commands_receive(f, now) end
 	elseif kind == "M" then
 		local text = clean_text(f[3], 200)
 		if text ~= "" then
@@ -3396,6 +3401,95 @@ end
 
 Feature.settings_tick = settings_tick
 Feature.settings_want = settings_want
+
+-------------------------------------------------------------------------------
+-- Commanders (shared faction): an empire ship assigned to a station (trading, mining, defence ...), to a fleet, or
+-- to the player's ship, or taken off it, is in the partner's world too (md CommandWatch reports, OnCommand applies).
+-- "c|msg|id|ship|macro|sector|commander|macro|sector|group|assignment" (commander fields empty: none). A ship or
+-- commander the partner's world doesn't have yet (a ship just bought, still being copied) is tried again a few times.
+
+local COMMAND_RETRY = 3      -- s between tries for a ship or commander not (yet) in this world
+local COMMAND_TRIES = 4
+
+local function commands_enabled()
+	return config.mode == "net" and S.link.linked and config.command_sync == 1
+end
+
+local function on_commands()
+	local list = S.player and GetNPCBlackboard(S.player, "$x4coop_commands")
+	if S.player then SetNPCBlackboard(S.player, "$x4coop_commands", nil) end
+	if type(list) ~= "table" or not commands_enabled() then return end
+	local M, now = S.commands, getElapsedTime()
+	for _, v in ipairs(list) do
+		local has = type(v) == "table" and type(v[4]) == "string" and v[4] ~= ""
+		local group, assignment = type(v) == "table" and tonumber(v[7]), type(v) == "table" and tonumber(v[8])
+		if group and assignment and valid_world_ref(v[1], v[2], v[3]) and (not has or valid_world_ref(v[4], v[5], v[6])) then
+			local fields = { alias_out(v[1]), v[2], v[3], has and alias_out(v[4]) or "", has and v[5] or "", has and v[6] or "",
+				string.format("%d", group), string.format("%d", assignment) }
+			local state = table.concat(fields, "|")
+			local last = M.last[v[1]]
+			if not (last and last.state == state and now - last.at < 2) then  -- one change raises several events
+				M.last[v[1]] = { state = state, at = now }
+				reliable_send("c", fields)
+				M.sent = M.sent + 1
+			end
+		end
+	end
+end
+
+commands_receive = function(f, now)
+	if not commands_enabled() then return end
+	reliable_receive("c", f, now, function(m)
+		local has = m[7] ~= nil and m[7] ~= ""
+		local group, assignment = tonumber(m[10]), tonumber(m[11])
+		if not (group and assignment and group >= 0 and group <= 10 and assignment >= 0 and assignment <= 64
+			and valid_world_ref(m[4], m[5], m[6]) and (not has or valid_world_ref(m[7], m[8], m[9]))) then return end
+		local args = { alias_in(m[4]), m[5], m[6], has and alias_in(m[7]) or "", has and m[8] or "", has and m[9] or "",
+			math.floor(group), math.floor(assignment) }
+		local M = S.commands
+		M.applied = M.applied + 1
+		M.tries[args[1]] = { args = args, left = COMMAND_TRIES - 1, first = now }
+		request("command", args)
+	end)
+end
+
+local function on_command_missing()
+	local list = S.player and GetNPCBlackboard(S.player, "$x4coop_command_missing")
+	if S.player then SetNPCBlackboard(S.player, "$x4coop_command_missing", nil) end
+	if type(list) ~= "table" then return end
+	local M, now = S.commands, getElapsedTime()
+	for _, v in ipairs(list) do
+		local r = type(v) == "table" and M.tries[v[1]]
+		if r and r.left > 0 then
+			r.left, r.at = r.left - 1, now + COMMAND_RETRY
+		elseif r then
+			M.tries[v[1]] = nil
+			log("assignment for %s dropped: %s isn't in this world", tostring(v[1]),
+				(type(v[4]) == "string" and v[4] ~= "") and ("it or its commander " .. v[4]) or "it")
+		end
+	end
+end
+
+local function commands_tick(now)
+	local M = S.commands
+	local on = commands_enabled()
+	if on ~= M.on then
+		M.on = on
+		request("command_sync", { on and 1 or 0 })
+	end
+	for code, r in pairs(M.tries) do
+		if r.at and now >= r.at then
+			r.at = nil
+			request("command", r.args)
+		elseif not r.at and now - r.first > COMMAND_RETRY * (COMMAND_TRIES + 2) then
+			M.tries[code] = nil
+		end
+	end
+end
+
+Feature.commands_tick = commands_tick
+Feature.on_commands = on_commands
+Feature.on_command_missing = on_command_missing
 end
 
 -------------------------------------------------------------------------------
@@ -3448,7 +3542,9 @@ local function status_text()
 		.. " | economy " .. econ_summary()
 		.. (S.credits.empire_on and string.format(" | empire trades kept for the host: %d", S.credits.empire_trades) or "")
 		.. ((S.ssettings.sent + S.ssettings.applied > 0)
-			and string.format(" | station settings sent %d, applied %d", S.ssettings.sent, S.ssettings.applied) or "")) or "-"
+			and string.format(" | station settings sent %d, applied %d", S.ssettings.sent, S.ssettings.applied) or "")
+		.. ((S.commands.sent + S.commands.applied > 0)
+			and string.format(" | assignments sent %d, applied %d", S.commands.sent, S.commands.applied) or "")) or "-"
 	return string.format("mode %s | backend %s (%s) | proxy %s%s | partner %s %s, last snapshot %s | link %s | rotation %s %s",
 		config.mode, config.backend, S.backend or "untested", P.state, proxy_is_adopted() and " (their own ship)" or "",
 		R.name or "-", partner_whereabouts() or "", age, link,
@@ -3681,6 +3777,7 @@ local function tick(now, dt)
 	Feature.foot_tick(now)
 	Feature.stations_tick()
 	Feature.settings_tick(now)
+	Feature.commands_tick(now)
 end
 
 local function on_update()
@@ -3721,6 +3818,8 @@ local function init()
 	RegisterEvent("x4coop.foot", Feature.on_foot)
 	RegisterEvent("x4coop.modules", Feature.on_modules)
 	RegisterEvent("x4coop.station_made", Feature.on_station_made)
+	RegisterEvent("x4coop.commands", Feature.on_commands)
+	RegisterEvent("x4coop.command_missing", Feature.on_command_missing)
 	RegisterEvent("x4coop.empire_trade", Feature.on_empire_trade)
 	RegisterEvent("x4coop.npc_mirror", on_npc_mirror)
 
