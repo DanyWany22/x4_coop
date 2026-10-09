@@ -75,7 +75,7 @@ writing X4's memory is possible, on your credits; the mod never loads or calls i
 memory writes. The Lua calls functions by name through FFI:
 
 * **6 Windows functions** for the pipe (listed above).
-* **25 game functions.** Egosoft's own UI scripts call every one of them; one example file each, from
+* **26 game functions.** Egosoft's own UI scripts call every one of them; one example file each, from
   the game's archives:
 
 | function | used by vanilla, e.g. |
@@ -84,7 +84,7 @@ memory writes. The Lua calls functions by name through FFI:
 | `SetObjectSectorPos` | `ui/addons/ego_detailmonitor/menu_mapeditor.lua` |
 | `GetPlayerOccupiedShipID` | `ui/addons/ego_chatwindow/chatwindow.lua` |
 | `GetContextByClass`, `GetPlayerID` | `ui/addons/ego_detailmonitor/menu_docked.lua` |
-| `GetObjectIDCode` | `ui/addons/ego_detailmonitor/menu_diplomacy.lua` |
+| `GetObjectIDCode`, `GetCurrentGameTime` | `ui/addons/ego_detailmonitor/menu_diplomacy.lua` |
 | `GetPlayerName` | `ui/addons/ego_detailmonitor/menu_playerinfo.lua` |
 | `IsComponentOperational`, `CanTeleportPlayerTo`, `TeleportPlayerTo`, `IsSaveListLoadingComplete` | `ui/addons/ego_detailmonitor/menu_map.lua` |
 | `IsGamePaused` | `ui/addons/ego_helptext/helptext.lua` |
@@ -246,8 +246,16 @@ the joiner causes are sent to the host and counted there:
 equipment, docked at the same shipyard. Equipment may sit in different slots, because the game builds the
 copy's loadout from the list of equipment. The two copies have different ID codes, so each game remembers
 which of its ships is which of the partner's, and kills, hits, nearby sync and ownership reach the right
-ship. That pairing is kept in the save. `/x4coop set new_ships 0` turns it off. Stations either of you
-builds don't copy across yet.
+ship. That pairing is kept in the save. Ships that were already being built when the host shared the save
+are built in both worlds anyway, so they aren't copied. `/x4coop set new_ships 0` turns it off.
+
+**Stations:** when a build finishes modules of one of the empire's stations, those modules appear in the
+other world too, at the same place on the same station, so a station grows the same way in both. A station
+the other world doesn't have yet, such as a new one either of you founds, is created there with its first
+finished module and paired with the original like a new ship. Builds already under way in the shared save
+finish in both worlds by themselves and aren't copied. The station's settings (wares it trades,
+prices, manager, workforce) don't copy, and neither do modules removed later. `/x4coop set station_sync 0`
+turns it off.
 
 **Orders:** an order either of you gives one of the empire's ships from the map or the right-click menu
 (fly to, attack, dock, follow, protect, mine, explore, collect, salvage, withdraw and the rest) is
@@ -381,6 +389,7 @@ change a value that already exists; it can't create anything.
 | research, blueprints, licences | `add_research`, `add_blueprints`, `add_licence` | yes |
 | time acceleration (SETA) | `set_timewarp_factor`, `toggle_timewarp` | yes |
 | inventory items | `add_inventory` | not yet |
+| stations built after the shared save | `create_station`, `create_module` | yes |
 | ownership (claims, boarding, captures) | `set_owner` | yes |
 | orders given from the menus | the UI's own `CreateOrder` (Lua) | yes |
 | default behaviours, order queues | `GetDefaultOrder`, `GetOrders`, `SetOrderParam`, `EnablePlannedDefaultOrder` | yes |
@@ -443,7 +452,7 @@ game's own schema (`libraries/md.xsd`, `libraries/common.xsd`).
 
 Messages (one text line each): `S` snapshot (position, rotation, velocity, ship, hull, shield),
 `P`/`Q` ping, `M` chat, `L` world link, `K` kill, `D` hit, `F` firing at, `B` nearby ships (both
-ways), `E` station stock (host to joiner), `T` a joiner's trade, `V` relations, `U` research/blueprints/licences, `Z` SETA, `O` ownership, `Y` new ships, `G` orders, `J` behaviours and queues, `I` on foot, `C` credits given; `R`/`W`/`N`/`X` are between a game and
+ways), `E` station stock (host to joiner), `T` a joiner's trade, `V` relations, `U` research/blueprints/licences, `Z` SETA, `O` ownership, `Y` new ships, `G` orders, `J` behaviours and queues, `I` on foot, `b` station modules, `C` credits given; `R`/`W`/`N`/`X` are between a game and
 its own bridge.
 
 Self-calibration: on first contact the proxy is nudged and read back (does `SetObjectSectorPos`
@@ -453,7 +462,8 @@ axis vectors. In-game results so far: degrees, YXZ+--.
 ## Known limitations
 
 * Ships in the shared world match by ID code. Ships bought after the shared save are copied to the
-  other world and paired with their copy, but stations built after it exist only on the builder's side.
+  other world and paired with their copy. Stations built after it are copied module by module as each one
+  is finished, but not their settings or modules removed later.
 * Proxies are player-owned (friendly, but listed in your property).
 * No highway or travel-drive visuals for the partner; they reappear when they leave the highway.
 * The bridge's encryption uses Python's standard library only: scrypt for the key, a SHAKE-256
@@ -480,7 +490,8 @@ python extensions/x4_coop/dev/run_tests.py [--quick]
   deaths near either player reported from any sector (only by the game that rules that area),
   relations both ways (the host's followed; a joiner's change counted once and never undone in flight),
   on foot both ways (where you walk sent; status, join to the station, the stand-in walking in the same
-  room and removed when back aboard), research, blueprints and licences both ways (sent until confirmed, added once), SETA both ways
+  room and removed when back aboard), stations both ways (finished modules sent until confirmed, the
+  station created once, paired, later modules added to the copy), research, blueprints and licences both ways (sent until confirmed, added once), SETA both ways
   (followed; turned off for both when one side can't follow), ownership changes both ways (sent
   until confirmed, applied once), new ships both ways (made once, paired, kills and hits on them
   translated both ways), orders both ways (encoded, shared once, objects found again, queue cleared

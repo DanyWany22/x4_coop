@@ -53,6 +53,8 @@ local SC = {
 	                 role = "join", own_world = "abc123", partner_world = "abc123", behaviour_test = true },
 	onfoot       = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
 	                 role = "join", own_world = "abc123", partner_world = "abc123", foot_test = true },
+	stations     = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
+	                 role = "join", own_world = "abc123", partner_world = "abc123", station_test = true },
 	credits      = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
 	                 role = "join", own_world = "abc123", partner_world = "abc123", credits_test = true },
 	npc_apart_join = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
@@ -261,6 +263,7 @@ C = {
 	IsGamePaused = function() return false end,
 	CanTeleportPlayerTo = function(id) return objects[id] and "granted" or "no such ship" end,
 	GetSaveFolderPath = function() return "C:/fake/Egosoft/X4/1/save" end,
+	GetCurrentGameTime = function() return 86400 + clock end,
 	IsSaveListLoadingComplete = function() return true end,
 	GetNumAllFactions = function() return 4 end,
 	GetDefaultOrder = function(buf, ship)
@@ -342,6 +345,7 @@ order_book = {
 }
 behaviour_calls, set_param_calls = {}, {}
 foot_requests, foot_status_seen = {}, nil
+station_requests, station_made_id = {}, nil
 function GetOrderParams(ship, which)
 	local book = order_book[ship] or {}
 	local order = which == "default" and book.default or (book.queue or {})[which]
@@ -502,6 +506,21 @@ function AddUITriggeredEvent(screen, control, args)
 		end
 		blackboard["$x4coop_resolved"] = out
 		queue("x4coop.resolved")
+	elseif control == "station_sync" then
+		-- md only remembers the switch
+	elseif control == "station_module" then
+		station_requests[#station_requests + 1] = table.concat(args, ":")
+		local found
+		for id, o in pairs(objects) do if o.station and o.idcode == args[1] then found = id end end
+		if not found then
+			found = next_id
+			next_id = next_id + 1
+			objects[found] = { sector = sector_by_macro(args[3]) or 500, x = args[4], y = args[5], z = args[6], yaw = 0, pitch = 0, roll = 0,
+				macro = args[2], idcode = "LST-" .. found, station = true, cargo = {}, newship = true }
+			station_made_id = found
+			blackboard["$x4coop_newstations"] = { { args[17], found } }
+			queue("x4coop.station_made")
+		end
 	elseif control == "foot" then
 		foot_requests[#foot_requests + 1] = "foot:" .. tostring(args[1])
 	elseif control == "foot_avatar" then
@@ -625,6 +644,8 @@ if sc.pipes then
 					partner_queue[#partner_queue + 1] = { at = clock + 2 * ONE_WAY, msg = reply }
 				elseif f[1] == "M" then
 					partner_queue[#partner_queue + 1] = { at = clock + 2 * ONE_WAY, msg = "M|Echo|you said: " .. tostring(f[3]) }
+				elseif f[1] == "b" and f[2] == "msg" then
+					partner_queue[#partner_queue + 1] = { at = clock + 2 * ONE_WAY, msg = "b|ack|" .. f[3] }
 				elseif f[1] == "J" and f[2] == "msg" then
 					partner_queue[#partner_queue + 1] = { at = clock + 2 * ONE_WAY, msg = "J|ack|" .. f[3] }
 				elseif f[1] == "G" and f[2] == "msg" then
@@ -933,6 +954,25 @@ local function foot_script()
 	end
 end
 
+local station_steps = {
+	{ 10, function()  -- a build finished two modules of our new station
+		blackboard["$x4coop_modules"] = {
+			{ "STN-NEW", "station_gen_factory_base_01_macro", SECTORS[500], 1000, 0, 5000, 90, 0, 0, "prod_gen_energycells_macro", 0, 0, 0, 0, 0, 0 },
+			{ "STN-NEW", "station_gen_factory_base_01_macro", SECTORS[500], 1000, 0, 5000, 90, 0, 0, "storage_arg_m_container_01_macro", 0, -400, 0, 0, 0, 0 } }
+		queue("x4coop.modules")
+	end },
+	{ 12, function() pipe_reader("b|msg|00b1|PST-7|station_gen_factory_base_01_macro|" .. SECTORS[500]
+		.. "|2000.000|0.000|-3000.000|45.000|0.000|0.000|dockarea_arg_m_station_01_macro|0.000|0.000|300.000|0.000|0.000|0.000") end },
+	{ 13, function() pipe_reader("b|msg|00b1|PST-7|station_gen_factory_base_01_macro|" .. SECTORS[500]
+		.. "|2000.000|0.000|-3000.000|45.000|0.000|0.000|dockarea_arg_m_station_01_macro|0.000|0.000|300.000|0.000|0.000|0.000") end },
+	{ 16, function() pipe_reader("b|msg|00b2|PST-7|station_gen_factory_base_01_macro|" .. SECTORS[500]
+		.. "|2000.000|0.000|-3000.000|45.000|0.000|0.000|storage_arg_m_container_01_macro|0.000|-400.000|0.000|0.000|0.000|0.000") end },
+}
+local function station_script()
+	if not sc.station_test or not pipe_reader then return end
+	while station_steps[1] and clock >= station_steps[1][1] do table.remove(station_steps, 1)[2]() end
+end
+
 local function credit_script()
 	if not sc.credits_test or not pipe_reader then return end
 	while credit_steps[1] and clock >= credit_steps[1][1] do
@@ -1063,6 +1103,7 @@ while clock < sc.duration do
 	order_script()
 	behaviour_script()
 	foot_script()
+	station_script()
 	if sc.partner_restart_at and clock >= sc.partner_restart_at and partner_clock_offset == 1000 then
 		partner_clock_offset = -500
 		say("t=%.1f partner restarted their game (clock jumped back)", clock)
@@ -1338,7 +1379,7 @@ if sc.world_test then
 		ok = ok and guest ~= nil and #teleports == 1 and teleports[1] == guest and said:find("moved to the guest ship", 1, true) ~= nil
 		local share_sent = table.concat(pipe_writes, string.char(10)):find("X|share|C:/fake/Egosoft/X4/1/save|quicksave.xml.gz", 1, true) ~= nil
 		say("share: saves %s, share request sent %s", table.concat(game_saves, ","), tostring(share_sent))
-		ok = ok and #game_saves == 1 and game_saves[1] == "quicksave" and share_sent
+		ok = ok and #game_saves == 1 and game_saves[1] == "quicksave" and share_sent and type(blackboard["$x4coop_shared_at"]) == "number"
 		ok = ok and said:find("new co-op world", 1, true) ~= nil and type(blackboard["$x4coop_world"]) == "string"
 	end
 	if sc.world_test == "mismatch" then
@@ -1611,6 +1652,20 @@ if sc.foot_test then
 		and tostring(foot_status_seen):find("on foot at Harbour Bar Station", 1, true) ~= nil
 		and said:find("is on foot at Harbour Bar Station", 1, true) ~= nil
 		and said:find("is back aboard a ship", 1, true) ~= nil
+end
+if sc.station_test then
+	local ours = {}
+	for _, w in ipairs(pipe_writes) do if w:sub(1, 6) == "b|msg|" then ours[#ours + 1] = w end end
+	local made = station_made_id and ("LST-" .. station_made_id) or "?"
+	local reqs = table.concat(station_requests, " / ")
+	say("stations: our modules sent %d: %s", #ours, (ours[1] or ""):sub(1, 160))
+	say("stations: md station_module: %s; alias: %s", reqs:sub(1, 400), tostring(blackboard["$x4coop_alias"]))
+	local energy = (ours[1] or ""):find("prod_gen_energycells", 1, true) and ours[1] or ours[2] or ""
+	ok = ok and #ours == 2 and energy:find("|STN-NEW|station_gen_factory_base_01_macro|" .. SECTORS[500] .. "|1000.000|0.000|5000.000|90.000|0.000|0.000|prod_gen_energycells_macro|0.000|0.000|0.000|0.000|0.000|0.000", 1, true) ~= nil
+		and #station_requests == 2
+		and station_requests[1]:find("PST-7:station_gen_factory_base_01_macro:" .. SECTORS[500] .. ":2000:0:-3000:45:0:0:dockarea_arg_m_station_01_macro:0:0:300:0:0:0:PST-7", 1, true) == 1
+		and station_requests[2]:find(made .. ":", 1, true) == 1 and station_requests[2]:find("storage_arg_m_container_01_macro", 1, true) ~= nil
+		and tostring(blackboard["$x4coop_alias"]):find("PST-7=" .. made, 1, true) ~= nil
 end
 if sc.credits_test then
 	local acks = 0

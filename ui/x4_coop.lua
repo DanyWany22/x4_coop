@@ -53,6 +53,7 @@ ffi.cdef[[
 	UniverseID GetContextByClass(UniverseID componentid, const char* classname, bool includeself);
 	const char* GetObjectIDCode(UniverseID objectid);
 	const char* GetSaveFolderPath(void);
+	double GetCurrentGameTime(void);
 	bool IsSaveListLoadingComplete(void);
 	bool IsSaveValid(const char* filename);
 	void ReloadSaveList(void);
@@ -109,6 +110,7 @@ local config = {
 	behaviours = 1,           -- shared world: default behaviours and order queues edited in the map, in both worlds
 	foot = 1,                 -- on foot: tell the partner where you walk (station, room, position)
 	foot_avatar = 1,          -- shared world: show a partner on foot as a crew member walking in the same room
+	station_sync = 1,         -- shared world: station modules either player builds appear in both worlds
 	ghost_latency = 0.12,     -- s, simulated one-way latency in ghost mode
 	ghost_jitter = 0.03,      -- s, extra random delay per snapshot
 	ghost_loss = 0.0,         -- 0..1, fraction of snapshots dropped
@@ -358,6 +360,7 @@ local function reset()
 		newships_on = false,
 		orders = { seq = 0, waiting = {}, applied = 0 },
 		behave = { dirty = {}, map_hooked = false, sent = 0, rebuilt = 0 },
+		stations_on = false,
 		foot = { on = false, walking = false, last = nil, gone_left = 0, gone_at = -1e9, partner = nil, avatar_on = false },
 		alias = { loaded = false, into = {}, out = {} },
 		net = { api = nil, status = "idle", reading = false, connected = false, retry_at = 0, last_ping = -1e9, rtt = nil,
@@ -723,6 +726,7 @@ local orders_receive    -- orders given to empire ships (G), defined with the cr
 local behaviours_receive -- default behaviours and order queues (J), defined with the credits
 local foot_receive      -- the partner on foot (I), defined with the credits
 local partner_on_foot   -- "on foot at <station>" or nil, defined with the credits
+local stations_receive  -- the partner's new station modules (b), defined with the orders
 local send_link
 
 local function net_send(msg)
@@ -822,6 +826,8 @@ on_pipe_message = function(msg)
 		if config.mode == "net" then behaviours_receive(f, now) end
 	elseif kind == "I" then
 		if config.mode == "net" then foot_receive(f, now) end
+	elseif kind == "b" then
+		if config.mode == "net" then stations_receive(f, now) end
 	elseif kind == "M" then
 		local text = clean_text(f[3], 200)
 		if text ~= "" then
@@ -1546,7 +1552,7 @@ local function econ_send(dt)
 			table.sort(wares)
 			local ids = {}
 			for id in pairs(S.trades.listed[station.code] or {}) do ids[#ids + 1] = id end
-			net_send(string.format("E|stock|%d|%d|%d|%s|%s|%s", E.cycle, E.next - 1, n, station.code, table.concat(wares, ","),
+			net_send(string.format("E|stock|%d|%d|%d|%s|%s|%s", E.cycle, E.next - 1, n, alias_out(station.code), table.concat(wares, ","),
 				table.concat(ids, ",")))
 		end
 	end
@@ -1565,7 +1571,7 @@ end
 -- Joiner: one station from the host.
 local function econ_receive(f)
 	local E = S.econ
-	local cycle, code = tonumber(f[3]), f[6]
+	local cycle, code = tonumber(f[3]), alias_in(f[6])
 	if f[2] ~= "stock" or not cycle or not tonumber(f[4]) or not tonumber(f[5]) or not code or not code:match("^[%w%-]+$")
 		or #code > 16 then
 		return
@@ -1632,7 +1638,7 @@ local function on_joiner_trade()
 		if code ~= nil and type(ware) == "string" and ware:match("^[%w_]+$") and change and change ~= 0 then
 			T.seq = T.seq + 1
 			local tid = string.format("%06x%04x", math.floor(now * 1000) % 0x1000000, T.seq % 0x10000)
-			T.pending[tid] = { code = ffi.string(code), ware = ware, change = change, first = now, last = -1e9 }
+			T.pending[tid] = { code = ffi.string(code), ware = ware, change = change, first = now, last = -1e9 }  -- ours
 		end
 	end
 end
@@ -1650,7 +1656,7 @@ trades_receive = function(f, now)
 	local T, K = S.trades, S.link
 	if not (K.linked and econ_enabled()) then return end
 	if f[2] == "trade" and K.role == "host" then
-		local tid, code, ware, change = f[3], f[4], f[5], tonumber(f[6])
+		local tid, code, ware, change = f[3], f[4] and alias_in(f[4]), f[5], tonumber(f[6])
 		if not (tid and #tid <= 16 and tid:match("^%x+$") and code and #code <= 16 and code:match("^[%w%-]+$") and ware
 			and #ware <= 64 and ware:match("^[%w_]+$") and change and change ~= 0 and math.abs(change) <= 1e7) then
 			return
@@ -1678,7 +1684,7 @@ local function trades_tick(now)
 		elseif not t.acked and now - t.last >= TRADE_RETRY and S.net.connected then
 			t.last = now
 			T.sent = T.sent + 1
-			net_send(string.format("T|trade|%s|%s|%s|%d", tid, t.code, t.ware, t.change))
+			net_send(string.format("T|trade|%s|%s|%s|%d", tid, alias_out(t.code), t.ware, t.change))
 		end
 	end
 	for tid, t in pairs(T.applied) do  -- host: stop naming old trades
@@ -3002,11 +3008,77 @@ local function foot_tick(now)
 	if F.partner and now - F.partner.at > FOOT_STALE then foot_clear() end
 end
 
+-------------------------------------------------------------------------------
+-- Stations (shared faction): modules a build finishes on a player-owned station appear in the partner's world too,
+-- at the same place on the same station (md OnModulesBuilt reports, OnStationModule adds), so a station grows the
+-- same in both worlds; a station the partner's world doesn't have yet is created there first and paired (alias).
+-- "b|msg|id|station|station macro|sector|x|y|z|yaw|pitch|roll|module macro|x|y|z|yaw|pitch|roll", sent reliably.
+
+local function stations_enabled()
+	return config.mode == "net" and S.link.linked and config.station_sync == 1
+end
+
+local MODULE_NUMBERS = { 4, 5, 6, 7, 8, 9, 11, 12, 13, 14, 15, 16 }  -- fields of a module report that are numbers
+
+local function on_modules()
+	local list = S.player and GetNPCBlackboard(S.player, "$x4coop_modules")
+	if S.player then SetNPCBlackboard(S.player, "$x4coop_modules", nil) end
+	if type(list) ~= "table" or not stations_enabled() then return end
+	for _, v in ipairs(list) do
+		local ok = type(v) == "table" and valid_world_ref(v[1], v[2], v[3]) and type(v[10]) == "string" and v[10]:match("^[%w_]+$")
+		for _, i in ipairs(MODULE_NUMBERS) do ok = ok and tonumber(v[i]) ~= nil end
+		if ok then
+			local fields = { alias_out(v[1]), v[2], v[3] }
+			for i = 4, 16 do fields[#fields + 1] = i == 10 and v[10] or string.format("%.3f", tonumber(v[i])) end
+			reliable_send("b", fields)
+		end
+	end
+end
+
+stations_receive = function(f, now)
+	if not stations_enabled() then return end
+	reliable_receive("b", f, now, function(m)
+		if not (valid_world_ref(m[4], m[5], m[6]) and m[13] and m[13]:match("^[%w_]+$")) then return end
+		local args = { alias_in(m[4]), m[5], m[6] }
+		for i = 7, 19 do
+			local v = i == 13 and m[13] or tonumber(m[i])
+			if v == nil then return end
+			args[#args + 1] = v
+		end
+		args[#args + 1] = m[4]  -- the partner's code, to pair a station made here
+		request("station_module", args)
+	end)
+end
+
+local function on_station_made()
+	local list = S.player and GetNPCBlackboard(S.player, "$x4coop_newstations")
+	if S.player then SetNPCBlackboard(S.player, "$x4coop_newstations", nil) end
+	if type(list) ~= "table" then return end
+	for _, v in ipairs(list) do
+		local code = type(v) == "table" and v[2] and C.GetObjectIDCode(to64(v[2]))
+		if code ~= nil and type(v[1]) == "string" then
+			alias_add(v[1], ffi.string(code))
+			notify("your partner's new station (%s) is in your world now, as %s", v[1], ffi.string(code))
+		end
+	end
+end
+
+local function stations_tick()
+	local on = stations_enabled()
+	if on ~= S.stations_on then
+		S.stations_on = on
+		request("station_sync", { on and 1 or 0 })
+	end
+end
+
 Feature.orders_tick = orders_tick
 Feature.on_resolved = on_resolved
 Feature.behaviours_tick = behaviours_tick
 Feature.foot_tick = foot_tick
 Feature.on_foot = on_foot
+Feature.on_modules = on_modules
+Feature.on_station_made = on_station_made
+Feature.stations_tick = stations_tick
 end
 
 -------------------------------------------------------------------------------
@@ -3103,6 +3175,9 @@ local function share_save()
 		notify("no partner connected to send the save to")
 	else
 		world_id()  -- make sure the save carries the co-op world id
+		-- and the game time it was taken at: builds queued before it finish in both worlds by themselves, so md
+		-- doesn't copy the ships and station modules they make (OnShipBuilt, OnModulesBuilt)
+		SetNPCBlackboard(S.player, "$x4coop_shared_at", C.GetCurrentGameTime())
 		SaveGame("quicksave", "X4 Co-op shared world")
 		net_send("X|share|" .. ffi.string(C.GetSaveFolderPath()) .. "|quicksave.xml.gz")
 		notify("saving to your quicksave and sending it to your partner%s",
@@ -3285,6 +3360,7 @@ local function tick(now, dt)
 	Feature.orders_tick(now)
 	Feature.behaviours_tick(now)
 	Feature.foot_tick(now)
+	Feature.stations_tick()
 end
 
 local function on_update()
@@ -3323,6 +3399,8 @@ local function init()
 	RegisterEvent("x4coop.newship_made", Feature.on_newship_made)
 	RegisterEvent("x4coop.resolved", Feature.on_resolved)
 	RegisterEvent("x4coop.foot", Feature.on_foot)
+	RegisterEvent("x4coop.modules", Feature.on_modules)
+	RegisterEvent("x4coop.station_made", Feature.on_station_made)
 	RegisterEvent("x4coop.empire_trade", Feature.on_empire_trade)
 	RegisterEvent("x4coop.npc_mirror", on_npc_mirror)
 

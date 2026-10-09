@@ -1150,6 +1150,8 @@
           <conditions>
             <event_player_built_ship/>
             <check_value value="@Root.$NewShipsOn == 1 and @event.param.isclass.ship and @event.param.sector"/>
+            <!-- queued before the shared save: the partner's world builds this ship itself -->
+            <check_value value="not player.entity.$x4coop_shared_at? or not @event.param2.time or event.param2.time ge player.entity.$x4coop_shared_at * 1s"/>
           </conditions>
           <actions>
             <set_value name="$Ship" exact="event.param"/>
@@ -1401,6 +1403,117 @@
               </warp>
               <show_notification text="'Co-op: you are at ' + $Container.knownname + ', where your partner is on foot'" timeout="6s"/>
             </do_else>
+          </actions>
+        </cue>
+
+        <!--
+          Stations (shared faction): when a build finishes modules of a player-owned station, OnModulesBuilt reports
+          each: appended to player.entity.$x4coop_modules as [station idcode, station macro, sector macro, station x, y,
+          z (m), yaw, pitch, roll (deg) in its sector, module macro, module x, y, z (m), yaw, pitch, roll (deg) relative
+          to the station], then 'x4coop.modules'. OnStationModule (param3: the same, then the partner's station idcode)
+          adds the module to our copy of the station (unless it already has that module there), creating the station
+          first if we don't have it; a station made
+          here is reported (player.entity.$x4coop_newstations = [[partner idcode, station], ...], 'x4coop.station_made').
+          Modules made with create_module don't raise build events, so nothing comes back. 'station_sync' (param3:
+          [1 or 0]) turns reporting on.
+        -->
+        <cue name="OnStationSyncConfig" instantiate="true">
+          <conditions>
+            <event_ui_triggered screen="'x4coop'" control="'station_sync'"/>
+          </conditions>
+          <actions>
+            <set_value name="Root.$StationSyncOn" exact="event.param3.{1}"/>
+          </actions>
+        </cue>
+
+        <cue name="OnModulesBuilt" instantiate="true">
+          <conditions>
+            <event_player_build_finished_components/>
+            <check_value value="@Root.$StationSyncOn == 1 and event.param2"/>
+            <!-- queued before the shared save: the partner's world builds these modules itself -->
+            <check_value value="not player.entity.$x4coop_shared_at? or not @event.param3.time or event.param3.time ge player.entity.$x4coop_shared_at * 1s"/>
+          </conditions>
+          <actions>
+            <set_value name="$Reported" exact="0"/>
+            <do_for_each name="$Module" in="event.param2">
+              <set_value name="$Station" exact="@$Module.container"/>
+              <do_if value="@$Module.isclass.module and @$Station.isclass.station and $Station.isplayerowned and @$Station.sector">
+                <set_value name="$SP" exact="$Station.relativeposition.{$Station.sector}"/>
+                <set_value name="$SR" exact="$Station.relativerotation.{$Station.sector}"/>
+                <set_value name="$MP" exact="$Module.relativeposition.{$Station}"/>
+                <set_value name="$MR" exact="$Module.relativerotation.{$Station}"/>
+                <do_if value="not player.entity.$x4coop_modules?">
+                  <set_value name="player.entity.$x4coop_modules" exact="[]"/>
+                </do_if>
+                <append_to_list name="player.entity.$x4coop_modules" exact="[$Station.idcode, $Station.macro.id, $Station.sector.macro.id, $SP.x / 1m, $SP.y / 1m, $SP.z / 1m, $SR.yaw / 1deg, $SR.pitch / 1deg, $SR.roll / 1deg, $Module.macro.id, $MP.x / 1m, $MP.y / 1m, $MP.z / 1m, $MR.yaw / 1deg, $MR.pitch / 1deg, $MR.roll / 1deg]"/>
+                <set_value name="$Reported" exact="$Reported + 1"/>
+              </do_if>
+            </do_for_each>
+            <do_if value="$Reported gt 0">
+              <raise_lua_event name="'x4coop.modules'"/>
+            </do_if>
+          </actions>
+        </cue>
+
+        <cue name="OnStationModule" instantiate="true">
+          <conditions>
+            <event_ui_triggered screen="'x4coop'" control="'station_module'"/>
+          </conditions>
+          <actions>
+            <set_value name="$A" exact="event.param3"/>
+            <include_actions ref="FindContainer"/>
+            <!-- a second module can arrive before Lua has the pairing for a station made here: remember them -->
+            <do_if value="not Root.$StationsMade?">
+              <set_value name="Root.$StationsMade" exact="[]"/>
+            </do_if>
+            <do_for_each name="$Pair" in="Root.$StationsMade" reverse="true">
+              <do_if value="not $Pair.{2}.exists">
+                <remove_value name="Root.$StationsMade.{loop.index}"/>
+              </do_if>
+              <do_elseif value="not $Container and $Pair.{1} == $A.{17}">
+                <set_value name="$Container" exact="$Pair.{2}"/>
+              </do_elseif>
+            </do_for_each>
+            <set_value name="$Made" exact="false"/>
+            <do_if value="not $Container and @macro.{$A.{2}}.isclass.station">
+              <find_sector name="$StationSector" macro="@macro.{$A.{3}}"/>
+              <do_if value="$StationSector">
+                <create_station name="$Container" macro="macro.{$A.{2}}" sector="$StationSector" owner="faction.player" state="componentstate.operational">
+                  <position x="$A.{4}" y="$A.{5}" z="$A.{6}"/>
+                  <rotation yaw="$A.{7} * 1deg" pitch="$A.{8} * 1deg" roll="$A.{9} * 1deg"/>
+                </create_station>
+                <set_value name="$Made" exact="@$Container.isoperational"/>
+                <do_if value="$Made">
+                  <append_to_list name="Root.$StationsMade" exact="[$A.{17}, $Container]"/>
+                </do_if>
+              </do_if>
+            </do_if>
+            <!-- a build that was under way when the save was shared finishes in both worlds: don't add it twice -->
+            <set_value name="$Already" exact="false"/>
+            <do_if value="@$Container.isoperational and @macro.{$A.{10}}">
+              <do_for_each name="$Existing" in="$Container.modules.all.list">
+                <do_if value="not $Already and $Existing.macro == macro.{$A.{10}}">
+                  <set_value name="$EP" exact="$Existing.relativeposition.{$Container}"/>
+                  <set_value name="$DX" exact="$EP.x / 1m - $A.{11}"/>
+                  <set_value name="$DY" exact="$EP.y / 1m - $A.{12}"/>
+                  <set_value name="$DZ" exact="$EP.z / 1m - $A.{13}"/>
+                  <set_value name="$Already" exact="$DX * $DX + $DY * $DY + $DZ * $DZ lt 25"/>
+                </do_if>
+              </do_for_each>
+            </do_if>
+            <do_if value="@$Container.isoperational and @macro.{$A.{10}} and not $Already">
+              <create_module name="$Module" macro="macro.{$A.{10}}" object="$Container">
+                <position x="$A.{11}" y="$A.{12}" z="$A.{13}"/>
+                <rotation yaw="$A.{14} * 1deg" pitch="$A.{15} * 1deg" roll="$A.{16} * 1deg"/>
+              </create_module>
+            </do_if>
+            <do_if value="$Made">
+              <do_if value="not player.entity.$x4coop_newstations?">
+                <set_value name="player.entity.$x4coop_newstations" exact="[]"/>
+              </do_if>
+              <append_to_list name="player.entity.$x4coop_newstations" exact="[$A.{17}, $Container]"/>
+              <raise_lua_event name="'x4coop.station_made'"/>
+            </do_if>
           </actions>
         </cue>
 
