@@ -322,6 +322,11 @@ shows the ones that arrive from the partner. `/x4coop set unlocks 0` turns it of
   arrive in your partner's when their game confirms. If it hasn't confirmed within 30 seconds
   (`credit_timeout`), they come back to you.
 
+**Missions:** each of you sees the other's missions in your own mission list, named after your partner
+("Alex: Destroy the pirate"), as guidance to their current objective, so you can go and help. Kills and hits
+count in both worlds, so helping works, and the reward goes to whoever took the mission. A mission you both
+have from the shared save isn't shown twice. `/x4coop set missions 0` turns it off.
+
 **Your own wallet and inventory (joiner):** loading the host's save makes you the host's player, with the
 host's credits and inventory. So while you play, your game has your bridge keep your own credits and
 inventory in a small file next to your saves (`x4coop_profile_<world>.txt`, every 30 seconds), and puts
@@ -438,7 +443,7 @@ change a value that already exists; it can't create anything.
 | assignments to stations, fleets and the player | `set_object_commander`, `set_subordinate_group_assignment` | yes |
 | orders given from the menus | the UI's own `CreateOrder` (Lua) | yes |
 | default behaviours, order queues | `GetDefaultOrder`, `GetOrders`, `SetOrderParam`, `EnablePlannedDefaultOrder` | yes |
-| missions | `create_mission` | not yet |
+| the partner's missions, shown as guidance | `create_mission`, `remove_mission` | yes |
 
 All of these, except `SetObjectSectorPos`, `CreateOrder` and `shoot_at`, are Mission Director commands from the
 game's own schema (`libraries/md.xsd`, `libraries/common.xsd`).
@@ -497,7 +502,7 @@ game's own schema (`libraries/md.xsd`, `libraries/common.xsd`).
 
 Messages (one text line each): `S` snapshot (position, rotation, velocity, ship, hull, shield),
 `P`/`Q` ping, `M` chat, `L` world link, `K` kill, `D` hit, `F` firing at, `B` nearby ships (both
-ways), `E` station stock (host to joiner), `T` a joiner's trade, `V` relations, `U` research/blueprints/licences, `Z` SETA, `O` ownership, `Y` new ships, `G` orders, `J` behaviours and queues, `I` on foot, `b` station modules, `s` station settings, `c` assignments, `r` trade rules, `a` station accounts, `C` credits given; `R`/`W`/`N`/`X` are between a game and
+ways), `E` station stock (host to joiner), `T` a joiner's trade, `V` relations, `U` research/blueprints/licences, `Z` SETA, `O` ownership, `Y` new ships, `G` orders, `J` behaviours and queues, `I` on foot, `b` station modules, `s` station settings, `c` assignments, `r` trade rules, `a` station accounts, `m` missions, `C` credits given; `R`/`W`/`N`/`X` are between a game and
 its own bridge.
 
 Self-calibration: on first contact the proxy is nudged and read back (does `SetObjectSectorPos`
@@ -544,7 +549,8 @@ python extensions/x4_coop/dev/run_tests.py [--quick]
   apart; defaults moved; nothing sent back), station accounts both ways (one confirm sent as one change with
   its budgets, applied once with the originals, the host's balances followed by the joiner), the joiner's
   own wallet and inventory (asked for after loading, brought along the first time, kept every 30 s and before
-  loading), research, blueprints and licences both ways (sent until confirmed, added once), SETA both ways
+  loading), missions both ways (new, changed and ended ones sent once, alerts and guidance left out, ones
+  both worlds have not shown twice, ended ones dropped by the list), research, blueprints and licences both ways (sent until confirmed, added once), SETA both ways
   (followed; turned off for both when one side can't follow), ownership changes both ways (sent
   until confirmed, applied once), new ships both ways (made once, paired, kills and hits on them
   translated both ways), orders both ways (encoded, shared once, objects found again, queue cleared

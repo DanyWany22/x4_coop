@@ -1766,6 +1766,103 @@
           </actions>
         </cue>
 
+        <!--
+          Missions: the partner's missions, shown here as guidance to their current objective. OnPartnerMission
+          (param3: [mission id, name, description, objective, faction id, target idcode, macro, sector macro, x, y,
+          z], name '' to remove) replaces the one shown for that mission; each is an instance of PartnerMission, kept
+          in Root.$PartnerMissions by '$m' + id. OnPartnerMissionsKeep (param3: the ids the partner has) removes
+          the rest.
+        -->
+        <cue name="OnPartnerMission" instantiate="true">
+          <conditions>
+            <event_ui_triggered screen="'x4coop'" control="'partner_mission'"/>
+          </conditions>
+          <actions>
+            <set_value name="$M" exact="event.param3"/>
+            <do_if value="not Root.$PartnerMissions?">
+              <set_value name="Root.$PartnerMissions" exact="table[]"/>
+            </do_if>
+            <set_value name="$Key" exact="'$m' + $M.{1}"/>
+            <do_if value="Root.$PartnerMissions.{$Key}?">
+              <set_value name="$Cue" exact="Root.$PartnerMissions.{$Key}"/>
+              <remove_mission cue="$Cue"/>
+              <cancel_cue cue="$Cue"/>
+              <remove_value name="Root.$PartnerMissions.{$Key}"/>
+            </do_if>
+            <do_if value="$M.{2} != ''">
+              <set_value name="$Container" exact="null"/>
+              <do_if value="$M.{6} != ''">
+                <set_value name="$A" exact="[$M.{6}, $M.{7}, $M.{8}]"/>
+                <include_actions ref="FindContainer"/>
+              </do_if>
+              <set_value name="$Target" exact="$Container"/>
+              <set_value name="$Offset" exact="position.[0, 0, 0]"/>
+              <do_if value="not $Target and $M.{8} != ''">
+                <find_sector name="$Target" macro="@macro.{$M.{8}}"/>
+                <set_value name="$Offset" exact="position.[$M.{9}, $M.{10}, $M.{11}]"/>
+              </do_if>
+              <set_value name="$Faction" exact="if $M.{5} != '' and @faction.{$M.{5}} then faction.{$M.{5}} else faction.player"/>
+              <signal_cue_instantly cue="PartnerMission" param="[$Key, $M.{2}, $M.{3}, $M.{4}, $Faction, $Target, $Offset]"/>
+            </do_if>
+          </actions>
+        </cue>
+
+        <cue name="PartnerMission" instantiate="true">
+          <conditions>
+            <event_cue_signalled/>
+          </conditions>
+          <actions>
+            <set_value name="$P" exact="event.param"/>
+            <set_value name="Root.$PartnerMissions.{$P.{1}}" exact="this"/>
+            <do_if value="$P.{6}">
+              <create_mission cue="this" name="$P.{2}" description="$P.{3}" faction="$P.{5}" type="missiontype.guidance">
+                <briefing>
+                  <objective step="1" action="objective.custom" customaction="$P.{4}" object="$P.{6}" offset="$P.{7}"/>
+                </briefing>
+                <objective step="1" action="objective.custom" customaction="$P.{4}" object="$P.{6}" offset="$P.{7}"/>
+              </create_mission>
+            </do_if>
+            <do_else>
+              <create_mission cue="this" name="$P.{2}" description="$P.{3}" faction="$P.{5}" type="missiontype.guidance">
+                <briefing>
+                  <objective step="1" action="objective.custom" customaction="$P.{4}"/>
+                </briefing>
+                <objective step="1" action="objective.custom" customaction="$P.{4}"/>
+              </create_mission>
+            </do_else>
+          </actions>
+          <cues>
+            <!-- never signalled: keeps this instance, and so its mission, until OnPartnerMission cancels it -->
+            <cue name="PartnerMissionHold">
+              <conditions>
+                <event_cue_signalled/>
+              </conditions>
+            </cue>
+          </cues>
+        </cue>
+
+        <cue name="OnPartnerMissionsKeep" instantiate="true">
+          <conditions>
+            <event_ui_triggered screen="'x4coop'" control="'partner_missions_keep'"/>
+          </conditions>
+          <actions>
+            <do_if value="Root.$PartnerMissions?">
+              <set_value name="$Keep" exact="[]"/>
+              <do_for_each name="$Id" in="event.param3">
+                <append_to_list name="$Keep" exact="'$m' + $Id"/>
+              </do_for_each>
+              <do_for_each name="$Key" in="Root.$PartnerMissions.keys.list">
+                <do_if value="not $Keep.indexof.{$Key}">
+                  <set_value name="$Cue" exact="Root.$PartnerMissions.{$Key}"/>
+                  <remove_mission cue="$Cue"/>
+                  <cancel_cue cue="$Cue"/>
+                  <remove_value name="Root.$PartnerMissions.{$Key}"/>
+                </do_if>
+              </do_for_each>
+            </do_if>
+          </actions>
+        </cue>
+
         <cue name="OnNpcClear" instantiate="true">
           <conditions>
             <event_ui_triggered screen="'x4coop'" control="'npc_clear'"/>

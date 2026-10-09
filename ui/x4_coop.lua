@@ -117,6 +117,7 @@ local config = {
 	trade_rules = 1,          -- shared world: the empire's trade rules and their defaults match
 	station_accounts = 1,     -- shared world: money put into or taken from station accounts, budgets, balances
 	joiner_profile = 1,       -- shared world, joiner: keep your own credits and inventory between sessions
+	missions = 1,             -- shared world: see your partner's missions as guidance in your mission list
 	ghost_latency = 0.12,     -- s, simulated one-way latency in ghost mode
 	ghost_jitter = 0.03,      -- s, extra random delay per snapshot
 	ghost_loss = 0.0,         -- 0..1, fraction of snapshots dropped
@@ -370,6 +371,7 @@ local function reset()
 		commands = { on = false, last = {}, tries = {}, sent = 0, applied = 0 },
 		accounts = { pending = {}, next_balance = 0, sent = 0, applied = 0, matched = 0 },
 		profile = { asked = nil, retry = 0, restored = false, next = 0 },
+		missions = { next = 0, next_list = 0, own = {}, sent = {}, shown = 0 },
 		rules = { next = 0, base = nil, shared = {}, alias = { loaded = false, into = {}, out = {} }, sent = 0, applied = 0 },
 		ssettings = { list = {}, idx = 0, next = 0, ids = {}, base = {}, settle = {}, out = {}, expect = {}, sent = 0, applied = 0 },
 		foot = { on = false, walking = false, last = nil, gone_left = 0, gone_at = -1e9, partner = nil, avatar_on = false },
@@ -742,7 +744,8 @@ local settings_receive  -- the partner's station settings (s), defined in the th
 local commands_receive  -- the partner's ship assignments (c), defined in the third feature block
 local rules_receive     -- the partner's trade rules (r), defined in the third feature block
 local accounts_receive  -- the partner's station account changes and balances (a), defined in the third block
-local profile_receive   -- our bridge's answer about the joiner's own wallet and inventory, in the third block
+local profile_receive   -- our bridge's answer about the joiner's own wallet and inventory, in the fourth block
+local missions_receive  -- the partner's missions (m), defined in the fourth feature block
 local send_link
 
 local function net_send(msg)
@@ -852,6 +855,8 @@ on_pipe_message = function(msg)
 		if config.mode == "net" then rules_receive(f, now) end
 	elseif kind == "a" then
 		if config.mode == "net" then accounts_receive(f, now) end
+	elseif kind == "m" then
+		if config.mode == "net" then missions_receive(f, now) end
 	elseif kind == "M" then
 		local text = clean_text(f[3], 200)
 		if text ~= "" then
@@ -3963,6 +3968,148 @@ end
 Feature.profile_tick = profile_tick
 Feature.profile_before_load = profile_before_load
 
+-------------------------------------------------------------------------------
+-- Missions: each player sees the partner's missions in their own mission list, as guidance to the partner's current
+-- objective ("<partner>: <mission>", md PartnerMission), so they can go and help; kills and hits already count in
+-- both worlds, and rewards stay with whoever took the mission. A mission both worlds have (from the shared save:
+-- same id and name) isn't shown twice. Each game reads its missions every MISSION_POLL seconds and sends one that is
+-- new or changed, or gone; every MISSION_LIST seconds it sends the ids it has, so the partner drops ones that ended
+-- while the link was down.
+-- "m|msg|id|set|mission|name|description|objective|faction|target|macro|sector|x|y|z", "m|msg|id|end|mission",
+-- "m|list|mission,mission,...".
+
+local MISSION_POLL = 2       -- s between looks at our missions
+local MISSION_LIST = 30      -- s between lists of the missions we have
+local MISSION_SKIP = { upkeep = true, guidance = true, tutorial = true }  -- alerts, guidance (ours and mirrors)
+local missions_ffi           -- true once the objective functions are declared here
+
+local function declare_missions_ffi()
+	if missions_ffi == nil then
+		pcall(ffi.cdef, [[
+			typedef struct {
+				const char* objectiveText;
+				float timeout;
+				const char* progressname;
+				uint32_t curProgress;
+				uint32_t maxProgress;
+				size_t numTargets;
+			} MissionObjective2;
+		]])  -- the game's own menus declare the same, so this may already be done
+		missions_ffi = pcall(ffi.cdef, [[
+			MissionObjective2 GetMissionIDObjective2(uint64_t missionid);
+			UniverseID GetMissionIDObjectiveTarget(uint64_t missionid, size_t targetIndex);
+		]]) and pcall(function() assert(C.GetMissionIDObjective2 and C.GetMissionIDObjectiveTarget) end)
+	end
+	return missions_ffi
+end
+
+local function missions_enabled()
+	return config.mode == "net" and S.link.linked and config.missions == 1 and type(GetNumMissions) == "function"
+end
+
+-- where a mission points: { idcode or "", macro or "", sector macro, x, y, z } (codes as the partner reads them)
+local function mission_target(target)
+	local id = target and to64(target)
+	if not id or id == 0 or not IsValidComponent(id) then return nil end
+	local sector = C.IsComponentClass(id, "sector") and id or C.GetContextByClass(id, "sector", false)
+	local smacro = sector and sector ~= 0 and GetComponentData(sector, "macro")
+	if type(smacro) ~= "string" then return nil end
+	if sector == id then return { "", "", smacro, "0", "0", "0" } end
+	local code, macro, p = C.GetObjectIDCode(id), GetComponentData(id, "macro"), C.GetObjectPositionInSector(id)
+	code = code ~= nil and ffi.string(code) or ""
+	return { code ~= "" and alias_out(code) or "", type(macro) == "string" and macro or "", smacro,
+		string.format("%.0f", p.x), string.format("%.0f", p.y), string.format("%.0f", p.z) }
+end
+
+local function read_missions()
+	local list = {}
+	for i = 1, tonumber(GetNumMissions()) or 0 do
+		local id, name, description, _, _, maintype, _, subtypename, faction, _, _, _, _, _, _, _, _, _, _, _, associated =
+			GetMissionDetails(i)
+		local key = id and (tostring(to64(id)):gsub("ULL$", ""))
+		if key and key:match("^%d+$") and not MISSION_SKIP[maintype] then
+			local objective, target = "", nil
+			if declare_missions_ffi() then
+				local o = C.GetMissionIDObjective2(to64(id))
+				objective = ffi.string(o.objectiveText)
+				if tonumber(o.numTargets) > 0 then target = C.GetMissionIDObjectiveTarget(to64(id), 1) end
+			end
+			list[key] = { name = clean_text(name, 80), description = clean_text(description, 300),
+				objective = clean_text(objective ~= "" and objective or subtypename, 120),
+				faction = type(faction) == "string" and faction:match("^[%w_]*$") and faction or "",
+				target = mission_target(target) or mission_target(associated) or { "", "", "", "0", "0", "0" } }
+		end
+	end
+	return list
+end
+
+local function mission_state(ms)  -- what makes a mission worth sending again (not where a moving target is)
+	local t = ms.target
+	return table.concat({ ms.name, ms.description, ms.objective, ms.faction, t[1], t[2], t[3],
+		t[1] == "" and (t[4] .. "," .. t[5] .. "," .. t[6]) or "" }, "|")
+end
+
+missions_receive = function(f, now)
+	if not missions_enabled() then return end
+	local M = S.missions
+	if f[2] == "list" then  -- drop the partner's missions that are no longer theirs
+		local keep = {}
+		for key in tostring(f[3] or ""):gmatch("%d+") do keep[#keep + 1] = key end
+		request("partner_missions_keep", keep)
+		return
+	end
+	reliable_receive("m", f, now, function(m)
+		local key = m[5]
+		if not (key and key:match("^%d+$")) then return end
+		if m[4] == "end" then
+			request("partner_mission", { key, "" })
+		elseif m[4] == "set" then
+			local name = clean_text(m[6], 80)
+			local ours = M.own[key]
+			if name == "" or (ours and ours.name == name) then return end  -- the same mission is in our world too
+			local has = m[10] ~= nil and m[10] ~= ""
+			if has and not valid_world_ref(m[10], m[11], m[12]) then has = false end
+			local sector = type(m[12]) == "string" and m[12]:match("^[%w_]+$") and m[12] or ""
+			local x, y, z = tonumber(m[13]) or 0, tonumber(m[14]) or 0, tonumber(m[15]) or 0
+			request("partner_mission", { key, clean_text(S.rem.name or "partner", 32) .. ": " .. name, clean_text(m[7], 300),
+				clean_text(m[8], 120), tostring(m[9] or ""):match("^[%w_]*$") or "", has and alias_in(m[10]) or "",
+				has and m[11] or "", sector, x, y, z })
+			M.shown = M.shown + 1
+		end
+	end)
+end
+
+local function missions_tick(now)
+	local M = S.missions
+	if now < M.next or not missions_enabled() then return end
+	M.next = now + MISSION_POLL
+	local current = read_missions()
+	M.own = current
+	for key, ms in pairs(current) do
+		local state = mission_state(ms)
+		if M.sent[key] ~= state then
+			M.sent[key] = state
+			local t = ms.target
+			reliable_send("m", { "set", key, ms.name, ms.description, ms.objective, ms.faction, t[1], t[2], t[3], t[4], t[5], t[6] })
+		end
+	end
+	for key in pairs(M.sent) do
+		if not current[key] then
+			M.sent[key] = nil
+			reliable_send("m", { "end", key })
+		end
+	end
+	if now >= M.next_list then
+		M.next_list = now + MISSION_LIST
+		local keys = {}
+		for key in pairs(current) do keys[#keys + 1] = key end
+		table.sort(keys)
+		net_send("m|list|" .. table.concat(keys, ","))
+	end
+end
+
+Feature.missions_tick = missions_tick
+
 Feature.commands_tick = commands_tick
 Feature.on_commands = on_commands
 Feature.on_command_missing = on_command_missing
@@ -4268,6 +4415,7 @@ local function tick(now, dt)
 	Feature.commands_tick(now)
 	Feature.accounts_tick(now)
 	Feature.profile_tick(now)
+	Feature.missions_tick(now)
 end
 
 local function on_update()

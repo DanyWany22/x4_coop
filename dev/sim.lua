@@ -55,6 +55,8 @@ local SC = {
 	                 role = "join", own_world = "abc123", partner_world = "abc123", foot_test = true },
 	stations     = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
 	                 role = "join", own_world = "abc123", partner_world = "abc123", station_test = true },
+	missions     = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
+	                 role = "host", own_world = "abc123", partner_world = "abc123", missions_test = true },
 	profile      = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
 	                 role = "join", own_world = "abc123", partner_world = "abc123", profile_test = true },
 	accounts     = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
@@ -513,6 +515,27 @@ function SetMaxBudget(id, v) account_calls[#account_calls + 1] = "max:" .. id ..
 sim_inventory = { inv_host = { amount = 3 } }
 sim_profiles, profile_requests = sc.profile_test and { carry = "250000|inv_a=2,inv_b=5" } or {}, {}
 function GetPlayerInventory() return sim_inventory end
+-- the player's missions
+sim_missions = sc.missions_test and {
+	{ id = 5001, name = "Destroy the pirate", description = "A pirate | is\nraiding", maintype = "fight", faction = "argon",
+		objective = "Destroy TGT-701", target = 701 },
+	{ id = 5002, name = "Station needs a manager", description = "", maintype = "upkeep", faction = "" },
+	{ id = 5003, name = "Shared mission", description = "Bring wares", maintype = "deliver", subtypename = "Deliver",
+		faction = "teladi", objective = "" },
+} or {}
+mission_requests = {}
+function GetNumMissions() return #sim_missions end
+function GetMissionDetails(i)
+	local m = sim_missions[i]
+	return m.id, m.name, m.description, 1, "", m.maintype, "", m.subtypename or "", m.faction, 1000, "", nil, nil, nil, nil, nil,
+		-1, nil, true, false, nil, 0
+end
+local function sim_mission(id) for _, m in ipairs(sim_missions) do if m.id == id then return m end end end
+C.GetMissionIDObjective2 = function(id)
+	local m = sim_mission(id)
+	return { objectiveText = m and m.objective or "", numTargets = (m and m.target) and 1 or 0 }
+end
+C.GetMissionIDObjectiveTarget = function(id, i) local m = sim_mission(id); return (m and i == 1 and m.target) or 0 end
 function GetPlayerMoney() return player_money end
 function SetNPCBlackboard(_, key, v) blackboard[key] = v end
 function ExecuteDebugCommand(cmd, param) say("  ego command /%s %s", cmd, tostring(param)) end
@@ -660,6 +683,10 @@ function AddUITriggeredEvent(screen, control, args)
 			blackboard["$x4coop_command_missing"] = { args }
 			queue("x4coop.command_missing")
 		end
+	elseif control == "partner_mission" or control == "partner_missions_keep" then
+		local parts = { control }
+		for _, v in ipairs(args) do parts[#parts + 1] = tostring(v) end
+		mission_requests[#mission_requests + 1] = table.concat(parts, ":")
 	elseif control == "profile" then
 		local parts = { tostring(args[1]) }
 		player_money, sim_inventory = args[1], {}
@@ -819,6 +846,8 @@ if sc.pipes then
 				elseif f[1] == "X" and f[2] == "profile_get" then
 					partner_queue[#partner_queue + 1] = { at = clock + 0.05,
 						msg = "X|profile|" .. f[3] .. "|" .. (sim_profiles[f[3]] or "none") }
+				elseif f[1] == "m" and f[2] == "msg" then
+					partner_queue[#partner_queue + 1] = { at = clock + 2 * ONE_WAY, msg = "m|ack|" .. f[3] }
 				elseif f[1] == "a" and f[2] == "msg" then
 					partner_queue[#partner_queue + 1] = { at = clock + 2 * ONE_WAY, msg = "a|ack|" .. f[3] }
 				elseif f[1] == "r" and f[2] == "msg" then
@@ -1263,6 +1292,24 @@ local function profile_script()
 	while profile_steps[1] and clock >= profile_steps[1][1] do table.remove(profile_steps, 1)[2]() end
 end
 
+local mission_steps = {
+	{ 0, function()
+		objects[701] = { sector = 500, x = 100, y = 0, z = 200, yaw = 0, pitch = 0, roll = 0, macro = "ship_tel_m_frigate_01_a_macro",
+			idcode = "TGT-701", newship = true }
+	end },
+	{ 10, function() sim_missions[1].objective = "Destroy it now" end },
+	{ 12, function() table.remove(sim_missions, 1) end },
+	{ 14, function() pipe_reader("m|msg|0a01|set|7001|Their mission|Help me|Kill it|argon|PTG-1|ship_arg_s_fighter_01_a_macro|"
+		.. SECTORS[500] .. "|10|0|20") end },
+	{ 15, function() pipe_reader("m|msg|0a02|set|5003|Shared mission|Bring wares|Deliver|teladi||||0|0|0") end },
+	{ 16, function() pipe_reader("m|msg|0a03|end|7001") end },
+	{ 18, function() pipe_reader("m|list|7002,7003") end },
+}
+local function mission_script()
+	if not sc.missions_test or not pipe_reader then return end
+	while mission_steps[1] and clock >= mission_steps[1][1] do table.remove(mission_steps, 1)[2]() end
+end
+
 local function credit_script()
 	if not sc.credits_test or not pipe_reader then return end
 	while credit_steps[1] and clock >= credit_steps[1][1] do
@@ -1399,6 +1446,7 @@ while clock < sc.duration do
 	rule_script()
 	account_script()
 	profile_script()
+	mission_script()
 	if sc.partner_restart_at and clock >= sc.partner_restart_at and partner_clock_offset == 1000 then
 		partner_clock_offset = -500
 		say("t=%.1f partner restarted their game (clock jumped back)", clock)
@@ -1947,6 +1995,26 @@ if sc.foot_test then
 		and tostring(foot_status_seen):find("on foot at Harbour Bar Station", 1, true) ~= nil
 		and said:find("is on foot at Harbour Bar Station", 1, true) ~= nil
 		and said:find("is back aboard a ship", 1, true) ~= nil
+end
+if sc.missions_test then
+	local sent = {}
+	for _, w in ipairs(pipe_writes) do
+		local id, rest = w:match("^m|msg|(%x+)|(.*)$")
+		if id then sent[id] = rest end
+	end
+	local list = {}
+	for _, rest in pairs(sent) do list[#list + 1] = rest end
+	table.sort(list)
+	local s = SECTORS[500]
+	say("missions: sent %s", table.concat(list, " / "))
+	say("missions: md %s", table.concat(mission_requests, " / "))
+	ok = ok and table.concat(list, " / ") == "end|5001"
+			.. " / set|5001|Destroy the pirate|A pirate is raiding|Destroy TGT-701|argon|TGT-701|ship_tel_m_frigate_01_a_macro|" .. s .. "|100|0|200"
+			.. " / set|5001|Destroy the pirate|A pirate is raiding|Destroy it now|argon|TGT-701|ship_tel_m_frigate_01_a_macro|" .. s .. "|100|0|200"
+			.. " / set|5003|Shared mission|Bring wares|Deliver|teladi||||0|0|0"
+		and table.concat(mission_requests, " / ") == "partner_mission:7001:Echo: Their mission:Help me:Kill it:argon:PTG-1:"
+			.. "ship_arg_s_fighter_01_a_macro:" .. s .. ":10:0:20 / partner_mission:7001: / partner_missions_keep:7002:7003"
+		and table.concat(pipe_writes, "\n"):find("m|list|5001,5003", 1, true) ~= nil
 end
 if sc.profile_test then
 	local xs = {}
