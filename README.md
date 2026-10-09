@@ -322,6 +322,12 @@ shows the ones that arrive from the partner. `/x4coop set unlocks 0` turns it of
   arrive in your partner's when their game confirms. If it hasn't confirmed within 30 seconds
   (`credit_timeout`), they come back to you.
 
+**Your own wallet and inventory (joiner):** loading the host's save makes you the host's player, with the
+host's credits and inventory. So while you play, your game has your bridge keep your own credits and
+inventory in a small file next to your saves (`x4coop_profile_<world>.txt`, every 30 seconds), and puts
+them back each time you load the host's save. The first time you join a world, you keep what you had when
+you typed `/x4coop loadshared`. `/x4coop set joiner_profile 0` turns it off.
+
 Away from both of you, the two worlds still drift apart (far-away NPC ships, what they carry). The host's world
 is the real one: next session, share again.
 
@@ -424,7 +430,7 @@ change a value that already exists; it can't create anything.
 | faction relations | `set_faction_relation` | yes |
 | research, blueprints, licences | `add_research`, `add_blueprints`, `add_licence` | yes |
 | time acceleration (SETA) | `set_timewarp_factor`, `toggle_timewarp` | yes |
-| inventory items | `add_inventory` | not yet |
+| the joiner's own credits and inventory between sessions | `transfer_money`, `add_inventory`, `remove_inventory` | yes |
 | stations built after the shared save | `create_station`, `create_module` | yes |
 | station trade settings, limits, prices, rules, name | the station menus' own functions (Lua) | yes |
 | station accounts and budgets | `transfer_money`, the account menu's own functions (Lua) | yes |
@@ -536,7 +542,9 @@ python extensions/x4_coop/dev/run_tests.py [--quick]
   (one change sent once, applied with the partner's codes translated, a ship not there yet tried again and
   then dropped), trade rules both ways (made, edited and deleted; ids that clash between the worlds kept
   apart; defaults moved; nothing sent back), station accounts both ways (one confirm sent as one change with
-  its budgets, applied once with the originals, the host's balances followed by the joiner), research, blueprints and licences both ways (sent until confirmed, added once), SETA both ways
+  its budgets, applied once with the originals, the host's balances followed by the joiner), the joiner's
+  own wallet and inventory (asked for after loading, brought along the first time, kept every 30 s and before
+  loading), research, blueprints and licences both ways (sent until confirmed, added once), SETA both ways
   (followed; turned off for both when one side can't follow), ownership changes both ways (sent
   until confirmed, applied once), new ships both ways (made once, paired, kills and hits on them
   translated both ways), orders both ways (encoded, shared once, objects found again, queue cleared

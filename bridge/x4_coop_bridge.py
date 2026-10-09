@@ -34,6 +34,7 @@ import json
 import os
 import platform
 import queue
+import re
 import socket
 import subprocess
 import sys
@@ -482,10 +483,47 @@ class SaveShare:
         self.events.put(("game", "N|" + text))
         self.events.put(("log", text))
 
+    # --- the joiner's own wallet and inventory, kept next to the saves between sessions
+    PROFILE_KEY = re.compile(r"^[0-9a-z]{1,32}$")
+    PROFILE_CREDITS = re.compile(r"^-?\d{1,15}$")
+    PROFILE_WARES = re.compile(r"^[\w=,]{0,8000}$")
+
+    def _profile_path(self, key):
+        if not (self.save_dir and self.PROFILE_KEY.match(key)):
+            return None
+        return os.path.join(self.save_dir, "x4coop_profile_%s.txt" % key)
+
+    def _profile_put(self, key, credits, wares):
+        path = self._profile_path(key)
+        if not path or not self.PROFILE_CREDITS.match(credits) or not self.PROFILE_WARES.match(wares):
+            return
+        try:
+            with open(path + ".tmp", "w", encoding="utf-8") as fh:
+                fh.write(credits + "\n" + wares + "\n")
+            os.replace(path + ".tmp", path)
+        except OSError as e:
+            self.events.put(("log", "can't keep the joiner's wallet in %s: %s" % (path, e)))
+
+    def _profile_get(self, key):
+        path, reply = self._profile_path(key), "X|profile|%s|none" % key
+        if path and os.path.isfile(path):
+            try:
+                lines = open(path, encoding="utf-8").read().split("\n")
+                if len(lines) >= 2 and self.PROFILE_CREDITS.match(lines[0]) and self.PROFILE_WARES.match(lines[1]):
+                    reply = "X|profile|%s|%s|%s" % (key, lines[0], lines[1])
+            except OSError:
+                pass
+        if self.PROFILE_KEY.match(key):
+            self.events.put(("game", reply))
+
     # --- messages from our own game
     def from_game(self, f):
         if f[1] == "savedir" and len(f) >= 3 and os.path.isdir(f[2]):
             self.save_dir = f[2]
+        elif f[1] == "profile_put" and len(f) >= 5:
+            self._profile_put(f[2], f[3], f[4])
+        elif f[1] == "profile_get" and len(f) >= 3:
+            self._profile_get(f[2])
         elif f[1] == "share" and len(f) >= 4:
             name = os.path.basename(f[3])
             if not self.codec.key:

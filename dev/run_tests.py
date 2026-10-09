@@ -170,11 +170,32 @@ def test_bridge():
     ])
 
 
+def test_profile():
+    sys.path.insert(0, str(MOD / "bridge"))
+    import x4_coop_bridge as bridge
+    with tempfile.TemporaryDirectory() as tmp:
+        share = bridge.SaveShare(bridge.Codec("s3cret"), 0, "join")
+        share.from_game(["X", "savedir", tmp])
+        share.from_game(["X", "profile_get", "abc123"])
+        share.from_game(["X", "profile_put", "abc123", "250000", "inv_a=2,inv_b=5"])
+        share.from_game(["X", "profile_put", "../evil", "1", ""])
+        share.from_game(["X", "profile_get", "abc123"])
+        got = []
+        while not share.events.empty():
+            kind, msg = share.events.get()
+            if kind == "game":
+                got.append(msg)
+        check("bridge: keeps the joiner's own wallet and inventory between sessions",
+              got == ["X|profile|abc123|none", "X|profile|abc123|250000|inv_a=2,inv_b=5"]
+              and [p.name for p in Path(tmp).iterdir()] == ["x4coop_profile_abc123.txt"], " / ".join(got))
+
+
 def main():
     with tempfile.TemporaryDirectory() as tmp:
         test_md_schema(tmp)
         test_lua(tmp)
     test_codec()
+    test_profile()
     test_bridge()
     r = subprocess.run(PY + [str(DEV / "share_test.py"), str(free_udp_port())], capture_output=True, text=True, timeout=120)
     check("bridge: host's save reaches the joiner (backup kept)", r.returncode == 0,

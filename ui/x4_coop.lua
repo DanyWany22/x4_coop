@@ -34,6 +34,7 @@ Wire format (one message per pipe write, '|' separated, also used by the Python 
   M|name|text                                                          chat line
   R|role, L|world|role|ship|protocol, K|ship, D|ship|hull, F|ship       shared world (see that section)
   X|savedir|path, X|share|dir|file (game to its bridge), X|received|file (bridge to game)   save handoff
+  X|profile_put|world|credits|wares, X|profile_get|world, X|profile|world|credits|wares   joiner's own wallet
   B|t|sector|radius|complete|code,macro,owner,hull,x,y,z,yaw,pitch,roll,vx,vy,vz;...   host's nearby ships
   W|text, N|text                                                       bridge welcome / notice
 ]]
@@ -115,6 +116,7 @@ local config = {
 	command_sync = 1,         -- shared world: ships assigned to stations, fleets or a player's ship in both worlds
 	trade_rules = 1,          -- shared world: the empire's trade rules and their defaults match
 	station_accounts = 1,     -- shared world: money put into or taken from station accounts, budgets, balances
+	joiner_profile = 1,       -- shared world, joiner: keep your own credits and inventory between sessions
 	ghost_latency = 0.12,     -- s, simulated one-way latency in ghost mode
 	ghost_jitter = 0.03,      -- s, extra random delay per snapshot
 	ghost_loss = 0.0,         -- 0..1, fraction of snapshots dropped
@@ -367,6 +369,7 @@ local function reset()
 		stations_on = false,
 		commands = { on = false, last = {}, tries = {}, sent = 0, applied = 0 },
 		accounts = { pending = {}, next_balance = 0, sent = 0, applied = 0, matched = 0 },
+		profile = { asked = nil, retry = 0, restored = false, next = 0 },
 		rules = { next = 0, base = nil, shared = {}, alias = { loaded = false, into = {}, out = {} }, sent = 0, applied = 0 },
 		ssettings = { list = {}, idx = 0, next = 0, ids = {}, base = {}, settle = {}, out = {}, expect = {}, sent = 0, applied = 0 },
 		foot = { on = false, walking = false, last = nil, gone_left = 0, gone_at = -1e9, partner = nil, avatar_on = false },
@@ -739,6 +742,7 @@ local settings_receive  -- the partner's station settings (s), defined in the th
 local commands_receive  -- the partner's ship assignments (c), defined in the third feature block
 local rules_receive     -- the partner's trade rules (r), defined in the third feature block
 local accounts_receive  -- the partner's station account changes and balances (a), defined in the third block
+local profile_receive   -- our bridge's answer about the joiner's own wallet and inventory, in the third block
 local send_link
 
 local function net_send(msg)
@@ -858,6 +862,8 @@ on_pipe_message = function(msg)
 			S.net.shared_save = true
 			C.ReloadSaveList()
 			notify("the host's save arrived (it is now your quicksave): /x4coop loadshared to load it")
+		elseif f[2] == "profile" then
+			profile_receive(f)
 		end
 	elseif kind == "N" or kind == "W" then
 		if kind == "W" then
@@ -3104,7 +3110,7 @@ Feature.on_station_made = on_station_made
 Feature.stations_tick = stations_tick
 end
 
--- Trade rules, station settings and assignments: a third block, so neither earlier block's helpers count against it.
+-- Trade rules and station settings: a third block, so neither earlier block's helpers count against it.
 do
 local reliable_send, reliable_receive = Feature.reliable_send, Feature.reliable_receive
 
@@ -3649,6 +3655,13 @@ end
 
 Feature.settings_tick = settings_tick
 Feature.settings_want = settings_want
+Feature.find_station = find_station
+end
+
+-- Assignments, station accounts and the joiner's own wallet: a fourth block, for the same reason.
+do
+local reliable_send, reliable_receive = Feature.reliable_send, Feature.reliable_receive
+local find_station = Feature.find_station
 
 -------------------------------------------------------------------------------
 -- Commanders (shared faction): an empire ship assigned to a station (trading, mining, defence ...), to a fleet, or
@@ -3870,6 +3883,86 @@ end
 
 Feature.accounts_tick = accounts_tick
 
+-------------------------------------------------------------------------------
+-- The joiner's own wallet and inventory. Loading the host's save makes the joiner the host's player, with the
+-- host's credits and inventory, and whatever the joiner earns lives only in their copy of the world. So the
+-- joiner's game keeps the joiner's own with its bridge, which writes them to a small file next to the saves
+-- ("X|profile_put|<world>|credits|ware=amount,...", every PROFILE_PERIOD seconds while linked), and puts them back
+-- after loading the shared save ("X|profile_get|<world>", answered "X|profile|<world>|credits|wares" or
+-- "X|profile|<world>|none"; md OnProfile sets them). The first time someone joins a world they keep what they had
+-- when they typed /x4coop loadshared ("carry").
+
+local PROFILE_PERIOD = 30    -- s between saves of the joiner's wallet and inventory
+local PROFILE_ASK = 10       -- s before asking the bridge again
+
+local function profile_enabled()
+	return config.mode == "net" and S.link.linked and S.link.role == "join" and config.joiner_profile == 1
+end
+
+local function profile_now()  -- our player's credits and "ware=amount,..." right now
+	local wares = {}
+	for ware, entry in pairs(GetPlayerInventory() or {}) do
+		local n = type(entry) == "table" and tonumber(entry.amount)
+		if n and n > 0 and type(ware) == "string" and ware:match("^[%w_]+$") then
+			wares[#wares + 1] = ware .. "=" .. string.format("%d", n)
+		end
+	end
+	table.sort(wares)
+	return string.format("%.0f", tonumber(GetPlayerMoney()) or 0), table.concat(wares, ",")
+end
+
+local function profile_put(key)
+	local credits, wares = profile_now()
+	net_send("X|profile_put|" .. key .. "|" .. credits .. "|" .. wares)
+end
+
+profile_receive = function(f)
+	local P = S.profile
+	if not (P.asked and f[3] == P.asked) then return end
+	if f[4] == "none" or not tonumber(f[4]) then
+		if f[3] ~= "carry" then  -- never joined this world: what they had before loading it
+			P.asked, P.retry = "carry", getElapsedTime() + PROFILE_ASK
+			net_send("X|profile_get|carry")
+		else
+			P.asked, P.restored = nil, true
+			notify("no credits or inventory of your own kept yet: you have the host's from the save")
+		end
+		return
+	end
+	local args = { tonumber(f[4]) }
+	for ware, n in tostring(f[5] or ""):gmatch("([%w_]+)=(%d+)") do args[#args + 1] = { ware, tonumber(n) } end
+	request("profile", args)
+	P.asked, P.restored, P.next = nil, true, 0  -- and keep them under this world straight away
+	notify("your own credits (%s Cr) and inventory (%d kinds) are back", f[4], #args - 1)
+end
+
+local function profile_tick(now)
+	local P = S.profile
+	if not profile_enabled() then return end
+	local world = world_id()
+	if not world then return end
+	if not P.restored then
+		if now >= P.retry then
+			P.asked = P.asked or world
+			P.retry = now + PROFILE_ASK
+			net_send("X|profile_get|" .. P.asked)
+		end
+	elseif now >= P.next then
+		P.next = now + PROFILE_PERIOD
+		profile_put(world)
+	end
+end
+
+-- /x4coop loadshared: keep what to bring the first time, and the latest of this world's
+local function profile_before_load()
+	if config.mode ~= "net" or config.joiner_profile ~= 1 then return end
+	profile_put("carry")
+	if S.profile.restored and S.link.world then profile_put(S.link.world) end
+end
+
+Feature.profile_tick = profile_tick
+Feature.profile_before_load = profile_before_load
+
 Feature.commands_tick = commands_tick
 Feature.on_commands = on_commands
 Feature.on_command_missing = on_command_missing
@@ -4002,6 +4095,7 @@ local function load_shared()
 		notify("the game says the received save can't be loaded (different game version or DLCs?)")
 	else
 		notify("loading the host's save")
+		Feature.profile_before_load()
 		S.load_at = getElapsedTime() + 0.1  -- like the game's menu: load on a later frame, not inside the command
 	end
 end
@@ -4173,6 +4267,7 @@ local function tick(now, dt)
 	Feature.settings_tick(now)
 	Feature.commands_tick(now)
 	Feature.accounts_tick(now)
+	Feature.profile_tick(now)
 end
 
 local function on_update()

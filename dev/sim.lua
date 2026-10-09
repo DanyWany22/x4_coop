@@ -55,6 +55,8 @@ local SC = {
 	                 role = "join", own_world = "abc123", partner_world = "abc123", foot_test = true },
 	stations     = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
 	                 role = "join", own_world = "abc123", partner_world = "abc123", station_test = true },
+	profile      = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
+	                 role = "join", own_world = "abc123", partner_world = "abc123", profile_test = true },
 	accounts     = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
 	                 role = "join", own_world = "abc123", partner_world = "abc123", accounts_test = true },
 	traderules   = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
@@ -507,6 +509,10 @@ function TransferPlayerMoneyTo(amount, id) account_calls[#account_calls + 1] = "
 function TransferMoneyToPlayer(amount, id) account_calls[#account_calls + 1] = "from:" .. id .. ":" .. amount; scfg(id).money = scfg(id).money - amount end
 function SetMinBudget(id, v) account_calls[#account_calls + 1] = "min:" .. id .. ":" .. v end
 function SetMaxBudget(id, v) account_calls[#account_calls + 1] = "max:" .. id .. ":" .. v end
+-- the player's inventory, and the bridge's kept wallets
+sim_inventory = { inv_host = { amount = 3 } }
+sim_profiles, profile_requests = sc.profile_test and { carry = "250000|inv_a=2,inv_b=5" } or {}, {}
+function GetPlayerInventory() return sim_inventory end
 function GetPlayerMoney() return player_money end
 function SetNPCBlackboard(_, key, v) blackboard[key] = v end
 function ExecuteDebugCommand(cmd, param) say("  ego command /%s %s", cmd, tostring(param)) end
@@ -654,6 +660,14 @@ function AddUITriggeredEvent(screen, control, args)
 			blackboard["$x4coop_command_missing"] = { args }
 			queue("x4coop.command_missing")
 		end
+	elseif control == "profile" then
+		local parts = { tostring(args[1]) }
+		player_money, sim_inventory = args[1], {}
+		for i = 2, #args do
+			parts[#parts + 1] = args[i][1] .. ":" .. args[i][2]
+			sim_inventory[args[i][1]] = { amount = args[i][2] }
+		end
+		profile_requests[#profile_requests + 1] = table.concat(parts, "|")
 	elseif control == "station_money" then
 		money_requests_station[#money_requests_station + 1] = args[1] .. ":" .. args[2]
 		for id, o in pairs(objects) do
@@ -800,6 +814,11 @@ if sc.pipes then
 					partner_queue[#partner_queue + 1] = { at = clock + 2 * ONE_WAY, msg = reply }
 				elseif f[1] == "M" then
 					partner_queue[#partner_queue + 1] = { at = clock + 2 * ONE_WAY, msg = "M|Echo|you said: " .. tostring(f[3]) }
+				elseif f[1] == "X" and f[2] == "profile_put" then
+					sim_profiles[f[3]] = f[4] .. "|" .. (f[5] or "")
+				elseif f[1] == "X" and f[2] == "profile_get" then
+					partner_queue[#partner_queue + 1] = { at = clock + 0.05,
+						msg = "X|profile|" .. f[3] .. "|" .. (sim_profiles[f[3]] or "none") }
 				elseif f[1] == "a" and f[2] == "msg" then
 					partner_queue[#partner_queue + 1] = { at = clock + 2 * ONE_WAY, msg = "a|ack|" .. f[3] }
 				elseif f[1] == "r" and f[2] == "msg" then
@@ -1232,6 +1251,18 @@ local function account_script()
 	while account_steps[1] and clock >= account_steps[1][1] do table.remove(account_steps, 1)[2]() end
 end
 
+local profile_steps = {
+	{ 14, function() sim_inventory.inv_a = { amount = 7 } end },  -- picked something up
+	{ 20, function()
+		pipe_reader("X|received|quicksave")
+		ExecuteDebugCommand("x4coop", "loadshared")
+	end },
+}
+local function profile_script()
+	if not sc.profile_test or not pipe_reader then return end
+	while profile_steps[1] and clock >= profile_steps[1][1] do table.remove(profile_steps, 1)[2]() end
+end
+
 local function credit_script()
 	if not sc.credits_test or not pipe_reader then return end
 	while credit_steps[1] and clock >= credit_steps[1][1] do
@@ -1367,6 +1398,7 @@ while clock < sc.duration do
 	command_script()
 	rule_script()
 	account_script()
+	profile_script()
 	if sc.partner_restart_at and clock >= sc.partner_restart_at and partner_clock_offset == 1000 then
 		partner_clock_offset = -500
 		say("t=%.1f partner restarted their game (clock jumped back)", clock)
@@ -1915,6 +1947,18 @@ if sc.foot_test then
 		and tostring(foot_status_seen):find("on foot at Harbour Bar Station", 1, true) ~= nil
 		and said:find("is on foot at Harbour Bar Station", 1, true) ~= nil
 		and said:find("is back aboard a ship", 1, true) ~= nil
+end
+if sc.profile_test then
+	local xs = {}
+	for _, w in ipairs(pipe_writes) do if w:sub(1, 10) == "X|profile_" then xs[#xs + 1] = w end end
+	say("profile: bridge messages %s", table.concat(xs, " / "))
+	say("profile: md %s; kept %s; loads %s", table.concat(profile_requests, " / "), tostring(sim_profiles.abc123),
+		table.concat(game_loads, ","))
+	ok = ok and xs[1] == "X|profile_get|abc123" and xs[2] == "X|profile_get|carry"
+		and xs[3] == "X|profile_put|abc123|250000|inv_a=2,inv_b=5"
+		and #profile_requests == 1 and profile_requests[1] == "250000|inv_a:2|inv_b:5"
+		and xs[#xs - 1] == "X|profile_put|carry|250000|inv_a=7,inv_b=5" and xs[#xs] == "X|profile_put|abc123|250000|inv_a=7,inv_b=5"
+		and game_loads[1] == "quicksave"
 end
 if sc.accounts_test then
 	local sent = {}

@@ -1726,6 +1726,46 @@
           </actions>
         </cue>
 
+        <!--
+          The joiner's own wallet and inventory (param3: [credits, [ware id, amount], ...]): the player's credits and
+          inventory become exactly these; inventory wares not listed are removed.
+        -->
+        <cue name="OnProfile" instantiate="true">
+          <conditions>
+            <event_ui_triggered screen="'x4coop'" control="'profile'"/>
+          </conditions>
+          <actions>
+            <set_value name="$P" exact="event.param3"/>
+            <set_value name="$Want" exact="$P.{1} * 1Cr"/>
+            <do_if value="$Want gt player.money">
+              <transfer_money from="faction.ownerless" to="faction.player" amount="$Want - player.money"/>
+            </do_if>
+            <do_elseif value="$Want lt player.money">
+              <transfer_money from="faction.player" to="faction.ownerless" amount="player.money - $Want"/>
+            </do_elseif>
+            <set_value name="$Wanted" exact="table[]"/>
+            <do_all exact="$P.count - 1" counter="$i">
+              <do_if value="@ware.{$P.{$i + 1}.{1}}">
+                <set_value name="$Wanted.{ware.{$P.{$i + 1}.{1}}}" exact="$P.{$i + 1}.{2}"/>
+              </do_if>
+            </do_all>
+            <do_for_each name="$Ware" in="player.entity.inventory.list">
+              <do_if value="not $Wanted.{$Ware}?">
+                <remove_inventory entity="player.entity" ware="$Ware" exact="player.entity.inventory.{$Ware}.count"/>
+              </do_if>
+            </do_for_each>
+            <do_for_each name="$Ware" valuename="$Amount" in="$Wanted">
+              <set_value name="$Now" exact="player.entity.inventory.{$Ware}.count"/>
+              <do_if value="$Amount gt $Now">
+                <add_inventory entity="player.entity" ware="$Ware" exact="$Amount - $Now"/>
+              </do_if>
+              <do_elseif value="$Amount lt $Now">
+                <remove_inventory entity="player.entity" ware="$Ware" exact="$Now - $Amount"/>
+              </do_elseif>
+            </do_for_each>
+          </actions>
+        </cue>
+
         <cue name="OnNpcClear" instantiate="true">
           <conditions>
             <event_ui_triggered screen="'x4coop'" control="'npc_clear'"/>
