@@ -118,6 +118,7 @@ local config = {
 	station_accounts = 1,     -- shared world: money put into or taken from station accounts, budgets, balances
 	joiner_profile = 1,       -- shared world, joiner: keep your own credits and inventory between sessions
 	missions = 1,             -- shared world: see your partner's missions as guidance in your mission list
+	equipment_sync = 1,       -- shared world: ship upgrades, and new station modules' equipment, in both worlds
 	ghost_latency = 0.12,     -- s, simulated one-way latency in ghost mode
 	ghost_jitter = 0.03,      -- s, extra random delay per snapshot
 	ghost_loss = 0.0,         -- 0..1, fraction of snapshots dropped
@@ -373,6 +374,7 @@ local function reset()
 		profile = { asked = nil, retry = 0, restored = false, next = 0 },
 		missions = { next = 0, next_list = 0, own = {}, sent = {}, shown = 0 },
 		modules = { sent = 0, applied = 0 },
+		equipment = { on = false, sent = 0, applied = 0 },
 		rules = { next = 0, base = nil, shared = {}, alias = { loaded = false, into = {}, out = {} }, sent = 0, applied = 0 },
 		ssettings = { list = {}, idx = 0, next = 0, ids = {}, base = {}, settle = {}, out = {}, expect = {}, sent = 0, applied = 0 },
 		foot = { on = false, walking = false, last = nil, gone_left = 0, gone_at = -1e9, partner = nil, avatar_on = false },
@@ -748,6 +750,7 @@ local accounts_receive  -- the partner's station account changes and balances (a
 local profile_receive   -- our bridge's answer about the joiner's own wallet and inventory, in the fourth block
 local missions_receive  -- the partner's missions (m), defined in the fourth feature block
 local module_changes_receive  -- station modules removed, wrecked or repaired (e), in the fourth block
+local refit_receive     -- the partner's ship upgrades (q), defined in the fourth feature block
 local send_link
 
 local function net_send(msg)
@@ -861,6 +864,8 @@ on_pipe_message = function(msg)
 		if config.mode == "net" then missions_receive(f, now) end
 	elseif kind == "e" then
 		if config.mode == "net" then module_changes_receive(f, now) end
+	elseif kind == "q" then
+		if config.mode == "net" then refit_receive(f, now) end
 	elseif kind == "M" then
 		local text = clean_text(f[3], 200)
 		if text ~= "" then
@@ -1996,6 +2001,29 @@ end
 -- The feature sections below (credits to on foot) live in one block, so their helpers don't count against
 -- LuaJIT's 200 locals per function; what the frame loop, the events and the commands need is in Feature.
 local Feature = {}
+
+-- md's [[ware id, count], ...] as "ware=count,..." (wares in order), and back
+function Feature.encode_equipment(list)
+	if type(list) ~= "table" then return "" end
+	local parts = {}
+	for _, e in ipairs(list) do
+		local n = type(e) == "table" and tonumber(e[2])
+		if n and n >= 1 and n < 10000 and type(e[1]) == "string" and e[1]:match("^[%w_]+$") then
+			parts[#parts + 1] = e[1] .. "=" .. string.format("%d", n)
+		end
+	end
+	table.sort(parts)
+	return table.concat(parts, ",")
+end
+
+function Feature.decode_equipment(text)
+	local list = {}
+	for ware, n in tostring(text or ""):gmatch("([%w_]+)=(%d+)") do
+		n = tonumber(n)
+		if n >= 1 and n < 10000 and #list < 200 then list[#list + 1] = { ware, n } end
+	end
+	return list
+end
 do
 
 -------------------------------------------------------------------------------
@@ -3048,7 +3076,8 @@ end
 -- Stations (shared faction): modules a build finishes on a player-owned station appear in the partner's world too,
 -- at the same place on the same station (md OnModulesBuilt reports, OnStationModule adds), so a station grows the
 -- same in both worlds; a station the partner's world doesn't have yet is created there first and paired (alias).
--- "b|msg|id|station|station macro|sector|x|y|z|yaw|pitch|roll|module macro|x|y|z|yaw|pitch|roll", sent reliably.
+-- "b|msg|id|station|station macro|sector|x|y|z|yaw|pitch|roll|module macro|x|y|z|yaw|pitch|roll|equipment", sent
+-- reliably (equipment: "ware=count,...", its turrets, shields and the like).
 
 local function stations_enabled()
 	return config.mode == "net" and S.link.linked and config.station_sync == 1
@@ -3066,6 +3095,7 @@ local function on_modules()
 		if ok then
 			local fields = { alias_out(v[1]), v[2], v[3] }
 			for i = 4, 16 do fields[#fields + 1] = i == 10 and v[10] or string.format("%.3f", tonumber(v[i])) end
+			fields[#fields + 1] = Feature.encode_equipment(v[17])
 			reliable_send("b", fields)
 		end
 	end
@@ -3082,6 +3112,8 @@ stations_receive = function(f, now)
 			args[#args + 1] = v
 		end
 		args[#args + 1] = m[4]  -- the partner's code, to pair a station made here
+		local equip = Feature.decode_equipment(m[20])
+		if #equip > 0 then args[#args + 1] = equip end  -- the module's equipment
 		request("station_module", args)
 		S.ssettings.expect[args[1]] = now  -- if it brings new wares, ask for the partner's settings for them
 	end)
@@ -4164,6 +4196,52 @@ end
 
 Feature.on_module_changes = on_module_changes
 
+-------------------------------------------------------------------------------
+-- Equipment (shared faction): when an upgrade finishes on one of the empire's ships (the one a player flies too), its
+-- whole equipment is sent, as wares and counts, and the partner's game gives its copy the same (md OnShipRefit,
+-- OnRefit; the equipment may sit in other slots of the same kind). New station modules carry theirs in "b".
+-- "q|msg|id|ship|macro|sector|ware=count,ware=count,...", sent reliably.
+
+local function equipment_enabled()
+	return config.mode == "net" and S.link.linked and config.equipment_sync == 1
+end
+
+local function on_refit()
+	local list = S.player and GetNPCBlackboard(S.player, "$x4coop_refits")
+	if S.player then SetNPCBlackboard(S.player, "$x4coop_refits", nil) end
+	if type(list) ~= "table" or not equipment_enabled() then return end
+	for _, v in ipairs(list) do
+		local wares = type(v) == "table" and Feature.encode_equipment(v[4])
+		if wares and wares ~= "" and valid_world_ref(v[1], v[2], v[3]) then
+			reliable_send("q", { alias_out(v[1]), v[2], v[3], wares })
+			S.equipment.sent = S.equipment.sent + 1
+		end
+	end
+end
+
+refit_receive = function(f, now)
+	if not equipment_enabled() then return end
+	reliable_receive("q", f, now, function(m)
+		local equip = Feature.decode_equipment(m[7])
+		if not (valid_world_ref(m[4], m[5], m[6]) and #equip > 0) then return end
+		local args = { alias_in(m[4]), m[5], m[6] }
+		for _, e in ipairs(equip) do args[#args + 1] = e end
+		request("refit", args)
+		S.equipment.applied = S.equipment.applied + 1
+	end)
+end
+
+local function equipment_tick()
+	local on = equipment_enabled()
+	if on ~= S.equipment.on then
+		S.equipment.on = on
+		request("equipment_sync", { on and 1 or 0 })
+	end
+end
+
+Feature.on_refit = on_refit
+Feature.equipment_tick = equipment_tick
+
 Feature.commands_tick = commands_tick
 Feature.on_commands = on_commands
 Feature.on_command_missing = on_command_missing
@@ -4222,6 +4300,8 @@ local function status_text()
 			and string.format(" | station settings sent %d, applied %d", S.ssettings.sent, S.ssettings.applied) or "")
 		.. ((S.rules.sent + S.rules.applied > 0)
 			and string.format(" | trade rules sent %d, applied %d", S.rules.sent, S.rules.applied) or "")
+		.. ((S.equipment.sent + S.equipment.applied > 0)
+			and string.format(" | upgrades sent %d, applied %d", S.equipment.sent, S.equipment.applied) or "")
 		.. ((S.modules.sent + S.modules.applied > 0)
 			and string.format(" | station module changes sent %d, applied %d", S.modules.sent, S.modules.applied) or "")
 		.. ((S.accounts.sent + S.accounts.applied + S.accounts.matched > 0)
@@ -4472,6 +4552,7 @@ local function tick(now, dt)
 	Feature.accounts_tick(now)
 	Feature.profile_tick(now)
 	Feature.missions_tick(now)
+	Feature.equipment_tick()
 end
 
 local function on_update()
@@ -4513,6 +4594,7 @@ local function init()
 	RegisterEvent("x4coop.modules", Feature.on_modules)
 	RegisterEvent("x4coop.station_made", Feature.on_station_made)
 	RegisterEvent("x4coop.module_changes", Feature.on_module_changes)
+	RegisterEvent("x4coop.refit", Feature.on_refit)
 	RegisterEvent("x4coop.commands", Feature.on_commands)
 	RegisterEvent("x4coop.command_missing", Feature.on_command_missing)
 	RegisterEvent("x4coop.empire_trade", Feature.on_empire_trade)

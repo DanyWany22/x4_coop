@@ -55,6 +55,8 @@ local SC = {
 	                 role = "join", own_world = "abc123", partner_world = "abc123", foot_test = true },
 	stations     = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
 	                 role = "join", own_world = "abc123", partner_world = "abc123", station_test = true },
+	refit        = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
+	                 role = "join", own_world = "abc123", partner_world = "abc123", refit_test = true },
 	modules      = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
 	                 role = "join", own_world = "abc123", partner_world = "abc123", modules_test = true },
 	missions     = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
@@ -380,6 +382,23 @@ foot_requests, foot_status_seen = {}, nil
 station_requests, station_made_id = {}, nil
 command_requests, command_misses = {}, {}
 module_requests = {}
+refit_requests = {}
+if sc.refit_test then blackboard["$x4coop_alias"] = "PSH-9=LSH-9" end
+local function sim_args(args)  -- md's arguments as text; lists of [ware, count] as "ware=count"
+	local parts = {}
+	for _, v in ipairs(args) do
+		if type(v) == "table" and type(v[1]) == "table" then
+			local inner = {}
+			for _, e in ipairs(v) do inner[#inner + 1] = e[1] .. "=" .. e[2] end
+			parts[#parts + 1] = table.concat(inner, ",")
+		elseif type(v) == "table" then
+			parts[#parts + 1] = v[1] .. "=" .. v[2]
+		else
+			parts[#parts + 1] = tostring(v)
+		end
+	end
+	return table.concat(parts, ":")
+end
 if sc.modules_test then blackboard["$x4coop_alias"] = "PST-7=LST-201" end
 if sc.commands_test then blackboard["$x4coop_alias"] = "PSH-9=LSH-9" end
 function settings_world()
@@ -712,8 +731,12 @@ function AddUITriggeredEvent(screen, control, args)
 		manager_requests[#manager_requests + 1] = tostring(args[1])
 	elseif control == "station_sync" then
 		-- md only remembers the switch
+	elseif control == "refit" then
+		refit_requests[#refit_requests + 1] = sim_args(args)
+	elseif control == "equipment_sync" then
+		-- md only remembers the switch
 	elseif control == "station_module" then
-		station_requests[#station_requests + 1] = table.concat(args, ":")
+		station_requests[#station_requests + 1] = sim_args(args)
 		local found
 		for id, o in pairs(objects) do if o.station and o.idcode == args[1] then found = id end end
 		if not found then
@@ -854,6 +877,8 @@ if sc.pipes then
 				elseif f[1] == "X" and f[2] == "profile_get" then
 					partner_queue[#partner_queue + 1] = { at = clock + 0.05,
 						msg = "X|profile|" .. f[3] .. "|" .. (sim_profiles[f[3]] or "none") }
+				elseif f[1] == "q" and f[2] == "msg" then
+					partner_queue[#partner_queue + 1] = { at = clock + 2 * ONE_WAY, msg = "q|ack|" .. f[3] }
 				elseif f[1] == "e" and f[2] == "msg" then
 					partner_queue[#partner_queue + 1] = { at = clock + 2 * ONE_WAY, msg = "e|ack|" .. f[3] }
 				elseif f[1] == "m" and f[2] == "msg" then
@@ -1342,6 +1367,27 @@ local function module_script()
 	while module_steps[1] and clock >= module_steps[1][1] do table.remove(module_steps, 1)[2]() end
 end
 
+local refit_steps = {
+	{ 6, function()  -- an upgrade finished on one of our ships
+		blackboard["$x4coop_refits"] = { { "SHP-501", "ship_arg_m_fighter_01_a_macro", SECTORS[500],
+			{ { "weapon_gen_m_laser_01_mk2", 4 }, { "shield_gen_m_standard_01_mk2", 1 }, { "bad ware!", 2 }, { "software_dockmk2", 1 } } },
+			{ "SHP-502", "ship_arg_m_fighter_01_a_macro", SECTORS[500], {} } }
+		queue("x4coop.refit")
+	end },
+	{ 10, function() pipe_reader("q|msg|0f01|PSH-9|ship_arg_m_fighter_01_a_macro|" .. SECTORS[500] .. "|engine_arg_m_allround_01_mk1=1,weapon_gen_m_laser_01_mk1=2") end },
+	{ 10.3, function() pipe_reader("q|msg|0f01|PSH-9|ship_arg_m_fighter_01_a_macro|" .. SECTORS[500] .. "|engine_arg_m_allround_01_mk1=1,weapon_gen_m_laser_01_mk1=2") end },
+	{ 12, function() pipe_reader("q|msg|0f02|PSH-9|ship_arg_m_fighter_01_a_macro|" .. SECTORS[500] .. "|") end },
+	{ 14, function()  -- the partner finished a module with turrets on it
+		pipe_reader("b|msg|0f03|STA-1|station_gen_factory_base_01_macro|" .. SECTORS[500]
+			.. "|0.000|0.000|0.000|0.000|0.000|0.000|defence_arg_disc_01_macro|0.000|300.000|0.000|0.000|0.000|0.000"
+			.. "|shield_arg_l_standard_01_mk1=2,turret_arg_l_laser_01_mk1=6")
+	end },
+}
+local function refit_script()
+	if not sc.refit_test or not pipe_reader then return end
+	while refit_steps[1] and clock >= refit_steps[1][1] do table.remove(refit_steps, 1)[2]() end
+end
+
 local function credit_script()
 	if not sc.credits_test or not pipe_reader then return end
 	while credit_steps[1] and clock >= credit_steps[1][1] do
@@ -1480,6 +1526,7 @@ while clock < sc.duration do
 	profile_script()
 	mission_script()
 	module_script()
+	refit_script()
 	if sc.partner_restart_at and clock >= sc.partner_restart_at and partner_clock_offset == 1000 then
 		partner_clock_offset = -500
 		say("t=%.1f partner restarted their game (clock jumped back)", clock)
@@ -2028,6 +2075,23 @@ if sc.foot_test then
 		and tostring(foot_status_seen):find("on foot at Harbour Bar Station", 1, true) ~= nil
 		and said:find("is on foot at Harbour Bar Station", 1, true) ~= nil
 		and said:find("is back aboard a ship", 1, true) ~= nil
+end
+if sc.refit_test then
+	local sent = {}
+	for _, w in ipairs(pipe_writes) do
+		local id, rest = w:match("^q|msg|(%x+)|(.*)$")
+		if id then sent[id] = rest end
+	end
+	local list = {}
+	for _, rest in pairs(sent) do list[#list + 1] = rest end
+	local s = SECTORS[500]
+	say("refit: sent %s", table.concat(list, " / "))
+	say("refit: md %s / modules %s", table.concat(refit_requests, " / "), table.concat(station_requests, " / "))
+	ok = ok and #list == 1
+		and list[1] == "SHP-501|ship_arg_m_fighter_01_a_macro|" .. s .. "|shield_gen_m_standard_01_mk2=1,software_dockmk2=1,weapon_gen_m_laser_01_mk2=4"
+		and #refit_requests == 1
+		and refit_requests[1] == "LSH-9:ship_arg_m_fighter_01_a_macro:" .. s .. ":engine_arg_m_allround_01_mk1=1:weapon_gen_m_laser_01_mk1=2"
+		and #station_requests == 1 and station_requests[1]:find(":STA-1:shield_arg_l_standard_01_mk1=2,turret_arg_l_laser_01_mk1=6", 1, true) ~= nil
 end
 if sc.modules_test then
 	local sent = {}

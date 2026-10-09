@@ -1209,7 +1209,9 @@
               </do_all>
               <do_if value="$Wares.count gt 0">
                 <generate_loadout result="$Loadout" macro="$Macro" wares="$Wares"/>
-                <apply_loadout object="$Ship" loadout="$Loadout"/>
+                <do_if value="@$Loadout.{1}">
+                  <apply_loadout object="$Ship" loadout="$Loadout.{1}"/>
+                </do_if>
               </do_if>
               <do_if value="$Args.{5} != ''">
                 <set_object_name object="$Ship" name="$Args.{5}"/>
@@ -1445,7 +1447,9 @@
                 <do_if value="not player.entity.$x4coop_modules?">
                   <set_value name="player.entity.$x4coop_modules" exact="[]"/>
                 </do_if>
-                <append_to_list name="player.entity.$x4coop_modules" exact="[$Station.idcode, $Station.macro.id, $Station.sector.macro.id, $SP.x / 1m, $SP.y / 1m, $SP.z / 1m, $SR.yaw / 1deg, $SR.pitch / 1deg, $SR.roll / 1deg, $Module.macro.id, $MP.x / 1m, $MP.y / 1m, $MP.z / 1m, $MR.yaw / 1deg, $MR.pitch / 1deg, $MR.roll / 1deg]"/>
+                <set_value name="$Obj" exact="$Module"/>
+                <include_actions ref="ReadEquipment"/>
+                <append_to_list name="player.entity.$x4coop_modules" exact="[$Station.idcode, $Station.macro.id, $Station.sector.macro.id, $SP.x / 1m, $SP.y / 1m, $SP.z / 1m, $SR.yaw / 1deg, $SR.pitch / 1deg, $SR.roll / 1deg, $Module.macro.id, $MP.x / 1m, $MP.y / 1m, $MP.z / 1m, $MR.yaw / 1deg, $MR.pitch / 1deg, $MR.roll / 1deg, $Equip]"/>
                 <set_value name="$Reported" exact="$Reported + 1"/>
               </do_if>
             </do_for_each>
@@ -1516,6 +1520,13 @@
                 <position x="$A.{11}" y="$A.{12}" z="$A.{13}"/>
                 <rotation yaw="$A.{14} * 1deg" pitch="$A.{15} * 1deg" roll="$A.{16} * 1deg"/>
               </create_module>
+              <do_if value="@$Module.exists and @$A.{18}.count">
+                <set_value name="$Obj" exact="$Module"/>
+                <set_value name="$Macro" exact="$Container.macro"/>
+                <set_value name="$ModuleMacro" exact="$Module.macro"/>
+                <set_value name="$Equip" exact="$A.{18}"/>
+                <include_actions ref="ApplyEquipment"/>
+              </do_if>
             </do_if>
             <do_if value="$Made">
               <do_if value="not player.entity.$x4coop_newstations?">
@@ -2035,6 +2046,62 @@
           </actions>
         </cue>
 
+        <!--
+          Equipment (shared faction): when an upgrade finishes on one of the empire's ships, OnShipRefit reports the
+          ship's whole equipment (player.entity.$x4coop_refits gets [idcode, macro, sector macro, [[ware id, count],
+          ...]], then 'x4coop.refit'); OnRefit (param3: [idcode, macro, sector macro, [ware id, count], ...]) gives our
+          copy the same. That includes the ship a player flies. Upgrades already queued when the save was shared
+          aren't sent (both worlds finish them). 'equipment_sync' (param3: [1 or 0]) turns it on.
+        -->
+        <cue name="OnEquipmentSyncConfig" instantiate="true">
+          <conditions>
+            <event_ui_triggered screen="'x4coop'" control="'equipment_sync'"/>
+          </conditions>
+          <actions>
+            <set_value name="Root.$EquipmentSyncOn" exact="event.param3.{1}"/>
+          </actions>
+        </cue>
+
+        <cue name="OnShipRefit" instantiate="true">
+          <conditions>
+            <event_player_build_loadout_applied/>
+            <check_value value="@Root.$EquipmentSyncOn == 1 and @event.param3.isupgrade and @event.param3.base.isclass.ship"/>
+            <check_value value="not player.entity.$x4coop_shared_at? or not @event.param3.time or event.param3.time ge player.entity.$x4coop_shared_at * 1s"/>
+          </conditions>
+          <actions>
+            <set_value name="$Obj" exact="event.param3.base"/>
+            <do_if value="$Obj.isplayerowned and @$Obj.sector and not @Root.$AllProxies.indexof.{$Obj}">
+              <include_actions ref="ReadEquipment"/>
+              <do_if value="not player.entity.$x4coop_refits?">
+                <set_value name="player.entity.$x4coop_refits" exact="[]"/>
+              </do_if>
+              <append_to_list name="player.entity.$x4coop_refits" exact="[$Obj.idcode, $Obj.macro.id, $Obj.sector.macro.id, $Equip]"/>
+              <raise_lua_event name="'x4coop.refit'"/>
+            </do_if>
+          </actions>
+        </cue>
+
+        <cue name="OnRefit" instantiate="true">
+          <conditions>
+            <event_ui_triggered screen="'x4coop'" control="'refit'"/>
+          </conditions>
+          <actions>
+            <set_value name="$R" exact="event.param3"/>
+            <set_value name="$A" exact="[$R.{1}, $R.{2}, $R.{3}]"/>
+            <include_actions ref="FindContainer"/>
+            <do_if value="@$Container.isclass.ship and $Container.isplayerowned">
+              <set_value name="$Obj" exact="$Container"/>
+              <set_value name="$Macro" exact="$Container.macro"/>
+              <set_value name="$ModuleMacro" exact="null"/>
+              <set_value name="$Equip" exact="[]"/>
+              <do_all exact="$R.count - 3" counter="$i">
+                <append_to_list name="$Equip" exact="$R.{$i + 3}"/>
+              </do_all>
+              <include_actions ref="ApplyEquipment"/>
+            </do_if>
+          </actions>
+        </cue>
+
         <cue name="OnNpcClear" instantiate="true">
           <conditions>
             <event_ui_triggered screen="'x4coop'" control="'npc_clear'"/>
@@ -2206,6 +2273,67 @@
             </do_if>
             <destroy_object object="$Found" explosion="false"/>
             <append_to_list name="Root.$ModuleRemovals" exact="[$Found, player.age + 20s, $Recreate]"/>
+          </actions>
+        </library>
+
+        <library name="ReadEquipment">
+          <actions>
+            <!-- $Obj (a ship or a station module): $Equip = [[ware id, count], ...], its weapons, turrets, shields,
+                 engines and the rest of its loadout (thrusters, software), and its drones -->
+            <set_value name="$Counts" exact="table[]"/>
+            <find_object_component name="$Parts" object="$Obj" class="[class.weapon, class.turret, class.shieldgenerator, class.engine]" checkoperational="false" multiple="true"/>
+            <do_for_each name="$Part" in="$Parts">
+              <set_value name="$W" exact="@$Part.macro.ware"/>
+              <do_if value="$W and $Counts.{$W}?">
+                <set_value name="$Counts.{$W}" exact="$Counts.{$W} + 1"/>
+              </do_if>
+              <do_elseif value="$W">
+                <set_value name="$Counts.{$W}" exact="1"/>
+              </do_elseif>
+            </do_for_each>
+            <do_if value="@$Obj.loadout.wares">
+              <do_for_each name="$W" in="$Obj.loadout.wares">
+                <do_if value="not $Counts.{$W}?">
+                  <set_value name="$Counts.{$W}" exact="1"/>
+                </do_if>
+              </do_for_each>
+            </do_if>
+            <do_if value="@$Obj.units.table">
+              <do_for_each name="$U" valuename="$N" in="$Obj.units.table">
+                <set_value name="$W" exact="@$U.ware"/>
+                <do_if value="$W">
+                  <set_value name="$Counts.{$W}" exact="$N"/>
+                </do_if>
+              </do_for_each>
+            </do_if>
+            <set_value name="$Equip" exact="[]"/>
+            <do_for_each name="$W" valuename="$N" in="$Counts">
+              <append_to_list name="$Equip" exact="[$W.id, $N]"/>
+            </do_for_each>
+          </actions>
+        </library>
+
+        <library name="ApplyEquipment">
+          <actions>
+            <!-- $Obj gets exactly $Equip ([[ware id, count], ...]) for each kind of equipment; $Macro: the ship's or
+                 station's macro, $ModuleMacro: the module's, or null for a ship -->
+            <set_value name="$Table" exact="table[]"/>
+            <do_for_each name="$E" in="$Equip">
+              <do_if value="@ware.{$E.{1}} and $E.{2} gt 0">
+                <set_value name="$Table.{ware.{$E.{1}}}" exact="$E.{2}"/>
+              </do_if>
+            </do_for_each>
+            <do_if value="$Table.keys.count gt 0">
+              <do_if value="$ModuleMacro">
+                <generate_loadout result="$Loadouts" macro="$Macro" module="$ModuleMacro" wares="$Table"/>
+              </do_if>
+              <do_else>
+                <generate_loadout result="$Loadouts" macro="$Macro" wares="$Table"/>
+              </do_else>
+              <do_if value="@$Loadouts.{1}">
+                <apply_loadout object="$Obj" loadout="$Loadouts.{1}" flags="engines weapons shields turrets shieldgroups turretgroups software thrusters units add remove"/>
+              </do_if>
+            </do_if>
           </actions>
         </library>
 
