@@ -55,6 +55,10 @@ local SC = {
 	                 role = "join", own_world = "abc123", partner_world = "abc123", foot_test = true },
 	stations     = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
 	                 role = "join", own_world = "abc123", partner_world = "abc123", station_test = true },
+	testfight    = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
+	                 role = "host", own_world = "abc123", partner_world = "abc123", testfight_test = true },
+	bigfight     = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30, pipes = true,
+	                 role = "host", own_world = "abc123", partner_world = "abc123", npc_test = "big", npc_count = 200 },
 	terraform_join = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30,
 	                 pipes = true, role = "join", own_world = "abc123", partner_world = "abc123", terraform_test = "join" },
 	terraform_host = { true_conv = { order = "YXZ", sy = 1, sp = -1, sr = -1 }, mode = "net", setpos = "degrees", duration = 30,
@@ -158,8 +162,13 @@ local SHIP_MACRO = "ship_arg_s_fighter_01_a_macro"
 local objects = {}
 local PLAYER = 100
 local PARKED = 300
-local NPC_COUNT = 4
+local NPC_COUNT = sc.npc_count or 4
 local function npc_truth(i, t, h)
+	if sc.npc_test == "big" then  -- rings of twenty, 300 m apart, all well inside the bubble
+		local ring, k = math.floor((i - 1) / 20), (i - 1) % 20
+		local a = 0.3 * t + k * 0.314
+		return h.x + (300 + ring * 300) * math.cos(a), h.y + k * 10, h.z + (300 + ring * 300) * math.sin(a)
+	end
 	local ang = 0.3 * t + i * 1.57
 	return h.x + 300 * math.cos(ang), h.y + 50 * i, h.z + 300 * math.sin(ang)
 end
@@ -411,6 +420,7 @@ rename_requests = {}
 crew_requests = {}
 galaxy_requests = {}
 loot_requests = {}
+testfight_requests = {}
 cargo_requests = {}
 if sc.cargo_test then blackboard["$x4coop_alias"] = "PSH-9=LSH-9" end
 if sc.loot_test then blackboard["$x4coop_alias"] = "PST-7=LST-201" end
@@ -810,6 +820,8 @@ function AddUITriggeredEvent(screen, control, args)
 		cargo_requests[#cargo_requests + 1] = sim_args(args)
 	elseif control == "cargo_sync" then
 		-- md only remembers the switch
+	elseif control == "testfight" or control == "testfight_measure" then
+		testfight_requests[#testfight_requests + 1] = control .. ":" .. sim_args(args)
 	elseif control == "loot" then
 		loot_requests[#loot_requests + 1] = sim_args(args)
 	elseif control == "loot_sync" then
@@ -984,6 +996,8 @@ if sc.pipes then
 						msg = "X|profile|" .. f[3] .. "|" .. (sim_profiles[f[3]] or "none") }
 				elseif f[1] == "g" and f[2] == "msg" then
 					partner_queue[#partner_queue + 1] = { at = clock + 2 * ONE_WAY, msg = "g|ack|" .. f[3] }
+				elseif f[1] == "x" and f[2] == "msg" then
+					partner_queue[#partner_queue + 1] = { at = clock + 2 * ONE_WAY, msg = "x|ack|" .. f[3] }
 				elseif f[1] == "t" and f[2] == "msg" then
 					partner_queue[#partner_queue + 1] = { at = clock + 2 * ONE_WAY, msg = "t|ack|" .. f[3] }
 				elseif f[1] == "f" and f[2] == "msg" then
@@ -1692,6 +1706,22 @@ function terraform_script()
 	while terraform_steps[1] and clock >= terraform_steps[1][1] do table.remove(terraform_steps, 1)[2]() end
 end
 
+testfight_steps = {
+	{ 3, function() ExecuteDebugCommand("x4coop", "testfight 20 20") end },
+	{ 8, function()
+		blackboard["$x4coop_testpairs"] = { { "NPC-1", "NPC-2" }, { "NPC-2", "NPC-1" }, { "NPC-3", "NPC-4" }, { "bad code!", "NPC-1" } }
+		queue("x4coop.testpairs")
+	end },
+	{ 25, function()
+		pipe_reader("x|msg|0f71|sum|20|1.50|900|3.20|1800|12|10|2|0|2")
+		pipe_reader("x|msg|0f72|pairs|NPC-1>NPC-2,NPC-5>NPC-6")
+	end },
+}
+function testfight_script()
+	if not sc.testfight_test or not pipe_reader then return end
+	while testfight_steps[1] and clock >= testfight_steps[1][1] do table.remove(testfight_steps, 1)[2]() end
+end
+
 function credit_script()
 	if not sc.credits_test or not pipe_reader then return end
 	while credit_steps[1] and clock >= credit_steps[1][1] do
@@ -1778,7 +1808,7 @@ local max_proxies = 0
 while clock < sc.duration do
 	clock = clock + frame_dt
 	step_player(frame_dt)
-	if sc.npc_test == "host" or sc.npc_test == "apart" or sc.npc_test == "apart_join" then
+	if sc.npc_test == "host" or sc.npc_test == "big" or sc.npc_test == "apart" or sc.npc_test == "apart_join" then
 		local h = history[#history]
 		for i = 1, NPC_COUNT do
 			local o = objects[400 + i]
@@ -1840,6 +1870,7 @@ while clock < sc.duration do
 	loot_script()
 	cargo_script()
 	terraform_script()
+	testfight_script()
 	if sc.partner_restart_at and clock >= sc.partner_restart_at and partner_clock_offset == 1000 then
 		partner_clock_offset = -500
 		say("t=%.1f partner restarted their game (clock jumped back)", clock)
@@ -2161,6 +2192,18 @@ if sc.npc_test then
 		say("npc host: %d B messages (%.1f/s), last one lists %d of %d ships, NPC-1 x %.1f vs %.1f",
 			#bs, #bs / sc.duration, codes, NPC_COUNT, x or -1, o.x)
 		ok = ok and #bs > 8 * (sc.duration - 2) and codes == NPC_COUNT and x and math.abs(x - o.x) < 20
+	elseif sc.npc_test == "big" then
+		-- a big fight near the host: what the nearby-ship messages cost (no md cap of 40 here)
+		local largest, total, most = 0, 0, 0
+		for _, b in ipairs(bs) do
+			largest, total = math.max(largest, #b), total + #b
+			local n = select(2, b:gsub(";", ";")) + 1
+			most = math.max(most, n)
+		end
+		big_numbers = string.format("%d ships near the host: B messages largest %d B (%d ships), %.0f KB/s", NPC_COUNT, largest,
+			most, total / sc.duration / 1024)
+		say("bigfight: %s", big_numbers)
+		ok = ok and most >= NPC_COUNT * 0.9
 	else
 		local st, emax, e95 = stats(npc_errs)
 		-- we report our own area, never the host's: everything here is near the host, so no ships at all
@@ -2388,6 +2431,23 @@ if sc.foot_test then
 		and tostring(foot_status_seen):find("on foot at Harbour Bar Station", 1, true) ~= nil
 		and said:find("is on foot at Harbour Bar Station", 1, true) ~= nil
 		and said:find("is back aboard a ship", 1, true) ~= nil
+end
+if sc.testfight_test then
+	local sent = {}
+	for _, w in ipairs(pipe_writes) do
+		local id, rest = w:match("^x|msg|(%x+)|(.*)$")
+		if id then sent[#sent + 1] = rest end
+	end
+	local seen, said = {}, table.concat(notifications, " / ")
+	for _, rest in ipairs(sent) do seen[rest:match("^[^|]+")] = (seen[rest:match("^[^|]+")] or 0) + 1 end
+	local pairs_sent = ""
+	for _, rest in ipairs(sent) do if rest:sub(1, 6) == "pairs|" then pairs_sent = rest end end
+	say("testfight: sent %s; md %s", table.concat(sent, " / "):sub(1, 300), table.concat(testfight_requests, " / "))
+	ok = ok and testfight_requests[1] == "testfight:20:20" and seen.start and seen.sum and pairs_sent == "pairs|NPC-1>NPC-2,NPC-2>NPC-1,NPC-3>NPC-4"
+		and table.concat(testfight_requests, " / "):find("testfight_measure:1", 1, true) ~= nil
+		and table.concat(testfight_requests, " / "):find("testfight_measure:0", 1, true) ~= nil
+		and said:find("who attacked whom: 3 here, 2 there, 1 in both (25%)", 1, true) ~= nil
+		and said:find("partner: sent 1.5 KB/s (largest 900 B)", 1, true) ~= nil
 end
 if sc.terraform_test then
 	local sent, plain = {}, {}

@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- X4 Co-op: a game start for testing, in the game's own empty one-sector galaxy (the one its flight school uses):
+     no stations, no traffic, no faction activity. Unlike the flight school it can be saved, so the host can share it. -->
+<diff>
+  <add sel="/gamestarts">
+    <gamestart id="x4coop_testfight" name="X4 Co-op: test fight" description="One empty sector to test the co-op mod in: no stations, no traffic, no factions at work. Type /x4coop testfight for the same battle every time. The host shares this save like any other." image="gamestart_flightschool" group="1">
+      <location galaxy="basegame_map_tutorial_default_empty_galaxy_macro" sector="basegame_map_tutorial_default_empty_cluster_001_sector_001_macro">
+        <position x="0" y="0" z="0"/>
+        <rotation yaw="0"/>
+      </location>
+      <player macro="character_player_scenario_combat_argon_macro" money="1000000" name="Pilot">
+        <ship macro="ship_arg_s_heavyfighter_02_a_macro">
+          <loadout ref="flightschool_player_ship_plasma_missile"/>
+        </ship>
+      </player>
+      <universe ventures="false" visitors="false" onlineinventory="false">
+        <jobs enabled="false"/>
+        <god enabled="false"/>
+        <masstraffic enabled="false"/>
+      </universe>
+    </gamestart>
+  </add>
+</diff>

@@ -32,11 +32,12 @@ nothing is downloaded at runtime.
 | [`ui/x4_coop.lua`](ui/x4_coop.lua) | Lua, run by the game's UI (LuaJIT) |
 | [`md/x4_coop.xml`](md/x4_coop.xml) | Mission Director script (X4's XML scripting) |
 | [`aiscripts/x4coop.proxy.fire.xml`](aiscripts/x4coop.proxy.fire.xml) | AI script that makes the partner's ship fire |
+| [`libraries/gamestarts.xml`](libraries/gamestarts.xml) | adds the "X4 Co-op: test fight" game start (one empty sector) |
 
 **Installation:** see [Install](#install) and [Playing together](#playing-together).
 
 **Source code:** everything is here:
-* `ui/`, `md/`, `aiscripts/`: the extension above.
+* `ui/`, `md/`, `aiscripts/`, `libraries/`: the extension above.
 * `bridge/`: the network program each player runs next to the game (Python, standard library
   only), its launchers and the telemetry tools.
 * `dev/`: offline tests and the test doubles they use.
@@ -432,6 +433,23 @@ Settings (`set`, or the `config` table at the top of `ui/x4_coop.lua`): `send_ra
 effects), `fire_fx` (proxy fires; gives spawned proxies a pilot), `npc_sync`, `npc_radius`,
 `npc_mirror`, `npc_remove`, `npc_hull` (the shared-world NPC parts), `economy`, `economy_cycle`, and more.
 
+## A repeatable test fight
+
+To measure how well nearby ships stay in step, use the same battle every time:
+
+1. Host: start a new game with **X4 Co-op: test fight**. It is one empty sector, the game's own flight school
+   map, with no stations, no traffic and no factions at work, and unlike the flight school it can be saved.
+2. Share it as usual (`/x4coop guestship`, `/x4coop share`; the joiner `/x4coop loadshared`, `/x4coop takeship`),
+   and fly next to each other.
+3. Host: **`/x4coop testfight 20 120`** puts 20 Argon and 20 Xenon ships (every fifth an M-class) in two grids,
+   3 km ahead and 3 km apart, each attacking its opposite number, for 120 seconds, then removes them.
+
+Both games measure meanwhile and the host's game reports both when it's over, in chat and in the debug log
+(`[x4coop] test fight report`): what the nearby-ship messages cost (KB/s, the largest message), how many ships
+they carried, how often the 40-ship list was full, and **who attacked whom**: how many attacks each game saw,
+and how many happened in both worlds. Run it before and after a change and compare. It also works in any other
+save, near wherever you are. For a bigger or longer fight: `/x4coop testfight <ships a side, up to 60> <seconds>`.
+
 ## Telemetry: seeing and proving the link
 
 `host.bat` and `join.bat` start the bridge with `--overlay --trace`:
@@ -579,7 +597,7 @@ game's own schema (`libraries/md.xsd`, `libraries/common.xsd`).
 
 Messages (one text line each): `S` snapshot (position, rotation, velocity, ship, hull, shield),
 `P`/`Q` ping, `M` chat, `L` world link, `K` kill, `D` hit, `F` firing at, `B` nearby ships (both
-ways), `E` station stock (host to joiner), `T` a joiner's trade, `V` relations, `U` research/blueprints/licences, `Z` SETA, `O` ownership, `Y` new ships, `G` orders, `J` behaviours and queues, `I` on foot, `b` station modules, `s` station settings, `c` assignments, `r` trade rules, `a` station accounts, `m` missions, `e` station modules removed/wrecked/repaired, `q` ship upgrades, `p` deployables, `n` map knowledge, `l` ship renames, `w` crews, `g` the wider world (host to joiner), `h` logbook entries, `d` loot taken, `f` cargo, `t` terraforming, `C` credits given; `R`/`W`/`N`/`X` are between a game and
+ways), `E` station stock (host to joiner), `T` a joiner's trade, `V` relations, `U` research/blueprints/licences, `Z` SETA, `O` ownership, `Y` new ships, `G` orders, `J` behaviours and queues, `I` on foot, `b` station modules, `s` station settings, `c` assignments, `r` trade rules, `a` station accounts, `m` missions, `e` station modules removed/wrecked/repaired, `q` ship upgrades, `p` deployables, `n` map knowledge, `l` ship renames, `w` crews, `g` the wider world (host to joiner), `h` logbook entries, `d` loot taken, `f` cargo, `t` terraforming, `x` test fight numbers, `C` credits given; `R`/`W`/`N`/`X` are between a game and
 its own bridge.
 
 Self-calibration: on first contact the proxy is nudged and read back (does `SetObjectSectorPos`
@@ -645,6 +663,9 @@ python extensions/x4_coop/dev/run_tests.py [--quick]
 * Bridge: password codec (encryption, replay, tamper, stale, other versions), reconnects, chat, wrong password, partner
   injecting bridge messages, non-X4 pipe clients, second partner, and a real save handoff
   between two bridges (`dev/share_test.py`).
+* A big fight (200 ships near the host) measures what the nearby-ship messages cost without the game's
+  40-ship list (`bigfight`); the test fight's numbers and report are checked too (`testfight`), and the
+  game start against the game's own schema.
 * Telemetry: two bridges record traces while two stand-in games fly different paths and report a
   hit and a kill; the report must match every datagram both ways with identical bytes and text
   (`dev/trace_test.py`; `--keep DIR --overlay 12` also shows the overlay).
@@ -662,6 +683,7 @@ files only, no test kit) to your Desktop. Unzip it into `X4 Foundations/extensio
 | `ui/x4_coop.lua` | sampling, messages, prediction, proxy driver, ghost, shared world, NPC bubble, commands |
 | `md/x4_coop.xml` | spawn/adopt/warp proxies, hull/shields, kill/hit/fire events, NPC scan and stand-ins, guest ship |
 | `aiscripts/x4coop.proxy.fire.xml` | makes a proxy fire at a ship for a moment |
+| `libraries/gamestarts.xml` | the test fight game start: the game's empty flight-school sector, savable |
 | `bridge/x4_coop_bridge.py`, `host.bat`, `join.bat` | the bridge and its launchers |
 | `bridge/x4_coop_overlay.py` | live telemetry window over the game |
 | `bridge/x4_coop_trace_report.py`, `report.bat` | lines up two machines' traces; text and HTML report |

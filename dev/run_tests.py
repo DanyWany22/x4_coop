@@ -75,6 +75,25 @@ def test_unique_names():
           "%d declared, README says %s; unlisted: %s" % (len(game), count and count.group(1), ", ".join(unlisted)))
 
 
+def test_gamestart(tmp):
+    try:
+        from lxml import etree
+    except ImportError:
+        print("SKIP  game start validation (pip install lxml to enable)")
+        return
+    cats = sorted(glob.glob(str(GAME / "[0-9][0-9].cat")))
+    catx.extract(tmp, r"^libraries/(gamestarts\.xml|[a-z_]+\.xsd)$", cats)
+    base = etree.parse(str(Path(tmp) / "libraries" / "gamestarts.xml"))
+    diff = etree.parse(str(MOD / "libraries" / "gamestarts.xml"))
+    added = diff.getroot().find("add")
+    for start in added:
+        base.getroot().append(start)
+    schema = etree.XMLSchema(etree.parse(str(Path(tmp) / "libraries" / "gamestarts.xsd")))
+    ok = added.get("sel") == "/gamestarts" and schema.validate(base)
+    check("game start: X4 Co-op test fight, in place among the game's own", ok,
+          "; ".join(f"line {e.line}: {e.message}" for e in schema.error_log)[:500])
+
+
 def test_lua(tmp):
     mod_lua = MOD / "ui" / "x4_coop.lua"
     listing = Path(tmp) / "scenarios.txt"
@@ -215,6 +234,7 @@ def test_profile():
 def main():
     with tempfile.TemporaryDirectory() as tmp:
         test_md_schema(tmp)
+        test_gamestart(tmp)
         test_lua(tmp)
     test_unique_names()
     test_codec()

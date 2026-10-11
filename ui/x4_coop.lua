@@ -21,6 +21,7 @@ Chat window commands (type them in the chat window, they never leave your PC):
   /x4coop guestship         (host, shared world) park a spare ship next to you for the joiner, then save
   /x4coop takeship          (joiner) move into the guest ship from the host's save
   /x4coop share             (host) quicksave and send that save to the joiner's bridge
+  /x4coop testfight [n] [s] spawn the same battle (n ships a side, s seconds) and measure the sync in both games
   /x4coop loadshared        (joiner) load the save the host sent (it replaces your quicksave)
   /x4coop ghost | net | off switch mode (remembered in the savegame)
   /x4coop backend lua|md|auto
@@ -902,6 +903,8 @@ on_pipe_message = function(msg)
 		if config.mode == "net" then Receive.f(f, now) end
 	elseif kind == "t" then
 		if config.mode == "net" then Receive.t(f, now) end
+	elseif kind == "x" then
+		if config.mode == "net" then Receive.x(f, now) end
 	elseif kind == "M" then
 		local text = clean_text(f[3], 200)
 		if text ~= "" then
@@ -1370,8 +1373,10 @@ local function npc_send(now)
 		end
 	end
 	-- "complete" tells the partner it may remove ships we don't list; md says whether the list was cut off.
-	net_send(string.format("B|%.4f|%s|%d|%d|%s", now, S.loc.sector_macro, config.npc_radius, N.scan_complete and 1 or 0,
-		table.concat(entries, ";")))
+	local msg = string.format("B|%.4f|%s|%d|%d|%s", now, S.loc.sector_macro, config.npc_radius, N.scan_complete and 1 or 0,
+		table.concat(entries, ";"))
+	net_send(msg)
+	N.tx_bytes, N.tx_max = (N.tx_bytes or 0) + #msg, math.max(N.tx_max or 0, #msg)
 end
 
 -- One B message from the partner: the ships in its area, in its sector (which may not be ours).
@@ -1380,6 +1385,9 @@ local function npc_receive(f, now)
 	local t, radius = tonumber(f[2]), tonumber(f[4])
 	if not t or not f[3] or not f[3]:match("^[%w_]+$") or not radius or radius ~= radius then return end
 	N.partner_radius, N.partner_complete, N.last_b = math.max(0, math.min(radius, config.npc_radius)), f[5] == "1", now
+	local size = #(f[6] or "") + #f[3] + 24
+	N.rx_bytes, N.rx_max = (N.rx_bytes or 0) + size, math.max(N.rx_max or 0, size)
+	if f[5] ~= "1" then N.cap_hits = (N.cap_hits or 0) + 1 end  -- the partner's list was cut off
 	local taken = 0
 	for entry in (f[6] or ""):gmatch("[^;]+") do
 		if taken >= NPC_MAX then break end
@@ -4238,7 +4246,7 @@ Feature.on_commands = on_commands
 Feature.on_command_missing = on_command_missing
 end
 
--- Equipment, deployables, map knowledge, renames and crew: a fifth block, for the same reason.
+-- Equipment, deployables, map knowledge, renames, crew and the wider world: a fifth block, for the same reason.
 do
 local reliable_send, reliable_receive = Feature.reliable_send, Feature.reliable_receive
 
@@ -4502,6 +4510,12 @@ end
 
 Feature.on_crew = on_crew
 Feature.crew_tick = crew_tick
+
+end
+
+-- Logbook, loot, cargo, terraforming and the test fight: a sixth block, for the same reason.
+do
+local reliable_send, reliable_receive = Feature.reliable_send, Feature.reliable_receive
 
 -------------------------------------------------------------------------------
 -- Shared logbook: what either player achieves (the missions, general and diplomacy entries) is written in both
@@ -4788,6 +4802,156 @@ end
 
 Feature.on_terraform = on_terraform
 Feature.terraform_tick = terraform_tick
+
+-------------------------------------------------------------------------------
+-- Test fight: the same battle every time, to measure the nearby-ship sync. /x4coop testfight [ships a side] [seconds]
+-- has md put Argon and Xenon ships in two grids 3 km ahead of the player (OnTestFight) and remove them after the time.
+-- Both games measure meanwhile: what the nearby-ship messages (B) cost, how many ships they carried and how often
+-- the 40-ship list was full, and which ship attacked which (md TestFightWatch; ID codes as the host knows them). At
+-- the end each game sends its numbers to the other, and the one that started it reports both, with how many of the
+-- attacks happened in both worlds. "x|msg|id|start|ships|seconds", "x|msg|id|sum|seconds|sent KB/s|largest|received
+-- KB/s|largest|nearby|driven|stand-ins|list full|attacks", "x|msg|id|pairs|attacker>target,...", sent reliably.
+
+local TEST_SIDE_MAX = 60
+local TEST_WAIT = 15         -- s to wait for the partner's numbers
+
+local function test_canon(code)  -- a ship's ID code as the host knows it
+	if S.link.role == "join" then return S.npc.mirror_of[code] or alias_out(code) end
+	return code
+end
+
+local function test_begin(n, secs, starter)
+	local N, now = S.npc, getElapsedTime()
+	N.tx_max, N.rx_max = 0, 0
+	S.test = { n = n, secs = secs, starter = starter, started = now, ends = now + secs, next_sample = 0,
+		tx = N.tx_bytes or 0, rx = N.rx_bytes or 0, caps = N.cap_hits or 0,
+		members = 0, driven = 0, mirrors = 0, pairs = {}, their_pairs = {} }
+	request("testfight_measure", { 1 })
+end
+
+local function test_summary(T)
+	local N = S.npc
+	local secs = math.max(1, getElapsedTime() - T.started)
+	local list = {}
+	for k in pairs(T.pairs) do list[#list + 1] = k end
+	table.sort(list)
+	return { secs = secs, tx = ((N.tx_bytes or 0) - T.tx) / secs / 1024, tx_max = N.tx_max or 0,
+		rx = ((N.rx_bytes or 0) - T.rx) / secs / 1024, rx_max = N.rx_max or 0, members = T.members,
+		driven = T.driven, mirrors = T.mirrors, caps = (N.cap_hits or 0) - T.caps, pairs = list, npairs = #list }
+end
+
+local function test_line(who, s)
+	return string.format("%s sent %.1f KB/s (largest %d B), received %.1f KB/s (largest %d B), nearby ships up to %d, "
+		.. "copies driven up to %d, stand-ins up to %d, list full %d times, %d attacks seen", who, s.tx, s.tx_max, s.rx,
+		s.rx_max, s.members, s.driven, s.mirrors, s.caps, s.npairs)
+end
+
+local function testfight(n, secs)
+	n = math.max(1, math.min(TEST_SIDE_MAX, math.floor(tonumber(n) or 10)))
+	secs = math.max(20, math.min(1800, math.floor(tonumber(secs) or 120)))
+	if S.test and not S.test.over then
+		notify("a test fight is already running")
+		return
+	end
+	request("testfight", { n, secs })
+	test_begin(n, secs, true)
+	if config.mode == "net" and S.net.connected then reliable_send("x", { "start", n, secs }) end
+	notify("test fight: %d Argon and %d Xenon ships 3 km ahead, for %d s; both games measure the sync meanwhile", n, n, secs)
+end
+
+local function on_test_pairs()
+	local list = S.player and GetNPCBlackboard(S.player, "$x4coop_testpairs")
+	if S.player then SetNPCBlackboard(S.player, "$x4coop_testpairs", nil) end
+	local T = S.test
+	if type(list) ~= "table" or not T or T.over then return end
+	for _, v in ipairs(list) do
+		if type(v) == "table" and type(v[1]) == "string" and type(v[2]) == "string" and v[1]:match("^[%w%-]+$")
+			and v[2]:match("^[%w%-]+$") then
+			T.pairs[test_canon(v[1]) .. ">" .. test_canon(v[2])] = true
+		end
+	end
+end
+
+local function on_testfight_done(_, param)
+	local left, total = tostring(param or ""):match("^(%d+)|(%d+)$")
+	if left then log("testfight: the battle is over, %s of %s ships left (removed)", left, total) end
+end
+
+Receive.x = function(f, now)
+	reliable_receive("x", f, now, function(m)
+		local T = S.test
+		if m[4] == "start" and tonumber(m[5]) and tonumber(m[6]) and not (T and not T.over) then
+			test_begin(math.floor(tonumber(m[5])), math.floor(tonumber(m[6])), false)
+			notify("your partner started a test fight (%d a side, %d s): measuring here too", tonumber(m[5]), tonumber(m[6]))
+		elseif m[4] == "sum" and T then
+			local v = {}
+			for i = 5, 15 do v[#v + 1] = tonumber(m[i]) or 0 end
+			T.theirs = { secs = v[1], tx = v[2], tx_max = v[3], rx = v[4], rx_max = v[5], members = v[6], driven = v[7],
+				mirrors = v[8], caps = v[9], npairs = v[10] }
+		elseif m[4] == "pairs" and T then
+			for k in tostring(m[5] or ""):gmatch("[^,]+") do
+				if k:match("^[%w%-]+>[%w%-]+$") then T.their_pairs[k] = true end
+			end
+		end
+	end)
+end
+
+local function test_tick(now)
+	local T = S.test
+	if not T or T.reported then return end
+	if not T.over then
+		if now >= T.next_sample then
+			T.next_sample = now + 1
+			local N = S.npc
+			T.members = math.max(T.members, npc_count(N.members))
+			T.driven = math.max(T.driven, N.driven or 0)
+			T.mirrors = math.max(T.mirrors, npc_count(N.mirrors))
+		end
+		if now < T.ends then return end
+		T.over = true
+		request("testfight_measure", { 0 })
+		local s = test_summary(T)
+		T.mine = s
+		log("testfight: this game %s", test_line("", s))
+		if config.mode == "net" and S.net.connected then
+			reliable_send("x", { "sum", string.format("%.0f", s.secs), string.format("%.2f", s.tx), s.tx_max,
+				string.format("%.2f", s.rx), s.rx_max, s.members, s.driven, s.mirrors, s.caps, s.npairs })
+			local chunk, size = {}, 0
+			for _, k in ipairs(s.pairs) do
+				chunk[#chunk + 1], size = k, size + #k + 1
+				if size > 900 then
+					reliable_send("x", { "pairs", table.concat(chunk, ",") })
+					chunk, size = {}, 0
+				end
+			end
+			if #chunk > 0 then reliable_send("x", { "pairs", table.concat(chunk, ",") }) end
+		end
+		T.report_at = now + TEST_WAIT
+		if not T.starter then T.reported = true end
+		return
+	end
+	local got = 0
+	for _ in pairs(T.their_pairs) do got = got + 1 end
+	if not (T.theirs and got >= T.theirs.npairs) and now < T.report_at then return end
+	T.reported = true
+	local both = 0
+	for k in pairs(T.pairs) do if T.their_pairs[k] then both = both + 1 end end
+	local union = T.mine.npairs + got - both
+	local head = string.format("test fight report (%d a side, %d s)", T.n, T.secs)
+	local here = "here:" .. test_line("", T.mine)
+	local there = T.theirs and ("partner:" .. test_line("", T.theirs)) or "partner: no numbers came back"
+	local match = string.format("who attacked whom: %d here, %d there, %d in both (%d%%)", T.mine.npairs, got, both,
+		union > 0 and math.floor(100 * both / union + 0.5) or 100)
+	log("%s | %s | %s | %s", head, here, there, match)
+	notify("%s: %s", head, match)
+	notify("%s", here)
+	notify("%s", there)
+end
+
+Feature.testfight = testfight
+Feature.on_test_pairs = on_test_pairs
+Feature.on_testfight_done = on_testfight_done
+Feature.test_tick = test_tick
 
 -------------------------------------------------------------------------------
 -- The wider world (host to joiner): every other faction's stations, as they are in the host's world (built,
@@ -5078,7 +5242,7 @@ local function status_text()
 		conv_name(S.conv), S.probe.measured and "measured" or "assumed")
 end
 
-local USAGE = "usage: /x4coop status | check | join | say <text> | give <credits> | guestship | takeship | share | loadshared | ghost | net | off | backend lua|md|auto | probe | pipe <name> | pipeclient auto|own|sirnukes | set <key> <number>"
+local USAGE = "usage: /x4coop status | check | join | say <text> | give <credits> | testfight [ships] [seconds] | guestship | takeship | share | loadshared | ghost | net | off | backend lua|md|auto | probe | pipe <name> | pipeclient auto|own|sirnukes | set <key> <number>"
 
 local function guest_ship()
 	local ship = S.player and GetNPCBlackboard(S.player, "$x4coop_guestship")
@@ -5209,6 +5373,8 @@ local function command(param)
 		load_shared()
 	elseif cmd == "give" then
 		Feature.give_credits(args[2])
+	elseif cmd == "testfight" then
+		Feature.testfight(args[2], args[3])
 	elseif cmd == "pipeclient" then
 		local choice = args[2]
 		if choice == "auto" or choice == "own" or choice == "sirnukes" then
@@ -5325,6 +5491,7 @@ local function tick(now, dt)
 	Feature.loot_tick()
 	Feature.cargo_tick()
 	Feature.terraform_tick()
+	Feature.test_tick(now)
 end
 
 local function on_update()
@@ -5374,6 +5541,8 @@ local function init()
 	RegisterEvent("x4coop.loot", Feature.on_loot)
 	RegisterEvent("x4coop.cargo", Feature.on_cargo)
 	RegisterEvent("x4coop.terraform", Feature.on_terraform)
+	RegisterEvent("x4coop.testpairs", Feature.on_test_pairs)
+	RegisterEvent("x4coop.testfight_done", Feature.on_testfight_done)
 	RegisterEvent("x4coop.galaxy", Feature.on_world)
 	RegisterEvent("x4coop.galaxy_want", Feature.on_world_want)
 	RegisterEvent("x4coop.galaxy_layout", Feature.on_world_layout)

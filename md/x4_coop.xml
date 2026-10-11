@@ -3113,6 +3113,154 @@
           </actions>
         </cue>
 
+        <!--
+          Test fight: the same battle every time, to measure the nearby-ship sync. OnTestFight (param3: [ships a side,
+          seconds]) puts Argon ships (every fifth an M frigate) and as many Xenon ships (every fifth an M corvette) in
+          two grids of five abreast, 3 km ahead of the player and 3 km apart, each ordered to attack its opposite
+          number, and removes what's left after the time (TestFightEnd: 'x4coop.testfight_done', [ships left, ships]).
+          While 'testfight_measure' (param3: [1 or 0]) is on, TestFightWatch notes which ship attacked which in the
+          player's sector, and every 2 s hands them to Lua (player.entity.$x4coop_testpairs: [[attacker idcode,
+          target idcode], ...], 'x4coop.testpairs').
+        -->
+        <cue name="OnTestFight" instantiate="true">
+          <conditions>
+            <event_ui_triggered screen="'x4coop'" control="'testfight'"/>
+          </conditions>
+          <actions>
+            <set_value name="$N" exact="[[event.param3.{1}, 1].max, 60].min"/>
+            <set_value name="$Seconds" exact="[[event.param3.{2}, 20].max, 1800].min"/>
+            <set_value name="$Me" exact="player.occupiedship"/>
+            <do_if value="@$Me.sector">
+              <include_actions ref="ClearTestFight"/>
+              <set_value name="$Sector" exact="$Me.sector"/>
+              <set_value name="$C" exact="$Me.relativeposition.{$Sector}"/>
+              <set_value name="$SideA" exact="[]"/>
+              <set_value name="$SideB" exact="[]"/>
+              <do_all exact="$N" counter="$i">
+                <set_value name="$Row" exact="($i - 1) / 5"/>
+                <set_value name="$Col" exact="$i - 1 - $Row * 5"/>
+                <set_value name="$DY" exact="($Col - 2) * 150m"/>
+                <set_value name="$DZ" exact="3000m + $Row * 150m"/>
+                <create_ship name="$A" macro="if $Col == 4 then macro.ship_arg_m_frigate_01_a_macro else macro.ship_arg_s_fighter_01_a_macro" sector="$Sector">
+                  <owner exact="faction.argon" overridenpc="true"/>
+                  <loadout>
+                    <level exact="0.7"/>
+                  </loadout>
+                  <pilot>
+                    <select faction="faction.argon" tags="tag.aipilot"/>
+                  </pilot>
+                  <position x="$C.x - 1500m" y="$C.y + $DY" z="$C.z + $DZ"/>
+                  <rotation yaw="90deg"/>
+                </create_ship>
+                <create_ship name="$B" macro="if $Col == 4 then macro.ship_xen_m_corvette_01_a_macro else macro.ship_xen_s_fighter_01_a_macro" sector="$Sector">
+                  <owner exact="faction.xenon" overridenpc="true"/>
+                  <loadout>
+                    <level exact="0.7"/>
+                  </loadout>
+                  <pilot>
+                    <select faction="faction.xenon" tags="tag.aipilot"/>
+                  </pilot>
+                  <position x="$C.x + 1500m" y="$C.y + $DY" z="$C.z + $DZ"/>
+                  <rotation yaw="-90deg"/>
+                </create_ship>
+                <append_to_list name="$SideA" exact="$A"/>
+                <append_to_list name="$SideB" exact="$B"/>
+              </do_all>
+              <do_all exact="$N" counter="$i">
+                <do_if value="@$SideA.{$i}.exists and @$SideB.{$i}.exists">
+                  <create_order id="'Attack'" object="$SideA.{$i}" immediate="true">
+                    <param name="primarytarget" value="$SideB.{$i}"/>
+                  </create_order>
+                  <create_order id="'Attack'" object="$SideB.{$i}" immediate="true">
+                    <param name="primarytarget" value="$SideA.{$i}"/>
+                  </create_order>
+                </do_if>
+              </do_all>
+              <set_value name="Root.$TestFightShips" exact="$SideA"/>
+              <do_for_each name="$B" in="$SideB">
+                <append_to_list name="Root.$TestFightShips" exact="$B"/>
+              </do_for_each>
+              <set_value name="Root.$TestFightEnd" exact="player.age + $Seconds * 1s"/>
+              <set_value name="Root.$TestFightOn" exact="1"/>
+            </do_if>
+          </actions>
+        </cue>
+
+        <cue name="TestFightEnd" instantiate="true" checkinterval="1s">
+          <conditions>
+            <check_value value="Root.$TestFightEnd? and player.age ge Root.$TestFightEnd"/>
+          </conditions>
+          <actions>
+            <set_value name="$Total" exact="@Root.$TestFightShips.count"/>
+            <set_value name="$Left" exact="0"/>
+            <do_if value="Root.$TestFightShips?">
+              <do_for_each name="$Ship" in="Root.$TestFightShips">
+                <do_if value="@$Ship.isoperational">
+                  <set_value name="$Left" exact="$Left + 1"/>
+                </do_if>
+              </do_for_each>
+            </do_if>
+            <include_actions ref="ClearTestFight"/>
+            <raise_lua_event name="'x4coop.testfight_done'" param="'' + $Left + '|' + $Total"/>
+          </actions>
+        </cue>
+
+        <cue name="OnTestMeasure" instantiate="true">
+          <conditions>
+            <event_ui_triggered screen="'x4coop'" control="'testfight_measure'"/>
+          </conditions>
+          <actions>
+            <set_value name="Root.$TestFightOn" exact="event.param3.{1}"/>
+            <set_value name="Root.$TestPairs" exact="[]"/>
+            <set_value name="Root.$TestPairKeys" exact="[]"/>
+          </actions>
+        </cue>
+
+        <cue name="TestFightWatch">
+          <actions>
+            <create_group groupname="$Ships"/>
+          </actions>
+          <cues>
+            <cue name="TestFightGroup" instantiate="true" checkinterval="2s">
+              <conditions>
+                <check_value value="@Root.$TestFightOn == 1 and @player.entity.sector"/>
+              </conditions>
+              <actions>
+                <find_ship name="$All" space="player.entity.sector" multiple="true"/>
+                <clear_group group="TestFightWatch.$Ships"/>
+                <add_to_group groupname="TestFightWatch.$Ships" list="$All"/>
+                <do_if value="@Root.$TestPairs.count gt 0">
+                  <do_if value="not player.entity.$x4coop_testpairs?">
+                    <set_value name="player.entity.$x4coop_testpairs" exact="[]"/>
+                  </do_if>
+                  <do_for_each name="$Pair" in="Root.$TestPairs">
+                    <append_to_list name="player.entity.$x4coop_testpairs" exact="$Pair"/>
+                  </do_for_each>
+                  <set_value name="Root.$TestPairs" exact="[]"/>
+                  <raise_lua_event name="'x4coop.testpairs'"/>
+                </do_if>
+              </actions>
+            </cue>
+            <cue name="TestFightAttacked" instantiate="true">
+              <conditions>
+                <event_object_attacked group="TestFightWatch.$Ships"/>
+                <check_value value="@Root.$TestFightOn == 1 and @event.param.isclass.ship and @event.object.idcode"/>
+              </conditions>
+              <actions>
+                <set_value name="$Key" exact="event.param.idcode + '>' + event.object.idcode"/>
+                <do_if value="not Root.$TestPairKeys?">
+                  <set_value name="Root.$TestPairKeys" exact="[]"/>
+                  <set_value name="Root.$TestPairs" exact="[]"/>
+                </do_if>
+                <do_if value="not Root.$TestPairKeys.indexof.{$Key}">
+                  <append_to_list name="Root.$TestPairKeys" exact="$Key"/>
+                  <append_to_list name="Root.$TestPairs" exact="[event.param.idcode, event.object.idcode]"/>
+                </do_if>
+              </actions>
+            </cue>
+          </cues>
+        </cue>
+
         <cue name="OnNpcClear" instantiate="true">
           <conditions>
             <event_ui_triggered screen="'x4coop'" control="'npc_clear'"/>
@@ -3457,6 +3605,22 @@
             </do_if>
             <append_to_list name="player.entity.$x4coop_loot" exact="$Entry"/>
             <raise_lua_event name="'x4coop.loot'"/>
+          </actions>
+        </library>
+
+        <library name="ClearTestFight">
+          <actions>
+            <do_if value="Root.$TestFightShips?">
+              <do_for_each name="$Ship" in="Root.$TestFightShips">
+                <do_if value="@$Ship.exists">
+                  <destroy_object object="$Ship" explosion="false"/>
+                </do_if>
+              </do_for_each>
+            </do_if>
+            <set_value name="Root.$TestFightShips" exact="[]"/>
+            <do_if value="Root.$TestFightEnd?">
+              <remove_value name="Root.$TestFightEnd"/>
+            </do_if>
           </actions>
         </library>
 
