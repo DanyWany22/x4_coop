@@ -1076,7 +1076,75 @@ if sc.pipes then
 		}
 	end
 end
+-- nearby-ship messages (B), as the mod writes them: the fake partner's, and decoding ours for the checks
+local function b36(n)
+	n = math.floor(n + 0.5)
+	local neg, digits, s = n < 0, "0123456789abcdefghijklmnopqrstuvwxyz", ""
+	if neg then n = -n end
+	repeat
+		local d = n % 36
+		s = digits:sub(d + 1, d + 1) .. s
+		n = (n - d) / 36
+	until n == 0
+	return neg and ("-" .. s) or s
+end
+local function unb36(s)
+	local neg = s:sub(1, 1) == "-"
+	local n = tonumber(neg and s:sub(2) or s, 36)
+	return n and (neg and -n or n)
+end
+-- list: { code, macro, owner, hull, x, y, z, yaw, pitch, roll, vx, vy, vz }, each with its descriptor
+function sim_b(t, sector, list)
+	local entries = {}
+	for i, e in ipairs(list) do
+		entries[#entries + 1] = table.concat({ b36(i) .. "/" .. e[1] .. "/" .. e[2] .. "/" .. e[3], math.floor(e[4] + 0.5),
+			b36(e[5] * 10), b36(e[6] * 10), b36(e[7] * 10), b36(e[8] * 1000), b36(e[9] * 1000), b36(e[10] * 1000),
+			b36(e[11] * 10), b36(e[12] * 10), b36(e[13] * 10) }, ",")
+	end
+	return string.format("B|%.4f|%s|6000|1|sim1|0|0|0|%s", t, sector, table.concat(entries, ";"))
+end
+-- our B messages, in order: each { t, sector, header, ships = { [code] = { x, y, z, hull } } }
+function sim_decode_b(msgs)
+	local out, desc, session = {}, {}, nil
+	for _, msg in ipairs(msgs) do
+		local f = {}
+		for part in (msg .. "|"):gmatch("([^|]*)|") do f[#f + 1] = part end
+		if f[6] ~= session then session, desc = f[6], {} end
+		local ax, ay, az = tonumber(f[7]) or 0, tonumber(f[8]) or 0, tonumber(f[9]) or 0
+		local m = { t = tonumber(f[2]), sector = f[3], header = table.concat({ f[1], f[2], f[3], f[4], f[5] }, "|"), ships = {} }
+		for entry in (f[10] or ""):gmatch("[^;]+") do
+			local v = {}
+			for x in entry:gmatch("[^,]+") do v[#v + 1] = x end
+			local idx, d = v[1]:match("^(%w+)/(.+)$")
+			if idx then
+				local code = d:match("^([%w%-]+)/")
+				desc[idx] = code
+			else
+				idx = v[1]
+			end
+			if desc[idx] then
+				m.ships[desc[idx]] = { x = ax + unb36(v[3]) / 10, y = ay + unb36(v[4]) / 10, z = az + unb36(v[5]) / 10, hull = tonumber(v[2]),
+					vx = unb36(v[9]) / 10, vy = unb36(v[10]) / 10, vz = unb36(v[11]) / 10 }
+			end
+		end
+		out[#out + 1] = m
+	end
+	return out
+end
+-- the ships listed in the last `span` seconds of these decoded messages (ours are sent when they move, not every time)
+function sim_listed_recently(decoded, span)
+	local last_t = decoded[#decoded] and decoded[#decoded].t or 0
+	local codes = {}
+	for _, m in ipairs(decoded) do
+		if m.t and m.t >= last_t - span then
+			for code in pairs(m.ships) do codes[code] = true end
+		end
+	end
+	return codes
+end
+
 local next_b = 0
+fake_host_sent, fake_host_entries = {}, 0
 local function fake_host_bubble()
 	if sc.npc_test ~= "join" or not pipe_reader or clock < next_b or #history < 2 then return end
 	next_b = clock + 0.1
@@ -1087,11 +1155,18 @@ local function fake_host_bubble()
 		local x, y, z = npc_truth(i, clock, h)
 		local x0, y0, z0 = npc_truth(i, h0.t, h0)  -- velocity over the actual history step
 		local dt0 = clock - h0.t
-		entries[#entries + 1] = string.format("%s,%s,pirate,%.1f,%.2f,%.2f,%.2f,%.5f,0,0,%.2f,%.2f,%.2f", code, SHIP_MACRO,
-			i == 1 and 55 or 100, x, y, z, i * 0.5, (x - x0) / dt0, (y - y0) / dt0, (z - z0) / dt0)
+		local vx, vy, vz = (x - x0) / dt0, (y - y0) / dt0, (z - z0) / dt0
+		-- like the mod: only when the ship has moved 1.5 m off its last report's prediction, or a second has passed
+		local last = fake_host_sent[code]
+		local dt = last and clock - last.t
+		local off = last and math.sqrt((last.x + last.vx * dt - x) ^ 2 + (last.y + last.vy * dt - y) ^ 2 + (last.z + last.vz * dt - z) ^ 2)
+		if not last or dt >= 1 or off > 1.5 then
+			fake_host_sent[code] = { t = clock, x = x, y = y, z = z, vx = vx, vy = vy, vz = vz }
+			entries[#entries + 1] = { code, SHIP_MACRO, "pirate", i == 1 and 55 or 100, x, y, z, i * 0.5, 0, 0, vx, vy, vz }
+		end
 	end
-	partner_queue[#partner_queue + 1] = { at = clock + ONE_WAY,
-		msg = string.format("B|%.4f|%s|6000|1|%s", clock + partner_clock_offset, SECTORS[500], table.concat(entries, ";")) }
+	fake_host_entries = fake_host_entries + #entries
+	partner_queue[#partner_queue + 1] = { at = clock + ONE_WAY, msg = sim_b(clock + partner_clock_offset, SECTORS[500], entries) }
 end
 
 local function fake_joiner_bubble()
@@ -1105,12 +1180,11 @@ local function fake_joiner_bubble()
 		local x, y, z = npc_truth(i, clock, c)
 		local x0, y0, z0 = npc_truth(i, h0.t, c0)
 		local dt0 = clock - h0.t
-		entries[#entries + 1] = string.format("NPC-%d,%s,pirate,%.1f,%.2f,%.2f,%.2f,%.5f,0,0,%.2f,%.2f,%.2f", i, SHIP_MACRO,
-			i == 21 and 55 or 100, x, y, z, (i - 20) * 0.5, (x - x0) / dt0, (y - y0) / dt0, (z - z0) / dt0)
+		entries[#entries + 1] = { "NPC-" .. i, SHIP_MACRO, "pirate", i == 21 and 55 or 100, x, y, z, (i - 20) * 0.5, 0, 0,
+			(x - x0) / dt0, (y - y0) / dt0, (z - z0) / dt0 }
 	end
-	entries[#entries + 1] = string.format("NPC-1,%s,pirate,100.0,%.2f,%.2f,%.2f,0,0,0,0,0,0", SHIP_MACRO, c.x, c.y, c.z)
-	partner_queue[#partner_queue + 1] = { at = clock + ONE_WAY,
-		msg = string.format("B|%.4f|%s|6000|1|%s", clock + partner_clock_offset, SECTORS[501], table.concat(entries, ";")) }
+	entries[#entries + 1] = { "NPC-1", SHIP_MACRO, "pirate", 100, c.x, c.y, c.z, 0, 0, 0, 0, 0, 0 }
+	partner_queue[#partner_queue + 1] = { at = clock + ONE_WAY, msg = sim_b(clock + partner_clock_offset, SECTORS[501], entries) }
 end
 
 local econ_next, econ_pass, econ_index = 0, 1, 0
@@ -2157,8 +2231,10 @@ if sc.npc_test then
 	local bs = {}
 	for _, w in ipairs(pipe_writes) do if w:sub(1, 2) == "B|" then bs[#bs + 1] = w end end
 	if sc.npc_test == "apart" or sc.npc_test == "apart_join" then
-		local last = ""  -- our last report from our own sector (at the end, /x4coop join takes us to the joiner)
-		for _, b in ipairs(bs) do if b:find("|" .. SECTORS[500] .. "|", 1, true) then last = b end end
+		-- what we listed lately from our own sector (at the end, /x4coop join takes us to the joiner)
+		local own = {}
+		for _, b in ipairs(bs) do if b:find("|" .. SECTORS[500] .. "|", 1, true) then own[#own + 1] = b end end
+		local listed = sim_listed_recently(sim_decode_b(own), 1.5)
 		local st, emax, e95 = stats(npc_errs)
 		local mst, mmax, m95 = stats(mirror_errs)
 		local mid = mirror_of_code["NPC-25"]
@@ -2166,7 +2242,7 @@ if sc.npc_test then
 		say("npc apart: our copies near the joiner vs its truth (m): %s   [%d samples]; stand-in NPC-25 = %s in sector %s: %s",
 			st, #npc_errs, tostring(mid), tostring(apart_mirror_sector), mst)
 		say("npc apart: NPC-1 moved by us %d times; our last B lists NPC-1: %s, NPC-21: %s; actions: %s",
-			setpos_count[401] or 0, tostring(last:find("NPC-1,", 1, true) ~= nil), tostring(last:find("NPC-21,", 1, true) ~= nil), acts)
+			setpos_count[401] or 0, tostring(listed["NPC-1"] ~= nil), tostring(listed["NPC-21"] ~= nil), acts)
 		local sent = table.concat(pipe_writes, "\n")
 		local ours = sc.npc_test == "apart" and "K|NPC-2|" or "K|NPC-3|"
 		say("npc %s: death in our area reported: %s; death in the partner's area reported: %s", sc.npc_test,
@@ -2176,45 +2252,68 @@ if sc.npc_test then
 			and mid ~= nil and apart_mirror_sector == 501 and #mirror_errs > 500 and m95 < 10
 			and (setpos_count[401] or 0) == 0                            -- our own area stays ours
 			-- we report our own area (as joiner, not NPC-1: the host claims that one, falsely, so it is the host's)
-			and last:find(sc.npc_test == "apart" and "NPC-1," or "NPC-2,", 1, true) ~= nil and last:find("NPC-21,", 1, true) == nil
+			and listed[sc.npc_test == "apart" and "NPC-1" or "NPC-2"] ~= nil and listed["NPC-21"] == nil
 			and acts:find("obj_remove:427", 1, true) ~= nil             -- only we had it, in the joiner's area
 			and acts:find("obj_remove:428", 1, true) == nil             -- player-owned: kept
 			and acts:find("obj_hull:421,55", 1, true) ~= nil            -- the joiner's lower hull taken
 			and acts:find("obj_remove:40", 1, true) == nil              -- nothing of our own area removed
 	elseif sc.npc_test == "host" then
-		local last = bs[#bs] or ""
+		local decoded = sim_decode_b(bs)
+		local listed = sim_listed_recently(decoded, 1.5)
 		local codes = 0
-		for i = 1, NPC_COUNT do if last:find("NPC-" .. i .. ",", 1, true) then codes = codes + 1 end end
-		-- the entry for NPC-1 must carry the ship's position at send time (within a frame of motion)
-		local x = tonumber(last:match("NPC%-1,[%w_]+,[%w_]+,[%d%.]+,([%-%d%.]+),"))
+		for i = 1, NPC_COUNT do if listed["NPC-" .. i] then codes = codes + 1 end end
+		-- each report of NPC-1 carries the ship's position when it was sent (within a frame of motion)
+		local worst, reports = 0, 0
+		for _, m in ipairs(decoded) do
+			local e = m.ships["NPC-1"]
+			if e and m.t then
+				local tx = npc_truth(1, m.t, player_at(m.t))
+				worst, reports = math.max(worst, math.abs(e.x - tx)), reports + 1
+			end
+		end
+		-- the partner's view between reports: NPC-1 predicted from its last report, against where it really was
+		local reps = {}
+		for _, m in ipairs(decoded) do if m.ships["NPC-1"] and m.t then reps[#reps + 1] = { t = m.t, e = m.ships["NPC-1"] } end end
+		local view_errs, k = {}, 1
+		for t = (reps[1] and reps[1].t or sc.duration), sc.duration - 1, 0.05 do
+			while reps[k + 1] and reps[k + 1].t <= t do k = k + 1 end
+			local r = reps[k]
+			if r then
+				local dt = t - r.t
+				local tx, ty, tz = npc_truth(1, t, player_at(t))
+				local ex, ey, ez = r.e.x + r.e.vx * dt - tx, r.e.y + r.e.vy * dt - ty, r.e.z + r.e.vz * dt - tz
+				view_errs[#view_errs + 1] = math.sqrt(ex * ex + ey * ey + ez * ez)
+			end
+		end
+		local vst, vmax, v95 = stats(view_errs)
+		say("npc host: the partner's view of NPC-1 between reports, predicted from the last one, vs truth (m): %s", vst)
+		ok = ok and #view_errs > 400 and v95 < 6
+		local last = bs[#bs] or ""
 		ok = ok and last:match("^B|[%d%.]+|[%w_]+|6000|1|") ~= nil  -- radius and "complete" in the header
-		local o = objects[401]
-		say("npc host: %d B messages (%.1f/s), last one lists %d of %d ships, NPC-1 x %.1f vs %.1f",
-			#bs, #bs / sc.duration, codes, NPC_COUNT, x or -1, o.x)
-		ok = ok and #bs > 8 * (sc.duration - 2) and codes == NPC_COUNT and x and math.abs(x - o.x) < 20
+		say("npc host: %d B messages (%.1f/s), the last 1.5 s list %d of %d ships, NPC-1 reported %d times, x off by %.1f m at most",
+			#bs, #bs / sc.duration, codes, NPC_COUNT, reports, worst)
+		ok = ok and #bs > 8 * (sc.duration - 2) and codes == NPC_COUNT and reports > sc.duration and worst < 20
 	elseif sc.npc_test == "big" then
 		-- a big fight near the host: what the nearby-ship messages cost (no md cap of 40 here)
-		local largest, total, most = 0, 0, 0
-		for _, b in ipairs(bs) do
-			largest, total = math.max(largest, #b), total + #b
-			local n = select(2, b:gsub(";", ";")) + 1
-			most = math.max(most, n)
-		end
-		big_numbers = string.format("%d ships near the host: B messages largest %d B (%d ships), %.0f KB/s", NPC_COUNT, largest,
-			most, total / sc.duration / 1024)
+		local largest, total = 0, 0
+		for _, b in ipairs(bs) do largest, total = math.max(largest, #b), total + #b end
+		local listed, n = sim_listed_recently(sim_decode_b(bs), 1.5), 0
+		for _ in pairs(listed) do n = n + 1 end
+		big_numbers = string.format("%d ships near the host: B messages largest %d B, %.0f KB/s, %d ships listed in the last 1.5 s",
+			NPC_COUNT, largest, total / sc.duration / 1024, n)
 		say("bigfight: %s", big_numbers)
-		ok = ok and most >= NPC_COUNT * 0.9
+		ok = ok and n >= NPC_COUNT * 0.95 and largest <= 1250 and total / sc.duration / 1024 < 100
 	else
 		local st, emax, e95 = stats(npc_errs)
 		-- we report our own area, never the host's: everything here is near the host, so no ships at all
 		local listed = 0
-		for _, b in ipairs(bs) do
-			for _, code in ipairs({ "NPC-1,", "NPC-2,", "NPC-3,", "NPC-4,", "NPC-7,", "OWN-8,", "NPC-9,", "NPC-10,", "NPC-11," }) do
-				if b:find(code, 1, true) then listed = listed + 1 end
+		for _, m in ipairs(sim_decode_b(bs)) do
+			for _, code in ipairs({ "NPC-1", "NPC-2", "NPC-3", "NPC-4", "NPC-7", "OWN-8", "NPC-9", "NPC-10", "NPC-11" }) do
+				if m.ships[code] then listed = listed + 1 end
 			end
 		end
-		say("npc join: copies vs host truth (m): %s   [%d samples]; B sent by us: %d, listing host-area ships %d times",
-			st, #npc_errs, #bs, listed)
+		say("npc join: copies vs host truth (m): %s   [%d samples]; B sent by us: %d, listing host-area ships %d times; "
+			.. "the host's reports carried %.1f ships a message", st, #npc_errs, #bs, listed, fake_host_entries / math.max(1, sc.duration * 10))
 		ok = ok and #npc_errs > 1000 and e95 < 5 and #bs > 8 * (sc.duration - 5) and listed == 0
 		local mst, mmax, m95 = stats(mirror_errs)
 		local mid = mirror_of_code["NPC-9"]

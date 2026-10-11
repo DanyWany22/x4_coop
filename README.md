@@ -224,7 +224,11 @@ What syncs while linked:
 * **Gunfire:** your partner's ship fires at the ship they shoot at (hits or misses).
 * **NPCs near either of you** (within 6 km): each game is the truth for the ships around its own
   player, which it simulates in full; where you're together, the host's game is. Both games send
-  their area's ships 10 times a second, and the other game moves its copies of them to match:
+  their area's ships, up to 80 (`npc_max`), and the other game moves its copies of them to match. A ship
+  is sent when it has moved 1.5 m (`npc_precision`) off where its last report says it would be, up to 10
+  times a second within 2 km of either of you and twice a second further out, and at least once a second;
+  a ship's ID and type go with its first report and every 3 seconds after, and its numbers are short and
+  relative to the sender. In a 200-ship test that's about 40 KB/s, with no message over 1,100 bytes:
   * **Together:** the joiner follows the host. Ships only the host has get a stand-in on the
     joiner's side; ships only the joiner has, well inside the host's range, are removed there.
   * **Apart,** even in different sectors: the host's copies of the ships around the joiner follow
@@ -663,8 +667,9 @@ python extensions/x4_coop/dev/run_tests.py [--quick]
 * Bridge: password codec (encryption, replay, tamper, stale, other versions), reconnects, chat, wrong password, partner
   injecting bridge messages, non-X4 pipe clients, second partner, and a real save handoff
   between two bridges (`dev/share_test.py`).
-* A big fight (200 ships near the host) measures what the nearby-ship messages cost without the game's
-  40-ship list (`bigfight`); the test fight's numbers and report are checked too (`testfight`), and the
+* A big fight (200 ships near the host) measures what the nearby-ship messages cost (`bigfight`: no message
+  over 1,250 bytes, under 100 KB/s, every ship listed); the joiner's copies are measured against the truth
+  with the host's reports sent only as ships drift, as the mod sends them; the test fight's numbers and report are checked too (`testfight`), and the
   game start against the game's own schema.
 * Telemetry: two bridges record traces while two stand-in games fly different paths and report a
   hit and a kill; the report must match every datagram both ways with identical bytes and text

@@ -455,7 +455,7 @@
 
         <!--
           NPC bubble (shared world): while Lua sets a radius, list the ships near the player every second, nearest
-          first, without mass traffic, drones, docked ships, proxies or stand-ins, at most 40.
+          first, without mass traffic, drones, docked ships, proxies or stand-ins, at most Root.$BubbleMax (Lua's npc_max).
           Reply: player.entity.$x4coop_bubble (the list) and $x4coop_bubble_complete (1 if no eligible ship was left
           out), then raise 'x4coop.bubble'. param3: [radius in metres, 0 = off]
         -->
@@ -465,6 +465,7 @@
           </conditions>
           <actions>
             <set_value name="Root.$BubbleRadius" exact="event.param3.{1}"/>
+            <set_value name="Root.$BubbleMax" exact="if @event.param3.{2} gt 0 then event.param3.{2} else 40"/>
           </actions>
         </cue>
 
@@ -480,7 +481,7 @@
             <set_value name="$Bubble" exact="[]"/>
             <set_value name="$Complete" exact="1"/>
             <do_for_each name="$Candidate" in="$Found">
-              <do_if value="$Bubble.count ge 40">
+              <do_if value="$Bubble.count ge (if Root.$BubbleMax? then Root.$BubbleMax else 40)">
                 <set_value name="$Complete" exact="0"/>
               </do_if>
               <do_elseif value="$Candidate != $Center and $Candidate.isoperational and not $Candidate.ismasstraffic and not $Candidate.isunit and not @$Candidate.dock and $Candidate.parent.isclass.space and not Root.$AllProxies.indexof.{$Candidate} and not @Root.$Adopted.indexof.{$Candidate} and not @Root.$Mirrors.indexof.{$Candidate}">
@@ -502,7 +503,7 @@
                 <match_distance object="Root.$Proxy" max="Root.$BubbleRadius"/>
               </find_ship>
               <do_for_each name="$Candidate" in="$Found">
-                <do_if value="$Near.count ge 40">
+                <do_if value="$Near.count ge (if Root.$BubbleMax? then Root.$BubbleMax else 40)">
                   <set_value name="$NearComplete" exact="0"/>
                 </do_if>
                 <do_elseif value="$Candidate != player.occupiedship and $Candidate.isoperational and not $Candidate.ismasstraffic and not $Candidate.isunit and not @$Candidate.dock and $Candidate.parent.isclass.space and not Root.$AllProxies.indexof.{$Candidate} and not @Root.$Adopted.indexof.{$Candidate} and not @Root.$Mirrors.indexof.{$Candidate}">

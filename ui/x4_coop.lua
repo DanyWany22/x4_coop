@@ -36,7 +36,8 @@ Wire format (one message per pipe write, '|' separated, also used by the Python 
   R|role, L|world|role|ship|protocol, K|ship, D|ship|hull, F|ship       shared world (see that section)
   X|savedir|path, X|share|dir|file (game to its bridge), X|received|file (bridge to game)   save handoff
   X|profile_put|world|credits|wares, X|profile_get|world, X|profile|world|credits|wares   joiner's own wallet
-  B|t|sector|radius|complete|code,macro,owner,hull,x,y,z,yaw,pitch,roll,vx,vy,vz;...   host's nearby ships
+  B|t|sector|radius|complete|session|ax|ay|az|n[/code/macro/owner],hull,dx,dy,dz,yaw,pitch,roll,vx,vy,vz;...
+                                                                       nearby ships (see NPC_WIRE)
   W|text, N|text                                                       bridge welcome / notice
 ]]
 
@@ -94,7 +95,9 @@ local config = {
 	fire_fx = 1,              -- 1: proxies get a pilot and fire at what their player is hitting (ghost: what you hit)
 	npc_sync = 1,             -- 1: in a linked shared world, the host's nearby ships drive the joiner's copies
 	npc_radius = 6000,        -- m, "nearby"
-	npc_rate = 10,            -- NPC pose updates per second, each way
+	npc_rate = 10,            -- NPC pose updates per second, each way (most often: see NPC_WIRE)
+	npc_max = 80,             -- ships each way in the nearby-ship sync (md lists at most this many)
+	npc_precision = 1.5,      -- m: a nearby ship is sent again once it is this far off its last report's prediction
 	npc_mirror = 1,           -- create stand-ins for ships only the partner has, in its area
 	npc_remove = 1,           -- remove ships in the partner's area that only we have
 	npc_hull = 1,             -- take the partner's hull values for ships in its area
@@ -141,7 +144,7 @@ local config = {
 
 -- Bump when messages change meaning, so two different builds refuse to link instead of misreading each
 -- other. Builds before this check send no version and count as 1.
-local PROTOCOL = 4  -- 4: NPC sync both ways, economy (E)
+local PROTOCOL = 5  -- 4: NPC sync both ways, economy (E); 5: compact nearby-ship messages (B)
 
 local SETTINGS_KEY = { mode = "$x4coop_mode", backend = "$x4coop_backend" }
 local PIPES_MODULE = "extensions.sn_mod_support_apis.ui.named_pipes.Interface"
@@ -1246,7 +1249,30 @@ end
 --   * hull follows the partner's, except that our own fresh hits are not undone.
 -- Ships that were just killed are "dead" for a while, so they don't come back as stand-ins.
 
-local NPC_MAX = 40           -- ships per bubble (md lists at most this many)
+-- How nearby ships travel (B): each ship gets a short number, with its ID code, macro and owner sent the first time
+-- and every desc_every seconds; positions in decimetres from the sender's ship, angles in milliradians, speeds in
+-- decimetres a second, all whole numbers in base 36. A ship is sent when it has moved more than err metres (or turned
+-- more than ang radians) off where its last report predicts, at most every far_interval seconds unless it is within
+-- near metres of a player, and at least every keepalive seconds; messages stay under payload bytes.
+local NPC_WIRE = { payload = 1100, near = 2000, keepalive = 1, far_interval = 0.5, desc_every = 3, err = 1.5, ang = 0.03 }
+function NPC_WIRE.enc(n)  -- a whole number in base 36, "-" in front of a negative one
+	n = math.floor(n + 0.5)
+	local neg = n < 0
+	if neg then n = -n end
+	local digits, s = "0123456789abcdefghijklmnopqrstuvwxyz", ""
+	repeat
+		local d = n % 36
+		s = digits:sub(d + 1, d + 1) .. s
+		n = (n - d) / 36
+	until n == 0
+	return neg and ("-" .. s) or s
+end
+function NPC_WIRE.dec(s)
+	if type(s) ~= "string" or #s > 12 then return nil end
+	local neg = s:sub(1, 1) == "-"
+	local n = tonumber(neg and s:sub(2) or s, 36)
+	return n and (neg and -n or n)
+end
 local NPC_DEAD_HOLD = 30     -- s a killed ship stays dead here, whatever the partner still says
 local NPC_LOST_GRACE = 3     -- s to wait for the partner's verdict when our copy dies on its own
 local NPC_HOST_MARGIN = 1.1  -- joiner: ships within this times the host's radius of the host are the host's
@@ -1343,9 +1369,9 @@ local function npc_count(t)
 end
 
 -- Our area's ships, for the partner. Not the ones we move for the partner, and on the joiner's side not the
--- host's area (the host is the truth there).
+-- host's area (the host is the truth there). A header goes out every 1 / npc_rate s even with no ship in it.
 local function npc_send(now)
-	local N, P = S.npc, S.proxy
+	local N, P, W = S.npc, S.proxy, NPC_WIRE
 	if now - N.last_send < 1 / config.npc_rate or not S.loc.sector_macro then return end
 	local host_area
 	if S.link.role == "join" then
@@ -1355,7 +1381,16 @@ local function npc_send(now)
 		end
 	end
 	N.last_send = now
-	local entries, prev = {}, N.prev
+	N.idx_of, N.sent_state, N.desc_at = N.idx_of or {}, N.sent_state or {}, N.desc_at or {}
+	N.session = N.session or W.enc(math.random(0, 2176782335))
+	local own = C.GetPlayerOccupiedShipID()
+	local anchor = own ~= 0 and C.GetObjectPositionInSector(own) or { x = 0, y = 0, z = 0 }
+	local ax, ay, az = math.floor(anchor.x + 0.5), math.floor(anchor.y + 0.5), math.floor(anchor.z + 0.5)
+	local partner_pos = P.state == "live" and P.sector == S.loc.sector and C.GetObjectPositionInSector(P.id) or nil
+	local entries, prev, sent = {}, N.prev, N.sent_state
+	for code in pairs(sent) do
+		if not N.members[code] then sent[code] = nil end  -- gone from our area: sent in full when it's back
+	end
 	for code, m in pairs(N.members) do
 		local E = N.ents[code]
 		local moved_for_partner = E and now - (E.seen or 0) <= 2
@@ -1368,48 +1403,100 @@ local function npc_send(now)
 				vx, vy, vz = (p.x - q.x) / (now - q.t), (p.y - q.y) / (now - q.t), (p.z - q.z) / (now - q.t)
 			end
 			prev[code] = { t = now, x = p.x, y = p.y, z = p.z }
-			entries[#entries + 1] = string.format("%s,%s,%s,%.1f,%.2f,%.2f,%.2f,%.5f,%.5f,%.5f,%.2f,%.2f,%.2f",
-				alias_out(code), m.macro, tostring(m.owner or "ownerless"), tonumber(m.hull) or 100, p.x, p.y, p.z, p.yaw, p.pitch, p.roll, vx, vy, vz)
+			local hull = math.floor((tonumber(m.hull) or 100) + 0.5)
+			local last = sent[code]
+			local go = not last or now - last.t >= W.keepalive or hull ~= last.hull
+			if not go then
+				local near = distance(p, anchor) <= W.near or (partner_pos ~= nil and distance(p, partner_pos) <= W.near)
+				if near or now - last.t >= W.far_interval then
+					local dt = now - last.t
+					local ex, ey, ez = last.x + last.vx * dt - p.x, last.y + last.vy * dt - p.y, last.z + last.vz * dt - p.z
+					local err = config.npc_precision or W.err
+					go = ex * ex + ey * ey + ez * ez > err * err or math.abs(p.yaw - last.yaw) > W.ang
+						or math.abs(p.pitch - last.pitch) > W.ang or math.abs(p.roll - last.roll) > W.ang
+				end
+			end
+			if go then
+				sent[code] = { t = now, x = p.x, y = p.y, z = p.z, vx = vx, vy = vy, vz = vz, yaw = p.yaw, pitch = p.pitch,
+					roll = p.roll, hull = hull }
+				local idx = N.idx_of[code]
+				if not idx then
+					N.next_idx = (N.next_idx or 0) + 1
+					idx = W.enc(N.next_idx)
+					N.idx_of[code] = idx
+				end
+				local head = idx
+				if now - (N.desc_at[code] or -1e9) >= W.desc_every then
+					N.desc_at[code] = now
+					head = idx .. "/" .. alias_out(code) .. "/" .. m.macro .. "/" .. tostring(m.owner or "ownerless")
+				end
+				entries[#entries + 1] = table.concat({ head, hull, W.enc((p.x - ax) * 10), W.enc((p.y - ay) * 10),
+					W.enc((p.z - az) * 10), W.enc(p.yaw * 1000), W.enc(p.pitch * 1000), W.enc(p.roll * 1000), W.enc(vx * 10),
+					W.enc(vy * 10), W.enc(vz * 10) }, ",")
+			end
 		end
 	end
 	-- "complete" tells the partner it may remove ships we don't list; md says whether the list was cut off.
-	local msg = string.format("B|%.4f|%s|%d|%d|%s", now, S.loc.sector_macro, config.npc_radius, N.scan_complete and 1 or 0,
-		table.concat(entries, ";"))
-	net_send(msg)
-	N.tx_bytes, N.tx_max = (N.tx_bytes or 0) + #msg, math.max(N.tx_max or 0, #msg)
+	local head = string.format("B|%.4f|%s|%d|%d|%s|%d|%d|%d|", now, S.loc.sector_macro, config.npc_radius,
+		N.scan_complete and 1 or 0, N.session, ax, ay, az)
+	local i = 1
+	repeat
+		local parts, size = {}, #head
+		while entries[i] and (#parts == 0 or size + #entries[i] + 1 <= W.payload) do
+			parts[#parts + 1], size, i = entries[i], size + #entries[i] + 1, i + 1
+		end
+		local msg = head .. table.concat(parts, ";")
+		net_send(msg)
+		N.tx_bytes, N.tx_max = (N.tx_bytes or 0) + #msg, math.max(N.tx_max or 0, #msg)
+	until not entries[i]
 end
 
 -- One B message from the partner: the ships in its area, in its sector (which may not be ours).
 local function npc_receive(f, now)
-	local N = S.npc
+	local N, W = S.npc, NPC_WIRE
 	local t, radius = tonumber(f[2]), tonumber(f[4])
-	if not t or not f[3] or not f[3]:match("^[%w_]+$") or not radius or radius ~= radius then return end
+	local ax, ay, az = tonumber(f[7]), tonumber(f[8]), tonumber(f[9])
+	if not t or not f[3] or not f[3]:match("^[%w_]+$") or not radius or radius ~= radius or not (ax and ay and az)
+		or type(f[6]) ~= "string" or not f[6]:match("^%w+$") then return end
 	N.partner_radius, N.partner_complete, N.last_b = math.max(0, math.min(radius, config.npc_radius)), f[5] == "1", now
-	local size = #(f[6] or "") + #f[3] + 24
+	local size = #(f[10] or "") + #f[3] + 40
 	N.rx_bytes, N.rx_max = (N.rx_bytes or 0) + size, math.max(N.rx_max or 0, size)
 	if f[5] ~= "1" then N.cap_hits = (N.cap_hits or 0) + 1 end  -- the partner's list was cut off
+	if f[6] ~= N.rx_session then N.rx_session, N.rx_desc = f[6], {} end  -- the partner restarted: numbers start over
 	local taken = 0
-	for entry in (f[6] or ""):gmatch("[^;]+") do
-		if taken >= NPC_MAX then break end
+	for entry in (f[10] or ""):gmatch("[^;]+") do
+		if taken >= config.npc_max then break end
 		local v = {}
 		for field in entry:gmatch("[^,]+") do v[#v + 1] = field end
-		local code, macro, owner, hull = alias_in(v[1]), v[2], v[3], tonumber(v[4])
-		if #v == 13 and #code <= 16 and code:match("^[%w%-]+$") and #macro <= 80 and macro:match("^[%w_]+$")
-			and #owner <= 40 and owner:match("^[%w_]+$") and hull and hull >= 0 and hull <= 100
-			and not (N.dead[code] and now - N.dead[code] < NPC_DEAD_HOLD) and partner_rules(code) then
-			local s = { t = t, sector_macro = f[3], ship_macro = macro }
+		local idx, desc = (v[1] or ""):match("^(%w+)/(.+)$")
+		if idx then
+			local code, macro, owner = desc:match("^([%w%-]+)/([%w_]+)/([%w_]+)$")
+			if code and #code <= 16 and #macro <= 80 and #owner <= 40 then
+				N.rx_desc[idx] = { code = alias_in(code), macro = macro, owner = owner }
+			end
+		else
+			idx = v[1]
+		end
+		local d = idx and N.rx_desc[idx]
+		local hull = tonumber(v[2])
+		if d and #v == 11 and hull and hull >= 0 and hull <= 100
+			and not (N.dead[d.code] and now - N.dead[d.code] < NPC_DEAD_HOLD) and partner_rules(d.code) then
+			local s = { t = t, sector_macro = f[3], ship_macro = d.macro }
+			local scale = { x = 10, y = 10, z = 10, yaw = 1000, pitch = 1000, roll = 1000, vx = 10, vy = 10, vz = 10 }
+			local base = { x = ax, y = ay, z = az }
 			local okay = true
 			for i, k in ipairs({ "x", "y", "z", "yaw", "pitch", "roll", "vx", "vy", "vz" }) do
-				local num = tonumber(v[4 + i])
+				local num = W.dec(v[2 + i])
+				num = num and (base[k] or 0) + num / scale[k]
 				if not num or num ~= num or math.abs(num) > SNAPSHOT_LIMITS[k] then okay = false break end
 				s[k] = num
 			end
 			if okay then
 				taken = taken + 1
-				local E = N.ents[code] or { snaps = {}, first = now }
-				N.ents[code] = E
+				local E = N.ents[d.code] or { snaps = {}, first = now }
+				N.ents[d.code] = E
 				on_snapshot(s, now, E)
-				E.seen, E.macro, E.owner, E.hull = now, macro, owner, hull
+				E.seen, E.macro, E.owner, E.hull = now, d.macro, d.owner, hull
 				N.received = N.received + 1
 			end
 		end
@@ -1419,6 +1506,7 @@ end
 local function npc_reset_tables(N)
 	N.ents, N.members, N.near_partner, N.found, N.mirrors, N.mirror_of = {}, {}, {}, {}, {}, {}
 	N.pending, N.unmatched, N.dead, N.my_hits = {}, {}, {}, {}
+	N.idx_of, N.sent_state, N.desc_at, N.rx_desc, N.session, N.rx_session, N.next_idx = {}, {}, {}, {}, nil, nil, 0
 end
 
 -- md: a ship in our area was destroyed (not by the ship we fly: those are our kills, reported already).
@@ -1485,9 +1573,9 @@ end
 local function npc_tick(now, dt)
 	local N = S.npc
 	local radius = npc_enabled() and config.npc_radius or 0
-	if radius ~= N.sent_radius then
-		N.sent_radius = radius
-		request("bubble", { radius })
+	if radius ~= N.sent_radius or config.npc_max ~= N.sent_max then
+		N.sent_radius, N.sent_max = radius, config.npc_max
+		request("bubble", { radius, config.npc_max })
 		if radius == 0 then
 			request("npc_clear", {})
 			npc_reset_tables(N)
@@ -1548,7 +1636,7 @@ local function npc_tick(now, dt)
 			if E.had then E.lost = E.lost or now end
 			local settled = not E.had or now - E.lost >= NPC_LOST_GRACE
 			if config.npc_mirror == 1 and settled and now - E.first > 1 and now - (N.pending[code] or -1e9) > 5
-				and requested < 2 and stand_ins < NPC_MAX then
+				and requested < 2 and stand_ins < config.npc_max then
 				local newest = E.snaps[#E.snaps]
 				if newest then
 					requested, stand_ins = requested + 1, stand_ins + 1

@@ -222,7 +222,7 @@ GAME_FIELDS = {  # field names of the game's messages (see ui/x4_coop.lua), for 
     "S": "seq t sector ship x y z yaw pitch roll vx vy vz name idcode hull shield",
     "D": "code macro sector hull enemy", "K": "code macro sector", "F": "code macro sector",
     "L": "world role ship protocol", "M": "name text", "P": "t", "Q": "t", "R": "role",
-    "B": "t sector radius complete ships", "H": "host pid os t echo hold",
+    "B": "t sector radius complete session ax ay az ships", "H": "host pid os t echo hold",
     "E": "what pass index count station wares trades", "C": "what id amount name", "T": "what id station ware change", "V": "what relations ids", "U": "what id kind item extra", "Z": "what active factor note", "O": "what id code macro sector owner", "Y": "what id code macro sector shipyard name wares", "G": "what id ship order clear args params", "J": "what id ship default queue", "I": "what station macro sector room index x y z speed name",
     "b": "what id station macro sector x y z yaw pitch roll module x y z yaw pitch roll equipment",
     "q": "what id ship macro sector equipment",
